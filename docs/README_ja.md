@@ -1,8 +1,8 @@
 # Komari
 
-![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fkomari-monitor%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
+![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fshaolonger%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
 
-![komari](https://socialify.git.ci/komari-monitor/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
+![komari](https://socialify.git.ci/shaolonger/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
 
 Komariは、サーバーのパフォーマンスを監視するためのシンプルで効率的なソリューションを提供することを目的とした、軽量の自己ホスト型サーバー監視ツールです。Webインターフェースを介してサーバーのステータスを表示し、軽量エージェントを介してデータを収集します。
 
@@ -31,7 +31,7 @@ Komariは、サーバーのパフォーマンスを監視するためのシン�
 systemdを使用するディストリビューション（Ubuntu、Debianなど）に適しています。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o install-komari.sh
+curl -fsSL https://raw.githubusercontent.com/shaolonger/komari/main/install-komari.sh -o install-komari.sh
 chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
@@ -48,7 +48,7 @@ docker run -d \
   -p 25774:25774 \
   -v komari-data:/app/data \
   --name komari \
-  ghcr.io/komari-monitor/komari:latest
+  ghcr.io/shaolonger/komari:latest
 
 # 2. 安全なローカル一時ファイルから初期管理者パスワードを取得します（初回ログイン成功後に自動で安全に削除されます）：
 docker exec komari cat /app/data/init_password.txt
@@ -66,7 +66,7 @@ docker run -d \
   -p 25774:25774 \
   -v $(pwd)/data:/app/data \
   --name komari \
-  ghcr.io/komari-monitor/komari:latest
+  ghcr.io/shaolonger/komari:latest
 
 # 3. 初期管理者パスワードを読み取ります：
 cat ./data/init_password.txt
@@ -79,7 +79,7 @@ cat ./data/init_password.txt
 
 ### 3. バイナリファイル展開
 
-1. Komariの[GitHubリリース](https://github.com/komari-monitor/komari/releases)ページにアクセスして、お使いのオペレーティングシステム用の最新のバイナリをダウンロードします。
+1. Komariの[GitHubリリース](https://github.com/shaolonger/komari/releases)ページにアクセスして、お使いのオペレーティングシステム用の最新のバイナリをダウンロードします。
 2. Komariを実行します:
    ```bash
    ./komari server -l 0.0.0.0:25774
@@ -105,7 +105,7 @@ cat ./data/init_password.txt
    ```
 2. バックエンドをビルドします:
    ```bash
-   git clone https://github.com/komari-monitor/komari
+   git clone https://github.com/shaolonger/komari
    cd komari
    ```
    ステップ1で生成された静的ファイルを `komari` プロジェクトのルートにある `/public/defaultTheme/dist` フォルダにコピーし、`komari-theme.json` と `preview.png`/`perview.png` を `/public/defaultTheme` にコピーします。
@@ -158,4 +158,4 @@ PR を送ってくれた方、テーマを作成してくれた全ての開発�
 
 ## Star履歴
 
-[![Star History Chart](https://api.star-history.com/svg?repos=komari-monitor/komari&type=Date)](https://www.star-history.com/#komari-monitor/komari&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=shaolonger/komari&type=Date)](https://www.star-history.com/#shaolonger/komari&Date)

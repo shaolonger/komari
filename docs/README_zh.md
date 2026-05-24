@@ -1,8 +1,8 @@
 # Komari
 
-![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fkomari-monitor%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
+![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fshaolonger%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
 
-![komari](https://socialify.git.ci/komari-monitor/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
+![komari](https://socialify.git.ci/shaolonger/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
 
 Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单、高效的服务器性能监控解决方案。它支持通过 Web 界面查看服务器状态，并通过轻量级 Agent 收集数据。
 
@@ -31,7 +31,7 @@ Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单�
 适用于使用了 systemd 的发行版（Ubuntu、Debian...）。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o install-komari.sh
+curl -fsSL https://raw.githubusercontent.com/shaolonger/komari/main/install-komari.sh -o install-komari.sh
 chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
@@ -48,7 +48,7 @@ docker run -d \
   -p 25774:25774 \
   -v komari-data:/app/data \
   --name komari \
-  ghcr.io/komari-monitor/komari:latest
+  ghcr.io/shaolonger/komari:latest
 
 # 2. 从本地安全临时文件中获取初始管理员密码（首次成功登录后会自动彻底销毁）：
 docker exec komari cat /app/data/init_password.txt
@@ -66,7 +66,7 @@ docker run -d \
   -p 25774:25774 \
   -v $(pwd)/data:/app/data \
   --name komari \
-  ghcr.io/komari-monitor/komari:latest
+  ghcr.io/shaolonger/komari:latest
 
 # 3. 读取初始管理员密码：
 cat ./data/init_password.txt
@@ -79,7 +79,7 @@ cat ./data/init_password.txt
 
 ### 3. 二进制文件部署
 
-1. 访问 Komari 的 [GitHub Release 页面](https://github.com/komari-monitor/komari/releases) 下载适用于你操作系统的最新二进制文件。
+1. 访问 Komari 的 [GitHub Release 页面](https://github.com/shaolonger/komari/releases) 下载适用于你操作系统的最新二进制文件。
 2. 运行 Komari：
    ```bash
    ./komari server -l 0.0.0.0:25774
@@ -105,7 +105,7 @@ cat ./data/init_password.txt
    ```
 2. 构建后端：
    ```bash
-   git clone https://github.com/komari-monitor/komari
+   git clone https://github.com/shaolonger/komari
    cd komari
    ```
    将步骤1中生成的静态文件复制到 `komari` 项目根目录下的 `/public/defaultTheme/dist` 文件夹，并将 `komari-theme.json` 与 `preview.png`/`perview.png` 复制到 `/public/defaultTheme`。
@@ -158,4 +158,4 @@ SharonNetworks 为您的业务起飞保驾护航！
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=komari-monitor/komari&type=Date)](https://www.star-history.com/#komari-monitor/komari&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=shaolonger/komari&type=Date)](https://www.star-history.com/#shaolonger/komari&Date)

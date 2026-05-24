@@ -1,9 +1,9 @@
 # Komari
 
-![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fkomari-monitor%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/komari-monitor/komari)
+![Badge](https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fshaolonger%2Fkomari&label=&icon=github&color=%23a370f7&message=&style=flat&tz=UTC)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shaolonger/komari)
 
-![komari](https://socialify.git.ci/komari-monitor/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
+![komari](https://socialify.git.ci/shaolonger/komari/image?description=1&font=Inter&forks=1&issues=1&language=1&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fkomari-monitor%2Fkomari-web%2Fd54ce1288df41ead08aa19f8700186e68028a889%2Fpublic%2Ffavicon.png&name=1&owner=1&pattern=Plus&pulls=1&stargazers=1&theme=Auto)
 
 [简体中文](./docs/README_zh.md) | [繁體中文](./docs/README_zh-TW.md) | [日本語](./docs/README_ja.md)
 
@@ -34,7 +34,7 @@ Available on 1Panel App Store. Install via **App Store > Utilities > Komari**.
 Suitable for distributions using systemd (Ubuntu, Debian...).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/komari-monitor/komari/main/install-komari.sh -o install-komari.sh
+curl -fsSL https://raw.githubusercontent.com/shaolonger/komari/main/install-komari.sh -o install-komari.sh
 chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
@@ -51,7 +51,7 @@ docker run -d \
   -p 25774:25774 \
   -v komari-data:/app/data \
   --name komari \
-  ghcr.io/komari-monitor/komari:latest
+  ghcr.io/shaolonger/komari:latest
 
 # 2. Retrieve the initial password from the secure local file (deleted automatically after first login):
 docker exec komari cat /app/data/init_password.txt
@@ -69,7 +69,7 @@ docker run -d \
   -p 25774:25774 \
   -v $(pwd)/data:/app/data \
   --name komari \
-  ghcr.io/komari-monitor/komari:latest
+  ghcr.io/shaolonger/komari:latest
 
 # 3. Retrieve the initial password:
 cat ./data/init_password.txt
@@ -82,7 +82,7 @@ cat ./data/init_password.txt
 
 ### 3. Binary File Deployment
 
-1. Visit Komari's [GitHub Release page](https://github.com/komari-monitor/komari/releases) to download the latest binary for your operating system.
+1. Visit Komari's [GitHub Release page](https://github.com/shaolonger/komari/releases) to download the latest binary for your operating system.
 2. Run Komari:
    ```bash
    ./komari server -l 0.0.0.0:25774
@@ -108,7 +108,7 @@ cat ./data/init_password.txt
    ```
 2. Build the backend:
    ```bash
-   git clone https://github.com/komari-monitor/komari
+   git clone https://github.com/shaolonger/komari
    cd komari
    ```
    Copy the static files generated in step 1 to the `/public/defaultTheme/dist` folder in the root of the `komari` project, and copy `komari-theme.json` + `preview.png`/`perview.png` to `/public/defaultTheme`.
@@ -157,4 +157,4 @@ All the developers who submitted PRs and created themes
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=komari-monitor/komari&type=Date)](https://www.star-history.com/#komari-monitor/komari&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=shaolonger/komari&type=Date)](https://www.star-history.com/#shaolonger/komari&Date)
