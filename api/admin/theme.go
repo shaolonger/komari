@@ -156,12 +156,48 @@ func SetTheme(c *gin.Context) {
 func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	var themeInfo models.Theme
 
+	const (
+		MaxZipSize        = 10 * 1024 * 1024 // 10MB
+		MaxTotalUnzipSize = 30 * 1024 * 1024 // 30MB
+		MaxFileCount      = 200
+		MaxSingleFileSize = 5 * 1024 * 1024  // 5MB
+	)
+
+	// 1. 验证ZIP文件本身的大小限制
+	info, err := os.Stat(zipPath)
+	if err != nil {
+		return themeInfo, fmt.Errorf("无法获取主题文件信息: %v", err)
+	}
+	if info.Size() > MaxZipSize {
+		return themeInfo, fmt.Errorf("主题包文件大小超过限制 (最大 10MB)")
+	}
+
 	// 打开ZIP文件
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return themeInfo, fmt.Errorf("无法打开ZIP文件: %v", err)
 	}
 	defer r.Close()
+
+	// 2. 限制文件数量
+	if len(r.File) > MaxFileCount {
+		return themeInfo, fmt.Errorf("主题包内文件数量超过限制 (最大 200 个)")
+	}
+
+	// 3. 预先计算总解压大小和单文件解压大小限制
+	var totalUnzippedSize int64
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if f.UncompressedSize64 > uint64(MaxSingleFileSize) {
+			return themeInfo, fmt.Errorf("主题包内单个文件解压大小超过限制 (最大 5MB): %s", f.Name)
+		}
+		totalUnzippedSize += int64(f.UncompressedSize64)
+	}
+	if totalUnzippedSize > MaxTotalUnzipSize {
+		return themeInfo, fmt.Errorf("主题包总解压大小超过限制 (最大 30MB)")
+	}
 
 	// 查找komari-theme.json文件
 	var themeConfigFile *zip.File
@@ -247,7 +283,9 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 			return themeInfo, fmt.Errorf("创建文件失败: %v", err)
 		}
 
-		_, err = io.Copy(outFile, rc)
+		// 使用 LimitReader 保证写入不超过限制
+		limitedRc := io.LimitReader(rc, MaxSingleFileSize)
+		_, err = io.Copy(outFile, limitedRc)
 		outFile.Close()
 		rc.Close()
 
@@ -291,7 +329,40 @@ func isValidThemeShort(short string) bool {
 	return true
 }
 
-// downloadThemeFromURL 从URL下载主题文件
+var allowedThemeDomains = []string{
+	"github.com",
+	"api.github.com",
+	"raw.githubusercontent.com",
+	"objects.githubusercontent.com",
+	"github-releases.githubusercontent.com",
+}
+
+func isDomainAllowed(host string) bool {
+	host = strings.ToLower(host)
+	for _, domain := range allowedThemeDomains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
+var themeHttpClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		host := req.URL.Hostname()
+		if !isDomainAllowed(host) {
+			return fmt.Errorf("redirect target domain not allowed: %s", host)
+		}
+		if isPrivateIP(host) {
+			return fmt.Errorf("redirect target points to a private address")
+		}
+		return nil
+	},
+}
+
 // isPrivateIP checks if the resolved IP addresses are private/internal
 func isPrivateIP(host string) bool {
 	ips, err := net.LookupHost(host)
@@ -310,8 +381,9 @@ func isPrivateIP(host string) bool {
 	return false
 }
 
+// downloadThemeFromURL 从URL下载主题文件
 func downloadThemeFromURL(rawURL string) ([]byte, error) {
-	// SSRF protection: block requests to private/internal IPs
+	// SSRF protection: block requests to private/internal IPs and non-whitelisted domains
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %v", err)
@@ -319,12 +391,16 @@ func downloadThemeFromURL(rawURL string) ([]byte, error) {
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
 		return nil, fmt.Errorf("only http and https schemes are allowed")
 	}
-	if isPrivateIP(parsedURL.Hostname()) {
+	host := parsedURL.Hostname()
+	if !isDomainAllowed(host) {
+		return nil, fmt.Errorf("domain %s is not in the allowed whitelist", host)
+	}
+	if isPrivateIP(host) {
 		return nil, fmt.Errorf("requests to private/internal addresses are not allowed")
 	}
 
 	// 发送HTTP GET请求
-	resp, err := http.Get(rawURL)
+	resp, err := themeHttpClient.Get(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("下载主题文件失败: %v", err)
 	}
@@ -350,26 +426,16 @@ func downloadThemeFromURL(rawURL string) ([]byte, error) {
 }
 
 // getGitHubReleaseDownloadURL 从GitHub API获取最新release的下载链接
-// 该函数通过GitHub API获取指定仓库最新release的资源下载链接
-// 参考API: https://api.github.com/repos/{owner}/{repo}/releases/latest
-// 参数:
-//   - owner: GitHub仓库所有者
-//   - repo: GitHub仓库名称
-//
-// 返回:
-//   - 最新release的第一个资源的下载链接
-//   - 错误信息（如果有）
 func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 	if owner == "" || repo == "" {
 		return "", errors.New("GitHub仓库所有者和仓库名称不能为空")
 	}
 
 	// 构建GitHub API URL
-	// 使用GitHub API获取最新release信息
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 
 	// 发送HTTP GET请求
-	resp, err := http.Get(apiURL)
+	resp, err := themeHttpClient.Get(apiURL)
 	if err != nil {
 		return "", fmt.Errorf("获取GitHub release信息失败: %v", err)
 	}
@@ -381,7 +447,6 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 	}
 
 	// 解析JSON响应
-	// GitHub API返回的JSON包含assets数组，每个asset包含browser_download_url字段
 	var releaseInfo struct {
 		Assets []struct {
 			BrowserDownloadURL string `json:"browser_download_url"`
@@ -397,8 +462,6 @@ func getGitHubReleaseDownloadURL(owner, repo string) (string, error) {
 		return "", errors.New("GitHub release中没有可下载的资源")
 	}
 
-	// 返回第一个资源的下载链接
-	// 相当于shell命令: curl -s https://api.github.com/repos/owner/repo/releases/latest | jq -r ".assets[0].browser_download_url"
 	return releaseInfo.Assets[0].BrowserDownloadURL, nil
 }
 
