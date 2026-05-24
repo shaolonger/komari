@@ -1,8 +1,6 @@
 module github.com/komari-monitor/komari
 
-go 1.24.0
-
-toolchain go1.24.11
+go 1.25.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.15.0
@@ -16,20 +14,20 @@ require (
 	github.com/pquerna/otp v1.5.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/image v0.35.0
-	google.golang.org/grpc v1.75.0
-	google.golang.org/protobuf v1.36.6
+	golang.org/x/image v0.39.0
+	google.golang.org/grpc v1.79.3
+	google.golang.org/protobuf v1.36.10
 	gorm.io/driver/sqlite v1.5.7
 	gorm.io/gorm v1.26.1
 )
 
 // Misuse of ServerConfig.PublicKeyCallback may cause authorization bypass in golang.org/x/crypto #1
 // golang.org/x/crypto Vulnerable to Denial of Service (DoS) via Slow or Incomplete Key Exchange #3
-require golang.org/x/crypto v0.39.0 // indirect
+require golang.org/x/crypto v0.46.0 // indirect
 
 // HTTP Proxy bypass using IPv6 Zone IDs in golang.org/x/net #2
 // golang.org/x/net vulnerable to Cross-site Scripting #4
-require golang.org/x/net v0.41.0 // indirect
+require golang.org/x/net v0.48.0 // indirect
 
 require (
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
@@ -40,7 +38,7 @@ require (
 	github.com/dlclark/regexp2 v1.11.4 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
 	github.com/gin-contrib/sse v1.0.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.26.0 // indirect
@@ -65,10 +63,10 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	golang.org/x/arch v0.15.0 // indirect
-	golang.org/x/oauth2 v0.30.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
+	golang.org/x/oauth2 v0.34.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
