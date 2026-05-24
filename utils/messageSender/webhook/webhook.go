@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
 
@@ -32,6 +33,50 @@ func isPrivateIP(host string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+func isDomainAllowed(host string) bool {
+	allowedDomainsConfig, _ := config.GetAs[string]("webhook_allowed_domains", "")
+	
+	// 如果管理员配置了白名单，按管理员配置执行
+	if allowedDomainsConfig != "" {
+		allowedList := strings.Split(allowedDomainsConfig, ",")
+		for _, allowed := range allowedList {
+			allowed = strings.TrimSpace(allowed)
+			if allowed == "" {
+				continue
+			}
+			// 支持通配符匹配 (如 *.feishu.cn)
+			if strings.HasPrefix(allowed, "*.") {
+				suffix := allowed[1:] // ".feishu.cn"
+				if strings.HasSuffix(host, suffix) || host == allowed[2:] {
+					return true
+				}
+			} else if host == allowed {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 默认安全白名单，仅放行常见受信通知通道，防止将 Webhook 当作任意 SSRF 发射站
+	defaultAllowed := []string{
+		"api.telegram.org",
+		"discord.com",
+		"discordapp.com",
+		"api.day.app", // Bark
+		"qyapi.weixin.qq.com", // 企业微信
+		"open.feishu.cn", // 飞书
+		"oapi.dingtalk.com", // 钉钉
+	}
+
+	for _, allowed := range defaultAllowed {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -63,6 +108,12 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("only http and https schemes are allowed for webhook")
 	}
+	
+	// P2-04 安全整改：对 Webhook 目标域名进行白名单验证，防止任意 SSRF 漏洞
+	if !isDomainAllowed(u.Hostname()) {
+		return fmt.Errorf("webhook host %s is not permitted in the whitelist", u.Hostname())
+	}
+
 	if isPrivateIP(u.Hostname()) {
 		return fmt.Errorf("webhook URL points to a private/internal IP address which is prohibited for security compliance")
 	}

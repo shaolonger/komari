@@ -1,10 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"database/sql"
-	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -179,7 +176,8 @@ func hasTempAccess(c *gin.Context) bool {
 }
 
 func ExtractClientToken(c *gin.Context) string {
-	// 1. 优先从 Authorization Header (如 Bearer <token>) 中提取 Client Token
+	// P1-05 安全整改：严格限制 Client Token 仅能通过 Authorization Header 传输
+	// 禁止通过 URL Query 或 JSON Body 携带敏感 Token，防范日志泄露与中介截获风险
 	authHeader := c.GetHeader("Authorization")
 	if authHeader != "" {
 		if strings.HasPrefix(authHeader, "Bearer ") {
@@ -189,32 +187,6 @@ func ExtractClientToken(c *gin.Context) string {
 			}
 		} else if len(authHeader) < 100 && !isApiKeyValid("Bearer "+authHeader) {
 			return authHeader
-		}
-	}
-
-	// 2. 其次从 URL Query 提取
-	token := c.Query("token")
-	if token != "" {
-		return token
-	}
-
-	// 3. 最后从 JSON body 提取
-	if c.Request.Method != http.MethodGet {
-		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			return ""
-		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-		var bodyMap map[string]interface{}
-		if len(bodyBytes) > 0 {
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
-				if tokenVal, exists := bodyMap["token"]; exists {
-					if str, ok := tokenVal.(string); ok && str != "" {
-						return str
-					}
-				}
-			}
 		}
 	}
 

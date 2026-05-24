@@ -162,9 +162,20 @@ func OnRpcRequest(c *gin.Context) {
 // detectPermissionGroup 提取权限分组，与原逻辑保持一致
 func detectPermissionGroup(c *gin.Context) string {
 	permissionGroup := "guest"
-	token := c.Query("Authorization")
-	if _, err := clients.GetClientUUIDByToken(token); err == nil {
-		permissionGroup = "client"
+	// P1-05 安全整改：严格限制 Client Token 仅能通过 Authorization Header 传输，防范日志泄露风险
+	authHeader := c.GetHeader("Authorization")
+	var token string
+	if authHeader != "" {
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		} else {
+			token = authHeader
+		}
+	}
+	if token != "" {
+		if _, err := clients.GetClientUUIDByToken(token); err == nil {
+			permissionGroup = "client"
+		}
 	}
 	if session_token, _ := c.Cookie("session_token"); session_token != "" {
 		if _, err := accounts.GetUserBySession(session_token); err == nil {
@@ -185,13 +196,14 @@ func detectPermissionGroup(c *gin.Context) string {
 // buildContextMeta 从 gin.Context 构建 *rpc.ContextMeta
 func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 	meta := &rpc.ContextMeta{Permission: permissionGroup}
-	// 提取客户端 token (query Authorization / Header Authorization Bearer token)
-	token := c.Query("Authorization")
-	if token == "" {
-		// 兼容 header Bearer <token>
-		hAuth := c.GetHeader("Authorization")
-		if strings.HasPrefix(hAuth, "Bearer ") {
-			token = strings.TrimPrefix(hAuth, "Bearer ")
+	// P1-05 安全整改：严格限制 Client Token 仅能通过 Authorization Header 传输，防范日志泄露风险
+	var token string
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		} else {
+			token = authHeader
 		}
 	}
 	if token != "" {

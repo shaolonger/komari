@@ -8,20 +8,13 @@ ARG TARGETARCH
 
 RUN apk add --no-cache ca-certificates curl tzdata
 
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) cloudflared_arch="amd64" ;; \
-      386) cloudflared_arch="386" ;; \
-      arm64) cloudflared_arch="arm64" ;; \
-      arm) cloudflared_arch="arm" ;; \
-      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cloudflared_arch}" -o /usr/local/bin/cloudflared; \
-    chmod +x /usr/local/bin/cloudflared
+RUN addgroup -S -g 10001 komari && adduser -S -u 10001 -G komari komari
 
 COPY komari-${TARGETOS}-${TARGETARCH} /app/komari
 
-RUN chmod +x /app/komari
+RUN chmod +x /app/komari && \
+    mkdir -p /app/data && \
+    chown -R komari:komari /app
 
 ENV GIN_MODE=release
 ENV KOMARI_DB_TYPE=sqlite
@@ -34,5 +27,7 @@ ENV KOMARI_DB_NAME=komari
 ENV KOMARI_LISTEN=0.0.0.0:25774
 
 EXPOSE 25774
+
+USER komari
 
 CMD ["/app/komari", "server"]

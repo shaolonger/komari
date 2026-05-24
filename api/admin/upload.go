@@ -42,6 +42,13 @@ func UploadBackup(c *gin.Context) {
 		return
 	}
 
+	// P1-08 安全整改：对备份上传文件大小限制为最大 100MB，防止大文件耗尽磁盘
+	const MaxBackupSize = 100 * 1024 * 1024 // 100MB
+	if header.Size > MaxBackupSize {
+		api.RespondError(c, http.StatusRequestEntityTooLarge, "Backup file size exceeds the 100MB limit")
+		return
+	}
+
 	// 确保data目录存在
 	if err := os.MkdirAll("./data", 0755); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error creating data directory: %v", err))
@@ -57,27 +64,60 @@ func UploadBackup(c *gin.Context) {
 	tempFilePath := tempFile.Name()
 	defer os.Remove(tempFilePath) // 确保临时文件最终被删除
 
-	// 将上传的文件内容复制到临时文件
-	_, err = io.Copy(tempFile, file)
+	// 将上传的文件内容复制到临时文件，并加 LimitReader 限制以防篡改或 chunked 漏洞绕过
+	limitedReader := io.LimitReader(file, MaxBackupSize+1)
+	written, err := io.Copy(tempFile, limitedReader)
 	if err != nil {
 		tempFile.Close()
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error saving uploaded file: %v", err))
 		return
 	}
+	if written > MaxBackupSize {
+		tempFile.Close()
+		api.RespondError(c, http.StatusRequestEntityTooLarge, "Backup file size exceeds the 100MB limit")
+		return
+	}
 	tempFile.Close() // 关闭文件以便后续操作
 
-	// 基础校验：检查是否包含标记文件
+	// P1-08 安全整改：在打开并解析 ZIP 时执行文件数与解压后体积校验，防止 Zip Bomb 攻击
+	const (
+		MaxFileCount      = 1000
+		MaxSingleFileSize = 100 * 1024 * 1024 // 单个文件 100MB
+		MaxTotalUnzipSize = 300 * 1024 * 1024 // 总解压 300MB
+	)
+
 	if zr, err := zip.OpenReader(tempFilePath); err == nil {
+		defer zr.Close()
+
+		if len(zr.File) > MaxFileCount {
+			api.RespondError(c, http.StatusBadRequest, "Invalid backup: file count inside zip exceeds 1000 limit")
+			return
+		}
+
+		var totalUnzipSize int64
 		hasMarkup := false
+
 		for _, f := range zr.File {
 			if f.Name == "komari-backup-markup" {
 				hasMarkup = true
-				break
 			}
+			if f.FileInfo().IsDir() {
+				continue
+			}
+			if f.UncompressedSize64 > uint64(MaxSingleFileSize) {
+				api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("Invalid backup: single file uncompressed size exceeds limit: %s", f.Name))
+				return
+			}
+			totalUnzipSize += int64(f.UncompressedSize64)
 		}
-		zr.Close()
+
 		if !hasMarkup {
 			api.RespondError(c, http.StatusBadRequest, "Invalid backup file: missing komari-backup-markup file")
+			return
+		}
+
+		if totalUnzipSize > MaxTotalUnzipSize {
+			api.RespondError(c, http.StatusBadRequest, "Invalid backup: total uncompressed size exceeds 300MB limit")
 			return
 		}
 	} else {

@@ -148,6 +148,12 @@ install_binary() {
     log_step "创建数据目录: $DATA_DIR"
     mkdir -p "$DATA_DIR"
 
+    # Ensure system user 'komari' exists
+    if ! id -u komari >/dev/null 2>&1; then
+        log_step "创建无登录权限的系统账户 'komari'..."
+        useradd -r -s /bin/false komari
+    fi
+
     local file_name="komari-linux-${arch}"
     local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
 
@@ -160,12 +166,14 @@ install_binary() {
     fi
 
     chmod +x "$BINARY_PATH"
-    log_success "Komari 二进制文件安装完成: $BINARY_PATH"
+    chown -R komari:komari "$INSTALL_DIR"
+    chown -R komari:komari "$DATA_DIR"
+    log_success "Komari 二进制文件安装完成并已设置非 root 用户权限"
 
     if ! check_systemd; then
         log_step "警告：未检测到 systemd，跳过服务创建。"
-        log_step "您可以从命令行手动运行 Komari："
-        log_step "    $BINARY_PATH server -l 0.0.0.0:$LISTEN_PORT"
+        log_step "您可以从命令行以 komari 用户手动运行 Komari："
+        log_step "    sudo -u komari $BINARY_PATH server -l 0.0.0.0:$LISTEN_PORT"
         echo
         log_success "安装完成！"
         return
@@ -210,7 +218,8 @@ Type=simple
 ExecStart=${BINARY_PATH} server -l 0.0.0.0:${port}
 WorkingDirectory=${DATA_DIR}
 Restart=always
-User=root
+User=komari
+Group=komari
 
 [Install]
 WantedBy=multi-user.target

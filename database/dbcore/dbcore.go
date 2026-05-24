@@ -125,6 +125,31 @@ func unzipToDir(zipPath, dstDir string) error {
 	}
 	defer zr.Close()
 
+	// P1-08 安全整改：防范解压阶段的 Zip Bomb 攻击
+	const (
+		MaxFileCount      = 1000
+		MaxSingleFileSize = 100 * 1024 * 1024 // 100MB
+		MaxTotalUnzipSize = 300 * 1024 * 1024 // 300MB
+	)
+
+	if len(zr.File) > MaxFileCount {
+		return fmt.Errorf("zip file contains too many files (max %d)", MaxFileCount)
+	}
+
+	var totalUnzippedSize int64
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if f.UncompressedSize64 > uint64(MaxSingleFileSize) {
+			return fmt.Errorf("single file inside zip exceeds uncompressed size limit (max 100MB): %s", f.Name)
+		}
+		totalUnzippedSize += int64(f.UncompressedSize64)
+	}
+	if totalUnzippedSize > MaxTotalUnzipSize {
+		return fmt.Errorf("total uncompressed size of zip exceeds limit (max 300MB)")
+	}
+
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return err
 	}
@@ -155,11 +180,21 @@ func unzipToDir(zipPath, dstDir string) error {
 			rc.Close()
 			return err
 		}
-		if _, err := io.Copy(out, rc); err != nil {
+
+		// 使用 LimitReader 加固单文件写入过程中的大小防线
+		limitedReader := io.LimitReader(rc, MaxSingleFileSize+1)
+		written, err := io.Copy(out, limitedReader)
+		if err != nil {
 			out.Close()
 			rc.Close()
 			return err
 		}
+		if written > MaxSingleFileSize {
+			out.Close()
+			rc.Close()
+			return fmt.Errorf("file %s exceeded single file uncompressed limit during extraction", f.Name)
+		}
+
 		out.Close()
 		rc.Close()
 	}
