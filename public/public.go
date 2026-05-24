@@ -83,6 +83,9 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			config.SitenameKey:    "Komari Monitor",
 			config.ThemeKey:       DefaultTheme,
 		})
+		// P2-03 安全整改：禁用自定义 HTML/JS 注入能力，防止 Stored XSS 风险
+		cfg[config.CustomHeadKey] = ""
+		cfg[config.CustomBodyKey] = ""
 		return cfg
 	}
 
