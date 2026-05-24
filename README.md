@@ -78,7 +78,7 @@ cat ./data/init_password.txt
 4. Access `http://<your_server_ip>:25774` in your browser.
 
 > [!IMPORTANT]
-> To comply with security guidelines, the default random administrator password is **never written to container stdout/stderr logs**. It is strictly written to `/app/data/init_password.txt` and is securely shredded immediately upon the first successful login. You can also bypass this by providing custom initial credentials through the `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment variables.
+> To comply with security guidelines, the default random administrator password is **never written to persistent container or system startup logs**. It is strictly written to a secure file `/app/data/init_password.txt` and is securely shredded immediately upon the first successful login. You can also bypass this by providing custom initial credentials through the `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment variables.
 
 ### 3. Binary File Deployment
 
@@ -88,7 +88,7 @@ cat ./data/init_password.txt
    ./komari server -l 0.0.0.0:25774
    ```
 3. Access `http://<your_server_ip>:25774` in your browser. The default port is `25774`.
-4. The default username and password can be found in the startup logs or set via the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+4. The default username is `admin`, and the random initial password is securely saved to `data/init_password.txt` under your running directory (never printed to startup logs or stdout). Verify this file is deleted automatically upon your first successful login, or customize them beforehand using the `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment variables.
 
 > [!NOTE]
 > Ensure the binary has execute permissions (`chmod +x komari`). Data will be saved in the `data` folder in the running directory.

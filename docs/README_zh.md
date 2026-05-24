@@ -75,7 +75,7 @@ cat ./data/init_password.txt
 4. 在浏览器中访问 `http://<your_server_ip>:25774`。
 
 > [!IMPORTANT]
-> 为了符合安全审计规范，随机生成的默认管理员密码**绝对不会被写入控制台、标准输出（stdout/stderr）或 Docker 容器日志中**。它被严格且安全地写入容器内部的 `/app/data/init_password.txt` 文件中，并在管理员首次登录成功后立刻被粉碎销毁。你也可以在启动时使用环境变量 `ADMIN_USERNAME` 与 `ADMIN_PASSWORD` 指定你自己的初始用户名和密码。
+> 为了符合安全审计规范，随机生成的默认管理员密码**绝对不会被写入持久化的容器日志或系统服务启动日志中**。它被严格且安全地写入容器内部的 `/app/data/init_password.txt` 文件中，并在管理员首次登录成功后立刻被粉碎销毁。你也可以在启动时使用环境变量 `ADMIN_USERNAME` 与 `ADMIN_PASSWORD` 指定你自己的初始用户名和密码。
 
 ### 3. 二进制文件部署
 
@@ -85,7 +85,7 @@ cat ./data/init_password.txt
    ./komari server -l 0.0.0.0:25774
    ```
 3. 在浏览器中访问 `http://<your_server_ip>:25774`，默认监听 `25774` 端口。
-4. 默认账号和密码可在启动日志中查看，或通过环境变量 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 设置。
+4. 默认账号为 `admin`，随机生成的初始密码会安全写入运行目录下的 `data/init_password.txt` 文件中（不会回显到启动终端或系统日志中）。请在首次成功登录后确认该文件已被自动粉碎擦除，或在启动前通过环境变量 `ADMIN_USERNAME` 与 `ADMIN_PASSWORD` 进行指定。
 
 > [!NOTE]
 > 确保二进制文件具有可执行权限（`chmod +x komari`）。数据将保存在运行目录下的 `data` 文件夹中。

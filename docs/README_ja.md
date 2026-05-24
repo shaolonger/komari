@@ -38,26 +38,44 @@ sudo ./install-komari.sh
 
 ### 2. Docker展開
 
-1. データディレクトリを作成します:
-   ```bash
-   mkdir -p ./data
-   ```
-2. Dockerコンテナを実行します:
-   ```bash
-   docker run -d \
-     -p 25774:25774 \
-     -v $(pwd)/data:/app/data \
-     --name komari \
-     ghcr.io/komari-monitor/komari:latest
-   ```
-3. デフォルトのユーザー名とパスワードを表示します:
-   ```bash
-   docker logs komari
-   ```
+最大限のセキュリティ・コンプライアンスを確保するため、公式のDockerコンテナは**非rootユーザー**（`UID/GID 10001`）として実行されます。
+
+#### オプションA：命名ボリューム（推奨）
+Dockerは命名ボリュームの所有権を自動的に管理するため、非rootコンテナがデータを読み書きするのに最適な権限を確保できます。
+```bash
+# 1. 命名ボリュームを使用してコンテナを実行します
+docker run -d \
+  -p 25774:25774 \
+  -v komari-data:/app/data \
+  --name komari \
+  ghcr.io/komari-monitor/komari:latest
+
+# 2. 安全なローカル一時ファイルから初期管理者パスワードを取得します（初回ログイン成功後に自動で安全に削除されます）：
+docker exec komari cat /app/data/init_password.txt
+```
+
+#### オプションB：ホストディレクトリのマウント
+もしホストディレクトリをマウントする場合は、**必ず**事前にホスト側で適切な所有者権限を設定してください：
+```bash
+# 1. ディレクトリを作成し、非rootユーザーの所有権に設定します
+mkdir -p ./data
+chown -R 10001:10001 ./data
+
+# 2. コンテナを実行します
+docker run -d \
+  -p 25774:25774 \
+  -v $(pwd)/data:/app/data \
+  --name komari \
+  ghcr.io/komari-monitor/komari:latest
+
+# 3. 初期管理者パスワードを読み取ります：
+cat ./data/init_password.txt
+```
+
 4. ブラウザで `http://<your_server_ip>:25774` にアクセスします。
 
-> [!NOTE]
-> 環境変数 `ADMIN_USERNAME` と `ADMIN_PASSWORD` を使用して、初期のユーザー名とパスワードをカスタマイズすることもできます。
+> [!IMPORTANT]
+> セキュリティ監査仕様に準拠するため、ランダムに生成されるデフォルトの管理者パスワードは、**永続化されるコンテナログやシステムサービスの起動ログには決して書き込まれません**。コンテナ内部の `/app/data/init_password.txt` ファイルに厳格かつ安全に書き込まれ、管理者が初めてログインに成功した直後に自動で安全に消去されます。起動前に環境変数 `ADMIN_USERNAME` と `ADMIN_PASSWORD` を使用して、独自の初期ユーザー名とパスワードを指定することも可能です。
 
 ### 3. バイナリファイル展開
 
@@ -67,7 +85,7 @@ sudo ./install-komari.sh
    ./komari server -l 0.0.0.0:25774
    ```
 3. ブラウザで `http://<your_server_ip>:25774` にアクセスします。デフォルトのポートは `25774` です。
-4. デフォルトのユーザー名とパスワードは、起動ログで確認するか、環境変数 `ADMIN_USERNAME` と `ADMIN_PASSWORD` を介して設定できます。
+4. デフォルトの管理者ユーザー名は `admin` です。ランダムに生成される初期パスワードは、実行ディレクトリ内の `data/init_password.txt` に安全に書き込まれ、コンソールやシステムログには記録されません。初回ログイン成功後にそのファイルが消去されていることを確認してください。または、起動前に環境変数 `ADMIN_USERNAME` と `ADMIN_PASSWORD` を設定して事前に指定することもできます。
 
 > [!NOTE]
 > バイナリに実行権限があることを確認してください（`chmod +x komari`）。データは実行ディレクトリの `data` フォルダに保存されます。
