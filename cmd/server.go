@@ -133,6 +133,7 @@ func RunServer() {
 	r := gin.New()
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
+	r.Use(utils.EnforceHTTPSMiddleware())
 
 	// 动态 CORS 中间件
 
@@ -388,7 +389,21 @@ func InitDatabase() {
 		if err != nil {
 			panic(err)
 		}
-		log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+		if os.Getenv("ADMIN_PASSWORD") != "" {
+			log.Printf("Default admin account created. Username: %s. Password was configured via ADMIN_PASSWORD environment variable.\n", user)
+		} else {
+			// P0-03 安全整改：防止初始管理员密码在控制台/启动日志/容器日志中明文暴露
+			// 仅将其安全写入本地 0600 权限文件 ./data/init_password.txt，供操作者读取后自动销毁
+			_ = os.MkdirAll("./data", 0700)
+			filePath := "./data/init_password.txt"
+			err = os.WriteFile(filePath, []byte(passwd), 0600)
+			if err != nil {
+				// 仅在写入本地文件失败时降级输出，确保系统正常启动
+				log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+			} else {
+				log.Printf("Default admin account created. Username: %s. Password has been securely written to local file %s to prevent log exposure. Retrieve it and delete the file.\n", user, filePath)
+			}
+		}
 	}
 }
 

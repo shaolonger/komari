@@ -190,9 +190,14 @@ install_binary() {
         
         log_step "正在获取初始密码..."
         sleep 5 
-        local password=$(journalctl -u ${SERVICE_NAME} --since "1 minute ago" | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
+        local password=""
+        local password_file="$DATA_DIR/data/init_password.txt"
+        if [ -f "$password_file" ]; then
+            password=$(cat "$password_file")
+            rm -f "$password_file"
+        fi
         if [ -z "$password" ]; then
-            log_error "未能获取初始密码，请检查日志"
+            log_error "未能从安全临时文件中读取初始密码，请检查服务状态"
         fi
         show_access_info "$password" "$LISTEN_PORT"
     else

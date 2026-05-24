@@ -41,26 +41,44 @@ sudo ./install-komari.sh
 
 ### 2. Docker Deployment
 
-1. Create a data directory:
-   ```bash
-   mkdir -p ./data
-   ```
-2. Run the Docker container:
-   ```bash
-   docker run -d \
-     -p 25774:25774 \
-     -v $(pwd)/data:/app/data \
-     --name komari \
-     ghcr.io/komari-monitor/komari:latest
-   ```
-3. View the default username and password:
-   ```bash
-   docker logs komari
-   ```
+For maximum security compliance, the official Docker container runs as a **non-root user** (`UID/GID 10001`).
+
+#### Option A: Named Volume (Recommended)
+Docker automatically manages the ownership of named volumes, ensuring correct permissions for non-root containers:
+```bash
+# 1. Run the container with a named volume
+docker run -d \
+  -p 25774:25774 \
+  -v komari-data:/app/data \
+  --name komari \
+  ghcr.io/komari-monitor/komari:latest
+
+# 2. Retrieve the initial password from the secure local file (deleted automatically after first login):
+docker exec komari cat /app/data/init_password.txt
+```
+
+#### Option B: Bind Mount
+If you prefer a host directory bind mount, you **must** set correct ownership first:
+```bash
+# 1. Create directory and set non-root ownership
+mkdir -p ./data
+chown -R 10001:10001 ./data
+
+# 2. Run the container
+docker run -d \
+  -p 25774:25774 \
+  -v $(pwd)/data:/app/data \
+  --name komari \
+  ghcr.io/komari-monitor/komari:latest
+
+# 3. Retrieve the initial password:
+cat ./data/init_password.txt
+```
+
 4. Access `http://<your_server_ip>:25774` in your browser.
 
-> [!NOTE]
-> You can also customize the initial username and password through the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+> [!IMPORTANT]
+> To comply with security guidelines, the default random administrator password is **never written to container stdout/stderr logs**. It is strictly written to `/app/data/init_password.txt` and is securely shredded immediately upon the first successful login. You can also bypass this by providing custom initial credentials through the `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment variables.
 
 ### 3. Binary File Deployment
 

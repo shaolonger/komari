@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
@@ -109,6 +110,10 @@ func Login(c *gin.Context) {
 	// 登录成功，清除失败计数器
 	resetFailureCount(ipKey)
 	resetFailureCount(userKey)
+
+	// P0-03 安全整改：登录成功后主动清除并销毁本地安全初始密码文件，防止在磁盘长期留存
+	_ = os.Remove("./data/init_password.txt")
+
 	// Create session
 	session, err := accounts.CreateSession(uuid, 2592000, c.Request.UserAgent(), c.ClientIP(), "password")
 	if err != nil {

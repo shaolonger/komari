@@ -38,26 +38,44 @@ sudo ./install-komari.sh
 
 ### 2. Docker 部署
 
-1. 创建数据目录：
-   ```bash
-   mkdir -p ./data
-   ```
-2. 运行 Docker 容器：
-   ```bash
-   docker run -d \
-     -p 25774:25774 \
-     -v $(pwd)/data:/app/data \
-     --name komari \
-     ghcr.io/komari-monitor/komari:latest
-   ```
-3. 查看默认账号和密码：
-   ```bash
-   docker logs komari
-   ```
+为了最大化安全合规性，官方 Docker 容器现在强制以 **非 root 用户** (`UID/GID 10001`) 身份运行。
+
+#### 方案 A：命名卷 (推荐)
+Docker 会自动管理命名卷的所有者，保证非 root 容器具有正确的读写权限：
+```bash
+# 1. 运行带命名卷的容器
+docker run -d \
+  -p 25774:25774 \
+  -v komari-data:/app/data \
+  --name komari \
+  ghcr.io/komari-monitor/komari:latest
+
+# 2. 从本地安全临时文件中获取初始管理员密码（首次成功登录后会自动彻底销毁）：
+docker exec komari cat /app/data/init_password.txt
+```
+
+#### 方案 B：挂载宿主机目录
+如果你倾向于挂载本地目录，**必须**首先在宿主机设置正确的权限所有者：
+```bash
+# 1. 创建目录并设置为非 root 用户所有
+mkdir -p ./data
+chown -R 10001:10001 ./data
+
+# 2. 运行容器
+docker run -d \
+  -p 25774:25774 \
+  -v $(pwd)/data:/app/data \
+  --name komari \
+  ghcr.io/komari-monitor/komari:latest
+
+# 3. 读取初始管理员密码：
+cat ./data/init_password.txt
+```
+
 4. 在浏览器中访问 `http://<your_server_ip>:25774`。
 
-> [!NOTE]
-> 你也可以通过环境变量 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 自定义初始用户名和密码。
+> [!IMPORTANT]
+> 为了符合安全审计规范，随机生成的默认管理员密码**绝对不会被写入控制台、标准输出（stdout/stderr）或 Docker 容器日志中**。它被严格且安全地写入容器内部的 `/app/data/init_password.txt` 文件中，并在管理员首次登录成功后立刻被粉碎销毁。你也可以在启动时使用环境变量 `ADMIN_USERNAME` 与 `ADMIN_PASSWORD` 指定你自己的初始用户名和密码。
 
 ### 3. 二进制文件部署
 
