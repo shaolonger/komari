@@ -22,7 +22,7 @@ func OAuth(c *gin.Context) {
 
 	authURL, state := oauth.CurrentProvider().GetAuthorizationURL(utils.GetCallbackURL(c))
 
-	c.SetCookie("oauth_state", state, 3600, "/", "", false, true)
+	c.SetCookie("oauth_state", state, 3600, "/", "", utils.IsRequestSecure(c), true)
 
 	c.Redirect(302, authURL)
 }
@@ -32,7 +32,7 @@ func OAuthCallback(c *gin.Context) {
 
 	// 验证state防止CSRF攻击
 	state, _ := c.Cookie("oauth_state")
-	c.SetCookie("oauth_state", "", -1, "/", "", false, true)
+	c.SetCookie("oauth_state", "", -1, "/", "", utils.IsRequestSecure(c), true)
 
 	// 获取当前OAuth提供商名称
 	providerName := oauth.CurrentProvider().GetName()
@@ -71,7 +71,7 @@ func OAuthCallback(c *gin.Context) {
 	// 如果cookie中有binding_external_account，说明是绑定外部账号
 	// 否则是登录
 	uuid, _ := c.Cookie("binding_external_account")
-	c.SetCookie("binding_external_account", "", -1, "/", "", false, true)
+	c.SetCookie("binding_external_account", "", -1, "/", "", utils.IsRequestSecure(c), true)
 	if uuid != "" {
 		// 绑定外部账号
 		session, _ := c.Cookie("session_token")
@@ -108,7 +108,7 @@ func OAuthCallback(c *gin.Context) {
 	}
 
 	// 设置cookie并返回
-	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
+	c.SetCookie("session_token", session, 2592000, "/", "", utils.IsRequestSecure(c), true)
 	auditlog.Log(c.ClientIP(), user.UUID, "logged in (OAuth)", "login")
 	c.Redirect(302, "/admin")
 }

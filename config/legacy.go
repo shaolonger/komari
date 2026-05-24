@@ -16,8 +16,8 @@ type Legacy struct {
 	EulaAccepted      bool   `json:"eula_accepted" default:"false"`
 	BaseScriptsURLKey string `json:"base_scripts_url" default:""`
 	// GeoIP 配置
-	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"true"`
-	GeoIpProvider string `json:"geo_ip_provider" default:"ipinfo"` // empty, mmdb, ip-api, geojs
+	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"false"`
+	GeoIpProvider string `json:"geo_ip_provider" default:"empty"` // empty, mmdb, ip-api, geojs
 	// Nezha 兼容（Agent gRPC）
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" default:"false"`
 	NezhaCompatListen  string `json:"nezha_compat_listen" default:""` // 例如 0.0.0.0:5555

@@ -42,8 +42,11 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 	go func() {
 		LoginNotification, _ := config.GetAs[bool](config.LoginNotificationKey, false)
 		if LoginNotification {
-			ipAddr := net.ParseIP(ip)
-			ipinfo, _ := geoip.GetGeoInfo(ipAddr)
+			var ipinfo *geoip.GeoInfo
+			if geoEnabled, _ := config.GetAs[bool](config.GeoIpEnabledKey, false); geoEnabled {
+				ipAddr := net.ParseIP(ip)
+				ipinfo, _ = geoip.GetGeoInfo(ipAddr)
+			}
 			loc := "unknown"
 			if ipinfo != nil && ipinfo.Name != "" {
 				loc = ipinfo.Name

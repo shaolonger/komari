@@ -141,7 +141,7 @@ func RunServer() {
 		if ok, t := config.IsChangedT[bool](event, config.AllowCorsKey); ok {
 			DynamicCorsEnabled = t
 		}
-		if event.IsChanged(config.GeoIpProviderKey) {
+		if event.IsChanged(config.GeoIpProviderKey) || event.IsChanged(config.GeoIpEnabledKey) {
 			go geoip.InitGeoIp()
 		}
 

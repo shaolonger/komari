@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/oauth"
 	"github.com/komari-monitor/komari/utils/oauth/factory"
+	"github.com/komari-monitor/komari/utils"
 )
 
 func BindingExternalAccount(c *gin.Context) {
@@ -19,7 +20,7 @@ func BindingExternalAccount(c *gin.Context) {
 		return
 	}
 
-	c.SetCookie("binding_external_account", user.UUID, 3600, "/", "", false, true)
+	c.SetCookie("binding_external_account", user.UUID, 3600, "/", "", utils.IsRequestSecure(c), true)
 	c.Redirect(302, "/api/oauth")
 }
 func UnbindExternalAccount(c *gin.Context) {

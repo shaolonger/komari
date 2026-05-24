@@ -29,3 +29,7 @@ func GetCallbackURL(c *gin.Context) string {
 	host := c.Request.Host
 	return scheme + "://" + host + "/api/oauth_callback"
 }
+
+func IsRequestSecure(c *gin.Context) bool {
+	return GetScheme(c) == "https"
+}

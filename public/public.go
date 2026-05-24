@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/utils"
 )
 
 //go:embed defaultTheme
@@ -242,13 +243,13 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			expireSeconds := int(tempKeyExpireTime - now)
 			if expireSeconds > 0 {
 				c.SetCookie(
-					"temp_key",    // key
-					tempKey,       // value
-					expireSeconds, // maxAge（秒）
-					"/",           // path
-					"",            // domain
-					false,         // secure
-					false,         // httpOnly
+					"temp_key",             // key
+					tempKey,                // value
+					expireSeconds,          // maxAge（秒）
+					"/",                    // path
+					"",                     // domain
+					utils.IsRequestSecure(c), // secure
+					false,                  // httpOnly
 				)
 			}
 		}()

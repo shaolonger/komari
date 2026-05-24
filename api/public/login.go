@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/utils"
 )
 
 type LoginRequest struct {
@@ -65,14 +66,14 @@ func Login(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
 		return
 	}
-	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
+	c.SetCookie("session_token", session, 2592000, "/", "", utils.IsRequestSecure(c), true)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
 	api.RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
 }
 func Logout(c *gin.Context) {
 	session, _ := c.Cookie("session_token")
 	accounts.DeleteSession(session)
-	c.SetCookie("session_token", "", -1, "/", "", false, true)
+	c.SetCookie("session_token", "", -1, "/", "", utils.IsRequestSecure(c), true)
 	auditlog.Log(c.ClientIP(), "", "logged out", "logout")
 	c.Redirect(302, "/")
 }

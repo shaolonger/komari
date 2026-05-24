@@ -13,8 +13,8 @@ type Config struct {
 	SendIpAddrToGuest bool   `json:"send_ip_addr_to_guest" gorm:"default:false"`             // 是否向访客页面发送 IP 地址，默认 false
 	EulaAccepted      bool   `json:"eula_accepted" gorm:"default:false"`
 	// GeoIP 配置
-	GeoIpEnabled  bool   `json:"geo_ip_enabled" gorm:"default:true"`
-	GeoIpProvider string `json:"geo_ip_provider" gorm:"type:varchar(20);default:'ip-api'"` // empty, mmdb, ip-api, geojs
+	GeoIpEnabled  bool   `json:"geo_ip_enabled" gorm:"default:false"`
+	GeoIpProvider string `json:"geo_ip_provider" gorm:"type:varchar(20);default:'empty'"` // empty, mmdb, ip-api, geojs
 	// Nezha 兼容（Agent gRPC）
 	NezhaCompatEnabled bool   `json:"nezha_compat_enabled" gorm:"default:false"`
 	NezhaCompatListen  string `json:"nezha_compat_listen" gorm:"type:varchar(100);default:''"` // 例如 0.0.0.0:5555

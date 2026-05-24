@@ -53,13 +53,14 @@ func GetRegionUnicodeEmoji(isoCode string) string {
 
 func InitGeoIp() {
 	conf, err := config.GetMany(map[string]any{
-		config.GeoIpEnabledKey:  true,
-		config.GeoIpProviderKey: "ipinfo",
+		config.GeoIpEnabledKey:  false,
+		config.GeoIpProviderKey: "empty",
 	})
 	if err != nil {
 		panic("Failed to get configuration for GeoIP: " + err.Error())
 	}
 	if !conf[config.GeoIpEnabledKey].(bool) {
+		CurrentProvider = &EmptyProvider{}
 		return
 	}
 	switch conf[config.GeoIpProviderKey].(string) {
