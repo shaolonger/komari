@@ -1,7 +1,6 @@
 package public
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -240,8 +238,8 @@ func loadFont() {
 		return
 	}
 
-	// 尝试下载字体
-	go downloadFont()
+	// 禁用在线自动下载，仅记录错误，提示用户使用离线文件
+	fontError = fmt.Errorf("字体文件 ./data/font.ttf 不存在。出于安全策略已禁用自动下载，请手动将 MiSans-Normal.ttf 放入此路径。")
 }
 
 // loadFontFromFile 从文件加载字体
@@ -283,155 +281,7 @@ func loadFontFromFile() error {
 
 // downloadFont 下载字体文件
 func downloadFont() {
-	downloadMutex.Lock()
-	if downloading {
-		downloadMutex.Unlock()
-		// 等待下载完成
-		for {
-			downloadMutex.Lock()
-			if !downloading {
-				downloadMutex.Unlock()
-				break
-			}
-			downloadMutex.Unlock()
-			time.Sleep(100 * time.Millisecond)
-		}
-		return
-	}
-	downloading = true
-	downloadProgress = &DownloadProgress{StartTime: time.Now()}
-	downloadMutex.Unlock()
-
-	defer func() {
-		downloadMutex.Lock()
-		downloading = false
-		downloadProgress = nil
-		downloadMutex.Unlock()
-	}()
-
-	// 创建目录
-	if err := os.MkdirAll(filepath.Dir(fontPath), 0755); err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to create directory: %w", err)
-		fontMutex.Unlock()
-		return
-	}
-
-	// 下载 ZIP
-	resp, err := http.Get(fontURL)
-	if err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to download font: %w", err)
-		fontMutex.Unlock()
-		fmt.Printf("[MJPEG] Font download error: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// 检查 HTTP 状态
-	if resp.StatusCode != 200 {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("font download failed with status %d", resp.StatusCode)
-		fontMutex.Unlock()
-		fmt.Printf("[MJPEG] Font download HTTP error: %d\n", resp.StatusCode)
-		return
-	}
-
-	downloadMutex.Lock()
-	downloadProgress.Total = resp.ContentLength
-	downloadMutex.Unlock()
-
-	// 读取并跟踪进度
-	var buf bytes.Buffer
-	lastUpdate := time.Now()
-	lastBytes := int64(0)
-
-	reader := &progressReader{
-		reader: resp.Body,
-		onProgress: func(n int64) {
-			downloadMutex.Lock()
-			defer downloadMutex.Unlock()
-			downloadProgress.Downloaded += n
-
-			// 计算速度（每秒更新一次）
-			now := time.Now()
-			if now.Sub(lastUpdate) >= time.Second {
-				downloadProgress.Speed = float64(downloadProgress.Downloaded-lastBytes) / now.Sub(lastUpdate).Seconds()
-				lastUpdate = now
-				lastBytes = downloadProgress.Downloaded
-			}
-		},
-	}
-
-	if _, err := io.Copy(&buf, reader); err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to download font data: %w", err)
-		fontMutex.Unlock()
-		return
-	}
-
-	// 解压 ZIP 并提取 TTF
-	zipReader, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	if err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to open zip: %w", err)
-		fontMutex.Unlock()
-		fmt.Printf("[MJPEG] ZIP parsing error: %v\n", err)
-		return
-	}
-
-	var fontFile *zip.File
-	for _, f := range zipReader.File {
-		if f.Name == fontZipEntry || strings.HasSuffix(f.Name, "MiSans-Normal.ttf") {
-			fontFile = f
-			break
-		}
-	}
-
-	if fontFile == nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("font file not found in zip")
-		fontMutex.Unlock()
-		fmt.Printf("[MJPEG] Font file not found in ZIP archive\n")
-		return
-	}
-
-	rc, err := fontFile.Open()
-	if err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to open font in zip: %w", err)
-		fontMutex.Unlock()
-		return
-	}
-	defer rc.Close()
-
-	fontData, err := io.ReadAll(rc)
-	if err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to read font from zip: %w", err)
-		fontMutex.Unlock()
-		return
-	}
-
-	// 保存字体文件
-	if err := os.WriteFile(fontPath, fontData, 0644); err != nil {
-		fontMutex.Lock()
-		fontError = fmt.Errorf("failed to save font file: %w", err)
-		fontMutex.Unlock()
-		return
-	}
-
-	// 加载字体
-	fontMutex.Lock()
-	defer fontMutex.Unlock()
-	if err := loadFontFromFile(); err != nil {
-		fontError = err
-		fmt.Printf("[MJPEG] Failed to load font from file: %v\n", err)
-		return
-	}
-	fontReady = true
-	fontError = nil
-	fmt.Printf("[MJPEG] Font loaded successfully\n")
+	// P2-02 安全整改：禁用在线字体自动下载，防范未授权出站连接
 }
 
 type progressReader struct {
