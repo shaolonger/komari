@@ -6,6 +6,7 @@ import (
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils/geoip"
+	"github.com/komari-monitor/komari/api"
 
 	"github.com/gin-gonic/gin"
 )
@@ -29,7 +30,7 @@ func UploadBasicInfo(c *gin.Context) {
 		return
 	}
 
-	token := c.Query("token")
+	token := api.ExtractClientToken(c)
 	uuid, err := clients.GetClientUUIDByToken(token)
 	if uuid == "" || err != nil {
 		c.JSON(400, gin.H{"status": "error", "error": "Invalid token"})

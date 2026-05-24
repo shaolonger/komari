@@ -4,13 +4,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 )
 
 func TaskResult(c *gin.Context) {
-	token := c.Query("token")
+	token := api.ExtractClientToken(c)
 	clientId, _ := clients.GetClientUUIDByToken(token)
 	if clientId == "" {
 		c.JSON(400, gin.H{"status": "error", "message": "Invalid or missing token"})

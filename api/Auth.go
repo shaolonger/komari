@@ -51,7 +51,7 @@ func IdentityMiddleware() gin.HandlerFunc {
 		}
 
 		// 3. Client Token 认证
-		token := extractClientToken(c)
+		token := ExtractClientToken(c)
 		if token != "" {
 			uuid, err := checkTokenAndGetUUID(token)
 			if err == nil && uuid != "" {
@@ -178,12 +178,27 @@ func hasTempAccess(c *gin.Context) bool {
 	return expireAt >= time.Now().Unix()
 }
 
-func extractClientToken(c *gin.Context) string {
+func ExtractClientToken(c *gin.Context) string {
+	// 1. 优先从 Authorization Header (如 Bearer <token>) 中提取 Client Token
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if token != "" && !isApiKeyValid(authHeader) { // 避免与 Admin API Key 冲突
+				return token
+			}
+		} else if len(authHeader) < 100 && !isApiKeyValid("Bearer "+authHeader) {
+			return authHeader
+		}
+	}
+
+	// 2. 其次从 URL Query 提取
 	token := c.Query("token")
 	if token != "" {
 		return token
 	}
 
+	// 3. 最后从 JSON body 提取
 	if c.Request.Method != http.MethodGet {
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
