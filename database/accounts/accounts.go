@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -12,9 +13,19 @@ import (
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const constantSalt = "06Wm4Jv1Hkxx"
+
+// hashPasswdBcrypt 对密码进行 bcrypt 哈希
+func hashPasswdBcrypt(passwd string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(passwd), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
 
 // CheckPassword 检查密码是否正确
 //
@@ -27,16 +38,38 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 		// 静默处理错误，不显示日志
 		return "", false
 	}
+
+	// 检查是否为 bcrypt 哈希值
+	if strings.HasPrefix(user.Passwd, "$2a$") || strings.HasPrefix(user.Passwd, "$2b$") || strings.HasPrefix(user.Passwd, "$2y$") {
+		err := bcrypt.CompareHashAndPassword([]byte(user.Passwd), []byte(passwd))
+		if err != nil {
+			return "", false
+		}
+		return user.UUID, true
+	}
+
+	// 兼容旧的单轮加盐 SHA-256 哈希值
 	if hashPasswd(passwd) != user.Passwd {
 		return "", false
 	}
+
+	// 验证成功，在此处平滑迁移旧哈希密码至 Bcrypt 哈希
+	newHash, err := hashPasswdBcrypt(passwd)
+	if err == nil {
+		_ = db.Model(&models.User{}).Where("uuid = ?", user.UUID).Update("passwd", newHash)
+	}
+
 	return user.UUID, true
 }
 
 // ForceResetPassword 强制重置用户密码
 func ForceResetPassword(username, passwd string) (err error) {
 	db := dbcore.GetDBInstance()
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
+	hashedPassword, err := hashPasswdBcrypt(passwd)
+	if err != nil {
+		return err
+	}
+	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashedPassword)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -57,7 +90,10 @@ func hashPasswd(passwd string) string {
 
 func CreateAccount(username, passwd string) (user models.User, err error) {
 	db := dbcore.GetDBInstance()
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPasswdBcrypt(passwd)
+	if err != nil {
+		return models.User{}, err
+	}
 	user = models.User{
 		UUID:     uuid.New().String(),
 		Username: username,
@@ -93,7 +129,10 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 		passwd = utils.GeneratePassword()
 	}
 
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPasswdBcrypt(passwd)
+	if err != nil {
+		return "", "", err
+	}
 
 	user := models.User{
 		UUID:      uuid.New().String(),
@@ -166,7 +205,11 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["username"] = *name
 	}
 	if password != nil {
-		updates["passwd"] = hashPasswd(*password)
+		hashed, err := hashPasswdBcrypt(*password)
+		if err != nil {
+			return err
+		}
+		updates["passwd"] = hashed
 	}
 	if sso_type != nil {
 		updates["sso_type"] = *sso_type

@@ -12,12 +12,36 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/utils"
+	cache "github.com/patrickmn/go-cache"
+	"time"
 )
 
 type LoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	TwoFa    string `json:"2fa_code"`
+}
+
+var loginLimiter = cache.New(10*time.Minute, 10*time.Minute)
+
+// getFailureCount 获取键对应的登录失败次数
+func getFailureCount(key string) int {
+	val, found := loginLimiter.Get(key)
+	if !found {
+		return 0
+	}
+	return val.(int)
+}
+
+// incrementFailureCount 增加失败次数
+func incrementFailureCount(key string) {
+	count := getFailureCount(key)
+	loginLimiter.Set(key, count+1, 10*time.Minute)
+}
+
+// resetFailureCount 清除失败次数
+func resetFailureCount(key string) {
+	loginLimiter.Delete(key)
 }
 
 func Login(c *gin.Context) {
@@ -43,8 +67,27 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	ipKey := "ip_fail:" + c.ClientIP()
+	userKey := "user_fail:" + data.Username
+
+	// 1. IP 维度限速检查
+	if getFailureCount(ipKey) >= 5 {
+		auditlog.Log(c.ClientIP(), "", "Login blocked: too many failures from IP: "+c.ClientIP(), "warning")
+		api.RespondError(c, http.StatusTooManyRequests, "Too many failed login attempts from this IP. Please try again after 10 minutes.")
+		return
+	}
+
+	// 2. 账号维度限速检查
+	if getFailureCount(userKey) >= 5 {
+		auditlog.Log(c.ClientIP(), "", "Login blocked: too many failures for username: "+data.Username, "warning")
+		api.RespondError(c, http.StatusTooManyRequests, "Too many failed login attempts for this account. Please try again after 10 minutes.")
+		return
+	}
+
 	uuid, success := accounts.CheckPassword(data.Username, data.Password)
 	if !success {
+		incrementFailureCount(ipKey)
+		incrementFailureCount(userKey)
 		api.RespondError(c, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
@@ -56,10 +99,16 @@ func Login(c *gin.Context) {
 			return
 		}
 		if ok, err := accounts.Verify2Fa(uuid, data.TwoFa); err != nil || !ok {
+			incrementFailureCount(ipKey)
+			incrementFailureCount(userKey)
 			api.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
 			return
 		}
 	}
+
+	// 登录成功，清除失败计数器
+	resetFailureCount(ipKey)
+	resetFailureCount(userKey)
 	// Create session
 	session, err := accounts.CreateSession(uuid, 2592000, c.Request.UserAgent(), c.ClientIP(), "password")
 	if err != nil {
