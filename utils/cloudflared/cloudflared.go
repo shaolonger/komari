@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,72 +52,30 @@ func Status() RuntimeStatus {
 }
 
 func Start(token string) error {
-	return defaultManager.start(token)
+	return errors.New("Cloudflared execution is disabled for security reasons")
 }
 
 func Stop() error {
-	return defaultManager.stop()
+	return nil
 }
 
 func Shutdown() {
-	if err := defaultManager.stop(); err != nil {
-		log.Printf("failed to stop cloudflared: %v", err)
-	}
 }
 
 func SaveToken(token string) error {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return config.Set(config.CloudflareTunnelTokenKey, "")
-	}
-
-	encrypted, err := secureconfig.EncryptString(token)
-	if err != nil {
-		return err
-	}
-
-	return config.Set(config.CloudflareTunnelTokenKey, encrypted)
+	return errors.New("Cloudflared is disabled")
 }
 
 func RemoveToken() error {
-	if defaultManager.status().Running {
-		return errors.New("stop cloudflared before removing the token")
-	}
-	return config.Set(config.CloudflareTunnelTokenKey, "")
+	return nil
 }
 
 func LoadToken() (token string, err error) {
-	if envToken := strings.TrimSpace(os.Getenv("KOMARI_CLOUDFLARED_TOKEN")); envToken != "" {
-		return envToken, nil
-	}
-
-	return loadStoredToken()
+	return "", nil
 }
 
 func AutoStart(envToken string) error {
-	token := strings.TrimSpace(envToken)
-	if token == "" {
-		var err error
-		token, err = LoadToken()
-		if err != nil {
-			return err
-		}
-	} else {
-		if err := SaveToken(token); err != nil {
-			return err
-		}
-		log.Println("[cloudflared] using token from KOMARI_CLOUDFLARED_TOKEN")
-	}
-
-	if token == "" {
-		return nil
-	}
-
-	if err := Start(token); err != nil {
-		defaultManager.setError(err.Error())
-		return err
-	}
-
+	// P2-01 安全整改：禁用自动启动 Cloudflared，防范额外出站链路风险
 	return nil
 }
 
