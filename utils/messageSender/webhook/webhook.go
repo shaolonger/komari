@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +16,23 @@ import (
 
 type WebhookSender struct {
 	Addition
+}
+
+func isPrivateIP(host string) bool {
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return true // fail closed
+	}
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *WebhookSender) GetName() string {
@@ -38,6 +56,17 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 		return fmt.Errorf("webhook URL is not configured")
 	}
 
+	u, err := url.Parse(w.Addition.URL)
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("only http and https schemes are allowed for webhook")
+	}
+	if isPrivateIP(u.Hostname()) {
+		return fmt.Errorf("webhook URL points to a private/internal IP address which is prohibited for security compliance")
+	}
+
 	method := strings.ToUpper(w.Addition.Method)
 	if method == "" {
 		method = "GET" // 默认使用 GET
@@ -45,10 +74,12 @@ func (w *WebhookSender) SendTextMessage(message, title string) error {
 
 	client := &http.Client{
 		Timeout: 30 * time.Second, // 固定30秒超时
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("redirects are disabled for webhook requests for security compliance")
+		},
 	}
 
 	var req *http.Request
-	var err error
 
 	switch method {
 	case "POST":
