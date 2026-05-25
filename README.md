@@ -9,6 +9,8 @@
 
 Komari is a lightweight, self-hosted server monitoring tool designed to provide a simple and efficient solution for monitoring server performance. It supports viewing server status through a web interface and collects data through a lightweight agent.
 
+If you are deploying Komari for the first time, start with the beginner-friendly step-by-step guide: [Beginner Guide (Simplified Chinese)](./docs/BEGINNER_GUIDE_zh.md)
+
 [Documentation](https://komari-document.pages.dev/) | [文档(镜像站 By Geekertao)](https://www.komari.wiki) | [Telegram Group](https://t.me/komari_monitor)
 
 ## Features

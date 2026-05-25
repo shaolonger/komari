@@ -6,6 +6,8 @@
 
 Komari 是一款轻量级的自托管服务器监控工具，旨在提供简单、高效的服务器性能监控解决方案。它支持通过 Web 界面查看服务器状态，并通过轻量级 Agent 收集数据。
 
+如果你是第一次部署 Komari，建议先阅读这份一步步的新手指南：[Komari 新手一步步部署与使用指南](./BEGINNER_GUIDE_zh.md)
+
 [文档](https://komari-document.pages.dev/) | [文档(镜像站 By Geekertao)](https://www.komari.wiki) | [Telegram 群组](https://t.me/komari_monitor)
 
 ## 特性
