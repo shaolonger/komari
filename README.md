@@ -41,6 +41,8 @@ chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
 
+If `sudo journalctl -u komari -f` shows `Exec format error` after using an older copy of the installer, re-download the latest `install-komari.sh` and run it again. That error usually means the previous script saved an invalid download instead of a real Linux binary.
+
 ### 2. Docker Deployment
 
 For maximum security compliance, the official Docker container runs as a **non-root user** (`UID/GID 10001`).

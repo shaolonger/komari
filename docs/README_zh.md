@@ -38,6 +38,8 @@ chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
 
+如果执行后用 `sudo journalctl -u komari -f` 看到 `Exec format error`，通常说明你手里的旧版安装脚本下载到了错误内容而不是真正的 Linux 二进制。重新下载最新的 `install-komari.sh` 再执行一次即可。
+
 ### 2. Docker 部署
 
 为了最大化安全合规性，官方 Docker 容器现在强制以 **非 root 用户** (`UID/GID 10001`) 身份运行。

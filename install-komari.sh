@@ -23,6 +23,7 @@ log_step() {
     echo -e "${YELLOW}$1${NC}"
 }
 
+RELEASE_REPO="${KOMARI_RELEASE_REPO:-komari-monitor/komari}"
 
 # Global variables
 INSTALL_DIR="/opt/komari"
@@ -31,6 +32,20 @@ SERVICE_NAME="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
+
+download_binary() {
+    local arch="$1"
+    local file_name="komari-linux-${arch}"
+    local download_url="https://github.com/${RELEASE_REPO}/releases/latest/download/${file_name}"
+
+    log_step "下载 Komari 二进制文件..."
+    log_info "URL: $download_url"
+
+    if ! curl -fL -o "$BINARY_PATH" "$download_url"; then
+        log_error "下载失败。请确认 ${RELEASE_REPO} 的 release 资源中存在 ${file_name}。"
+        return 1
+    fi
+}
 
 # Show banner
 show_banner() {
@@ -80,15 +95,6 @@ detect_arch() {
             exit 1
             ;;
     esac
-}
-
-# Check if Komari is already installed
-is_installed() {
-    if [ -f "$BINARY_PATH" ]; then
-        return 0 # 0 means true in bash exit codes
-    else
-        return 1 # 1 means false
-    fi
 }
 
 # Install dependencies
@@ -154,14 +160,7 @@ install_binary() {
         useradd -r -s /bin/false komari
     fi
 
-    local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/shaolonger/komari/releases/latest/download/${file_name}"
-
-    log_step "下载 Komari 二进制文件..."
-    log_info "URL: $download_url"
-
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
-        log_error "下载失败"
+    if ! download_binary "$arch"; then
         return 1
     fi
 
@@ -275,11 +274,9 @@ upgrade_komari() {
     cp "$BINARY_PATH" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
 
     local arch=$(detect_arch)
-    local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/shaolonger/komari/releases/latest/download/${file_name}"
 
     log_step "下载最新版本..."
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
+    if ! download_binary "$arch"; then
         log_error "下载失败，正在从备份恢复"
         mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service

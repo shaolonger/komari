@@ -235,6 +235,8 @@ chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
 
+如果你安装完成后执行 `sudo journalctl -u komari -f` 看到 `Exec format error`，大概率是你本地拿到的是旧版安装脚本，之前它可能把错误页面当成二进制写进了 `/opt/komari/komari`。重新下载最新脚本并再次执行即可。
+
 ### 第 2 步：根据提示输入监听端口
 
 默认端口是 `25774`。
