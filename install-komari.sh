@@ -37,14 +37,19 @@ download_binary() {
     local arch="$1"
     local file_name="komari-linux-${arch}"
     local download_url="https://github.com/${RELEASE_REPO}/releases/latest/download/${file_name}"
+    local tmp_path="${BINARY_PATH}.download.$$"
 
     log_step "下载 Komari 二进制文件..."
     log_info "URL: $download_url"
 
-    if ! curl -fL -o "$BINARY_PATH" "$download_url"; then
+    rm -f "$tmp_path"
+    if ! curl -fL -o "$tmp_path" "$download_url"; then
+        rm -f "$tmp_path"
         log_error "下载失败。请确认 ${RELEASE_REPO} 的 release 资源中存在 ${file_name}。"
         return 1
     fi
+
+    mv -f "$tmp_path" "$BINARY_PATH"
 }
 
 # Show banner
@@ -95,6 +100,15 @@ detect_arch() {
             exit 1
             ;;
     esac
+}
+
+# Check if Komari is already installed
+is_installed() {
+    if [ -f "$BINARY_PATH" ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Install dependencies
