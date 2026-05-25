@@ -188,15 +188,19 @@ install_binary() {
         log_success "Komari 服务启动成功"
         
         log_step "正在获取初始密码..."
-        sleep 5 
         local password=""
         local password_file="$DATA_DIR/data/init_password.txt"
-        if [ -f "$password_file" ]; then
-            password=$(cat "$password_file")
-            rm -f "$password_file"
-        fi
+        for _ in $(seq 1 30); do
+            if [ -s "$password_file" ]; then
+                password=$(cat "$password_file")
+                break
+            fi
+            sleep 1
+        done
         if [ -z "$password" ]; then
-            log_error "未能从安全临时文件中读取初始密码，请检查服务状态"
+            log_error "未能自动读取初始密码，请检查服务状态"
+            log_info "如果这是首次安装，请稍后手动执行: sudo cat $password_file"
+            log_info "如果该文件不存在，可能是已有旧数据库，需使用原管理员密码登录；若已遗忘，可进入 $INSTALL_DIR 后执行 ./komari chpasswd -p '<新密码>' 并重启服务。"
         fi
         show_access_info "$password" "$LISTEN_PORT"
     else
