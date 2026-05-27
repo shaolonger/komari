@@ -245,13 +245,20 @@ sudo ./install-komari.sh
 
 ### 第 3 步：安装完成后记下脚本输出的初始密码
 
-和 Docker 不同，这个安装脚本会在安装结束时把初始密码显示给你一次，然后删除安全临时文件。
+当前安装脚本会尽量在安装结束时把初始密码直接显示给你；如果因为启动时序等原因没有直接显示出来，你也可以手动读取：
+
+```bash
+sudo cat /opt/komari/data/init_password.txt
+```
+
+这个文件不会在安装阶段被脚本删除，而是在你第一次成功登录后台后由服务端自动删除。
 
 所以你要做的事情是：
 
 1. 安装成功后马上把密码记下来。
-2. 立刻登录后台。
-3. 登录后马上改成你自己的强密码。
+2. 如果脚本没有直接显示，就手动读取 `/opt/komari/data/init_password.txt`。
+3. 立刻登录后台。
+4. 登录后马上改成你自己的强密码。
 
 ### 第 4 步：常用服务命令
 
@@ -478,25 +485,206 @@ curl -X POST \
 
 ### 8.3 Agent 的具体安装命令去哪里看
 
-当前仓库不包含完整的 Agent 安装说明和各平台安装命令，所以这里不硬写可能失真的命令。
+官方文档里其实已经给出了比较完整的 Agent 接入方式，只是信息分散在 `Agent 自动发现`、`非 Root 运行 Agent` 和 `Agent 开发` 等页面里。
 
-你需要继续看官方 Agent 文档：
+对大多数新手来说，实际只需要记住三种接入方式：
 
-```text
-https://komari-document.pages.dev/dev/agent.html
+1. 你已经在面板里手动创建了节点，并拿到了 `Token`。
+2. 你在面板里配置了 `Auto Discovery Key`，想批量自动注册。
+3. 你没有 root 权限，只能手动下载二进制并在用户空间运行。
+
+#### 方式 A：你已经有节点 Token，直接安装 Agent
+
+这是单机接入最直观的方式。
+
+你先在 Komari 面板里新增节点，记下这个节点的 `Token`，然后在目标机器上执行 Agent 安装脚本。
+
+注意：当前这套文档默认配套的是服务端仓库 `shaolonger/komari` 和 Agent 仓库 `shaolonger/komari-agent`。如果你维护的是别的 Agent fork，请把下面的安装脚本和 Release 链接统一替换成你自己的仓库地址。
+
+Linux / macOS：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+  -e http://你的面板地址:25774 \
+  -t 你的节点Token
 ```
 
-你在 Agent 端通常只需要准备三样东西：
+如果你的面板已经启用了 HTTPS，把 `http://你的面板地址:25774` 改成正式的 HTTPS 地址，例如：
 
-1. 面板地址
-2. 节点 Token，或者 Auto Discovery Key
-3. 目标节点自己的主机名/标识名
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+  -e https://monitor.example.com \
+  -t 你的节点Token
+```
+
+Windows PowerShell：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '-e' 'https://monitor.example.com' '-t' '你的节点Token'"
+```
+
+安全提示：上面的 `-t 你的节点Token` 更适合测试环境或一次性快速接入。正式生产部署建议先把 token 写入仅 owner / 服务账户可读的 `komari-agent.json`，再通过 `--config /path/to/komari-agent.json` 安装或启动，避免 token 进入 shell history、进程参数和运维审计日志。
+
+安装脚本会自动：
+
+1. 下载对应平台的 `komari-agent` 二进制。
+2. 安装为系统服务。
+3. 直接启动 Agent。
+
+默认服务名通常是：
+
+```text
+komari-agent
+```
+
+#### 方式 B：使用 Auto Discovery Key 自动注册
+
+这适合一口气接入很多机器，不想手动一个个创建设备的场景。
+
+你先在面板里配置 `Auto Discovery Key`，然后在目标机器执行：
+
+Linux / macOS：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+  -e https://your-komari-server.com \
+  --auto-discovery your-ad-key
+```
+
+Windows PowerShell：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '-e' 'https://your-komari-server.com' '--auto-discovery' 'your-ad-key'"
+```
+
+这种方式下，Agent 会自动向面板注册自己，不需要你提前手动创建节点。
+
+适合：
+
+1. 批量部署多台 VPS。
+2. 用脚本批量初始化机器。
+3. 想统一下发一套安装命令。
+
+#### 方式 C：没有 root 权限，手动下载二进制运行
+
+如果你的环境不能用 root，或者不能创建 systemd 服务，可以按官方 `非 Root 环境下安装和运行 Komari Agent` 文档手动运行。
+
+第 1 步：确认系统架构
+
+```bash
+uname -m
+```
+
+常见架构和文件名对应关系：
+
+1. `x86_64` / `amd64` -> `komari-agent-linux-amd64`
+2. `aarch64` / `arm64` -> `komari-agent-linux-arm64`
+3. `i386` / `i686` -> `komari-agent-linux-386`
+4. `armv7l` -> `komari-agent-linux-arm`
+
+第 2 步：去当前 Agent 仓库的 Release 下载 Agent
+
+```text
+https://github.com/shaolonger/komari-agent/releases
+```
+
+第 3 步：给文件执行权限
+
+```bash
+chmod +x komari-agent
+```
+
+第 4 步：直接前台运行
+
+```bash
+./komari-agent -e https://monitor.example.com -t 你的节点Token
+```
+
+如果你还没上 HTTPS，也可以先临时使用：
+
+```bash
+./komari-agent -e http://你的IP:25774 -t 你的节点Token
+```
+
+第 5 步：放到后台保活
+
+最简单的方式是 `nohup`：
+
+```bash
+nohup ./komari-agent -e https://monitor.example.com -t 你的节点Token > komari.log 2>&1 &
+```
+
+如果你经常用 SSH 登录机器，官方文档更推荐 `screen`：
+
+```bash
+screen -S komari-agent
+./komari-agent -e https://monitor.example.com -t 你的节点Token
+```
+
+运行后按 `Ctrl+A` 再按 `D`，就能把会话挂到后台。
+
+#### 生产环境常用参数
+
+官方文档里比较实用的参数有这些：
+
+1. `-e, --endpoint`：Komari 面板地址。
+2. `-t, --token`：节点 Token。
+3. `--auto-discovery`：自动发现密钥。
+4. `--disable-web-ssh`：禁用远程控制功能，生产环境很常用。
+5. `--interval`：监控数据上报间隔，单位秒，默认 `1.0`。
+6. `--info-report-interval`：基础信息上报间隔，单位分钟，默认 `5`。
+7. `--reconnect-interval`：断线重连间隔，单位秒，默认 `5`。
+8. `--max-retries`：最大重试次数，默认 `3`。
+9. `-u, --ignore-unsafe-cert`：忽略不安全证书，只建议测试环境临时使用。
+
+一个更适合生产环境的 Linux / macOS 示例（假设你已经准备好受限权限的配置文件）：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+  --config /etc/komari/komari-agent.json \
+  --disable-web-ssh \
+  --interval 5.0 \
+  --max-retries 5 \
+  --reconnect-interval 10 \
+  --info-report-interval 15
+```
+
+#### 安装完成后怎么看状态和日志
+
+如果你用了官方安装脚本并创建了 systemd 服务：
+
+```bash
+sudo systemctl status komari-agent
+sudo journalctl -u komari-agent -f
+```
+
+如果你是手动非 root 运行：
+
+```bash
+ps aux | grep komari-agent
+tail -f komari.log
+```
+
+#### 特殊场景去哪里看
+
+如果你的环境比较特殊，可以继续看这些官方页面：
+
+1. Auto Discovery 批量部署：`https://komari-document.pages.dev/install/agent-ad.html`
+2. 非 root 运行 Agent：`https://komari-document.pages.dev/faq/agent-no-root.html`
+3. NAS 场景：`https://komari-document.pages.dev/faq/agent-nas.html`
+4. 卸载 Agent：`https://komari-document.pages.dev/faq/uninstall.html`
+5. 社区维护的特殊平台 Agent：`https://komari-document.pages.dev/community/agent.html`
 
 ### 8.4 一个非常重要的兼容点
 
-现在的新安全实现要求客户端认证信息走 HTTP Header，而不是旧的 URL `?token=` 方式。
+对普通用户来说，使用官方 Agent 时只需要传启动参数：
 
-如果你自己写兼容脚本或对接第三方 Agent，请优先使用：
+1. `-e/--endpoint`
+2. `-t/--token` 或 `--auto-discovery`
+
+你不需要自己手写 `ws://.../api/clients/report?...` 或 `POST /api/clients/...` 这类底层请求。
+
+只有在你自己编写兼容 Agent、脚本或 SDK 时，才需要关心底层认证格式。对这种自定义实现，请优先按当前服务端要求使用：
 
 ```text
 Authorization: Bearer <token>
@@ -617,7 +805,7 @@ chown -R 10001:10001 ./data
 
 1. 你已经成功登录过一次，文件被自动删除了。
 2. 你启动时已经通过 `ADMIN_PASSWORD` 指定了密码。
-3. 你使用的是一键安装脚本，脚本已经读取并删除了它。
+3. 你使用的是一键安装脚本，但这是旧版本文档或旧脚本留下的印象；当前行为是首次成功登录后才自动删除。
 4. 容器或程序根本没有成功完成第一次初始化。
 
 ### 12.4 开了 HTTPS 之后出现跳转循环
