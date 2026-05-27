@@ -19,6 +19,8 @@ const (
 	RoleGuest  = "guest"
 )
 
+var clientTokenLookup = checkTokenAndGetUUID
+
 // IdentityMiddleware 统一身份识别中间件，在路由栈最外层运行。
 // 负责识别当前请求者身份（Admin / Client / Guest），并写入 Context。
 func IdentityMiddleware() gin.HandlerFunc {
@@ -50,7 +52,7 @@ func IdentityMiddleware() gin.HandlerFunc {
 		// 3. Client Token 认证
 		token := ExtractClientToken(c)
 		if token != "" {
-			uuid, err := checkTokenAndGetUUID(token)
+			uuid, err := clientTokenLookup(token)
 			if err == nil && uuid != "" {
 				c.Set("role", RoleClient)
 				c.Set("client_uuid", uuid)
@@ -209,6 +211,10 @@ func checkTokenAndGetUUID(token string) (string, error) {
 }
 
 func isApiKeyValid(apiKey string) bool {
+	if !config.Ready() {
+		return false
+	}
+
 	apiKeyConfig, err := config.GetAs[string](config.ApiKeyKey, "")
 	if err != nil {
 		return false

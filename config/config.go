@@ -29,6 +29,10 @@ var (
 	}
 )
 
+func Ready() bool {
+	return db != nil
+}
+
 func migrateInPlace() {
 	if db.Migrator().HasTable("configs") && db.Migrator().HasColumn(&Legacy{}, "Sitename") {
 		slog.Info("[>1.1.4] Moving legacy config data...")
