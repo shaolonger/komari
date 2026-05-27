@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"errors"
 	"log"
 	"math"
 	"time"
@@ -17,6 +18,53 @@ import (
 
 	"github.com/google/uuid"
 )
+
+type ClientTokenStatus struct {
+	Token      string           `json:"token"`
+	IssuedAt   models.LocalTime `json:"issued_at"`
+	ExpiresAt  models.LocalTime `json:"expires_at"`
+	RevokedAt  models.LocalTime `json:"revoked_at"`
+	Active     bool             `json:"active"`
+}
+
+func clientTokenExpiryFromHours(expiresInHours int64, now time.Time) (models.LocalTime, error) {
+	if expiresInHours < 0 {
+		return models.LocalTime(time.Time{}), errors.New("expires_in_hours must be zero or positive")
+	}
+	if expiresInHours == 0 {
+		return models.LocalTime(time.Time{}), nil
+	}
+	return models.FromTime(now.Add(time.Duration(expiresInHours) * time.Hour)), nil
+}
+
+func buildClientTokenStatus(client models.Client) ClientTokenStatus {
+	return ClientTokenStatus{
+		Token:     client.Token,
+		IssuedAt:  client.TokenIssuedAt,
+		ExpiresAt: client.TokenExpiresAt,
+		RevokedAt: client.TokenRevokedAt,
+		Active:    validateClientTokenState(client, time.Now()) == nil,
+	}
+}
+
+func zeroLocalTime() models.LocalTime {
+	return models.LocalTime(time.Time{})
+}
+
+func writeClientTokenLifecycle(clientUUID, token string, issuedAt, expiresAt, revokedAt models.LocalTime) (ClientTokenStatus, error) {
+	db := dbcore.GetDBInstance()
+	updates := map[string]interface{}{
+		"token":            token,
+		"token_issued_at":  issuedAt,
+		"token_expires_at": expiresAt,
+		"token_revoked_at": revokedAt,
+		"updated_at":       time.Now(),
+	}
+	if err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error; err != nil {
+		return ClientTokenStatus{}, err
+	}
+	return GetClientTokenStatusByUUID(clientUUID)
+}
 
 // Deprecated: DeleteClientConfig is deprecated and will be removed in a future release. Use DeleteClient instead.
 func DeleteClientConfig(clientUuid string) error {
@@ -195,12 +243,8 @@ func EditClientName(clientUUID, clientName string) error {
 	}
 */
 func EditClientToken(clientUUID, token string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Update("token", token).Error
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err := writeClientTokenLifecycle(clientUUID, token, models.FromTime(time.Now()), zeroLocalTime(), zeroLocalTime())
+	return err
 }
 
 // CreateClient 创建新客户端
@@ -210,11 +254,12 @@ func CreateClient() (clientUUID, token string, err error) {
 	clientUUID = uuid.New().String()
 
 	client := models.Client{
-		UUID:      clientUUID,
-		Token:     token,
-		Name:      "client_" + clientUUID[0:8],
-		CreatedAt: models.FromTime(time.Now()),
-		UpdatedAt: models.FromTime(time.Now()),
+		UUID:          clientUUID,
+		Token:         token,
+		TokenIssuedAt: models.FromTime(time.Now()),
+		Name:          "client_" + clientUUID[0:8],
+		CreatedAt:     models.FromTime(time.Now()),
+		UpdatedAt:     models.FromTime(time.Now()),
 	}
 
 	err = db.Create(&client).Error
@@ -235,11 +280,12 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 	token = utils.GenerateToken()
 	clientUUID = uuid.New().String()
 	client := models.Client{
-		UUID:      clientUUID,
-		Token:     token,
-		Name:      name,
-		CreatedAt: models.FromTime(time.Now()),
-		UpdatedAt: models.FromTime(time.Now()),
+		UUID:          clientUUID,
+		Token:         token,
+		TokenIssuedAt: models.FromTime(time.Now()),
+		Name:          name,
+		CreatedAt:     models.FromTime(time.Now()),
+		UpdatedAt:     models.FromTime(time.Now()),
 	}
 
 	err = db.Create(&client).Error
@@ -294,6 +340,35 @@ func GetClientTokenByUUID(uuid string) (token string, err error) {
 		return "", err
 	}
 	return client.Token, nil
+}
+
+func GetClientTokenStatusByUUID(uuid string) (ClientTokenStatus, error) {
+	client, err := GetClientByUUID(uuid)
+	if err != nil {
+		return ClientTokenStatus{}, err
+	}
+	return buildClientTokenStatus(client), nil
+}
+
+func RotateClientToken(clientUUID string, expiresInHours int64) (ClientTokenStatus, error) {
+	now := time.Now()
+	expiresAt, err := clientTokenExpiryFromHours(expiresInHours, now)
+	if err != nil {
+		return ClientTokenStatus{}, err
+	}
+	return writeClientTokenLifecycle(clientUUID, utils.GenerateToken(), models.FromTime(now), expiresAt, zeroLocalTime())
+}
+
+func ReissueClientToken(clientUUID string, expiresInHours int64) (ClientTokenStatus, error) {
+	return RotateClientToken(clientUUID, expiresInHours)
+}
+
+func RevokeClientToken(clientUUID string) (ClientTokenStatus, error) {
+	status, err := GetClientTokenStatusByUUID(clientUUID)
+	if err != nil {
+		return ClientTokenStatus{}, err
+	}
+	return writeClientTokenLifecycle(clientUUID, status.Token, status.IssuedAt, status.ExpiresAt, models.FromTime(time.Now()))
 }
 
 func GetAllClientBasicInfo() (clients []models.Client, err error) {

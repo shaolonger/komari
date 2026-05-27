@@ -36,7 +36,7 @@ var ChpasswdCmd = &cobra.Command{
 			cmd.Println("Error:", err)
 			return
 		}
-		cmd.Println("Password changed successfully, new password:", NewPassword)
+		cmd.Println("Password changed successfully.")
 
 		if err := accounts.DeleteAllSessions(); err != nil {
 			cmd.Println("Unable to force logout of other devices:", err)

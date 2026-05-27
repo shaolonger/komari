@@ -2,6 +2,7 @@ package clients
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -12,6 +13,9 @@ import (
 
 	"gorm.io/gorm"
 )
+
+var ErrClientTokenRevoked = errors.New("client token has been revoked")
+var ErrClientTokenExpired = errors.New("client token has expired")
 
 // Report 表示客户端报告数据
 // SaveReport 保存报告数据
@@ -37,7 +41,20 @@ func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 	if err != nil {
 		return "", err
 	}
+	if err := validateClientTokenState(client, time.Now()); err != nil {
+		return "", err
+	}
 	return client.UUID, nil
+}
+
+func validateClientTokenState(client models.Client, now time.Time) error {
+	if !client.TokenRevokedAt.ToTime().IsZero() {
+		return ErrClientTokenRevoked
+	}
+	if !client.TokenExpiresAt.ToTime().IsZero() && !now.Before(client.TokenExpiresAt.ToTime()) {
+		return ErrClientTokenExpired
+	}
+	return nil
 }
 
 func ParseReport(data map[string]interface{}) (report common.Report, err error) {

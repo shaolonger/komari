@@ -273,6 +273,9 @@ func RunServer() {
 			clientGroup.POST("/:uuid/edit", admin.EditClient)
 			clientGroup.POST("/:uuid/remove", admin.RemoveClient)
 			clientGroup.GET("/:uuid/token", admin.GetClientToken)
+			clientGroup.POST(":uuid/token/rotate", admin.RotateClientToken)
+			clientGroup.POST(":uuid/token/reissue", admin.ReissueClientToken)
+			clientGroup.POST(":uuid/token/revoke", admin.RevokeClientToken)
 			clientGroup.POST("/order", admin.OrderWeight)
 			// client terminal
 			clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
@@ -398,8 +401,8 @@ func InitDatabase() {
 			filePath := "./data/init_password.txt"
 			err = os.WriteFile(filePath, []byte(passwd), 0600)
 			if err != nil {
-				// 仅在写入本地文件失败时降级输出，确保系统正常启动
-				log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+				_ = dbcore.GetDBInstance().Where("username = ?", user).Delete(&models.User{}).Error
+				log.Fatalf("Failed to persist the initial admin password to %s securely: %v. The default admin account has been rolled back; fix the path permissions or set ADMIN_PASSWORD before restarting.", filePath, err)
 			} else {
 				log.Printf("Default admin account created. Username: %s. Password has been securely written to local file %s to prevent log exposure. Retrieve it and delete the file.\n", user, filePath)
 			}

@@ -10,6 +10,43 @@ import (
 	"github.com/komari-monitor/komari/ws"
 )
 
+var getClientTokenStatusFunc = clients.GetClientTokenStatusByUUID
+var rotateClientTokenFunc = clients.RotateClientToken
+var reissueClientTokenFunc = clients.ReissueClientToken
+var revokeClientTokenFunc = clients.RevokeClientToken
+var auditLogFunc = auditlog.Log
+
+type clientTokenLifecycleRequest struct {
+	ExpiresInHours int64 `json:"expires_in_hours"`
+}
+
+func writeClientTokenStatusResponse(c *gin.Context, status clients.ClientTokenStatus) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "success",
+		"token":      status.Token,
+		"issued_at":  status.IssuedAt,
+		"expires_at": status.ExpiresAt,
+		"revoked_at": status.RevokedAt,
+		"active":     status.Active,
+	})
+}
+
+func parseClientTokenLifecycleRequest(c *gin.Context) (clientTokenLifecycleRequest, bool) {
+	req := clientTokenLifecycleRequest{}
+	if c.Request.ContentLength <= 0 {
+		return req, true
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error()})
+		return req, false
+	}
+	if req.ExpiresInHours < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "expires_in_hours must be zero or positive"})
+		return req, false
+	}
+	return req, true
+}
+
 func AddClient(c *gin.Context) {
 	var req struct {
 		Name string `json:"name"`
@@ -29,7 +66,7 @@ func AddClient(c *gin.Context) {
 		return
 	}
 	user_uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), user_uuid.(string), "create client:"+uuid, "info")
+	auditLogFunc(c.ClientIP(), user_uuid.(string), "create client:"+uuid, "info")
 	c.JSON(http.StatusOK, gin.H{"status": "success", "uuid": uuid, "token": token, "message": ""})
 }
 
@@ -51,7 +88,7 @@ func EditClient(c *gin.Context) {
 		return
 	}
 	user_uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), user_uuid.(string), "edit client:"+uuid, "info")
+	auditLogFunc(c.ClientIP(), user_uuid.(string), "edit client:"+uuid, "info")
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
@@ -66,7 +103,7 @@ func RemoveClient(c *gin.Context) {
 		return
 	}
 	user_uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
+	auditLogFunc(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
 	c.JSON(200, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
@@ -81,7 +118,7 @@ func ClearRecord(c *gin.Context) {
 		return
 	}
 	user_uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), user_uuid.(string), "clear records", "warn")
+	auditLogFunc(c.ClientIP(), user_uuid.(string), "clear records", "warn")
 	c.JSON(200, gin.H{"status": "success"})
 }
 
@@ -127,11 +164,68 @@ func GetClientToken(c *gin.Context) {
 		return
 	}
 
-	token, err := clients.GetClientTokenByUUID(uuid)
+	status, err := getClientTokenStatusFunc(uuid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "success", "token": token, "message:": ""})
+	writeClientTokenStatusResponse(c, status)
+}
+
+func RotateClientToken(c *gin.Context) {
+	uuid := c.Param("uuid")
+	if uuid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid or missing UUID"})
+		return
+	}
+	req, ok := parseClientTokenLifecycleRequest(c)
+	if !ok {
+		return
+	}
+	status, err := rotateClientTokenFunc(uuid, req.ExpiresInHours)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	userUUID, _ := c.Get("uuid")
+	auditLogFunc(c.ClientIP(), userUUID.(string), "rotate client token:"+uuid, "warn")
+	writeClientTokenStatusResponse(c, status)
+}
+
+func ReissueClientToken(c *gin.Context) {
+	uuid := c.Param("uuid")
+	if uuid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid or missing UUID"})
+		return
+	}
+	req, ok := parseClientTokenLifecycleRequest(c)
+	if !ok {
+		return
+	}
+	status, err := reissueClientTokenFunc(uuid, req.ExpiresInHours)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	userUUID, _ := c.Get("uuid")
+	auditLogFunc(c.ClientIP(), userUUID.(string), "reissue client token:"+uuid, "warn")
+	writeClientTokenStatusResponse(c, status)
+}
+
+func RevokeClientToken(c *gin.Context) {
+	uuid := c.Param("uuid")
+	if uuid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid or missing UUID"})
+		return
+	}
+	status, err := revokeClientTokenFunc(uuid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	userUUID, _ := c.Get("uuid")
+	auditLogFunc(c.ClientIP(), userUUID.(string), "revoke client token:"+uuid, "warn")
+	writeClientTokenStatusResponse(c, status)
+	return
 }

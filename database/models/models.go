@@ -10,6 +10,9 @@ import (
 type Client struct {
 	UUID             string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
 	Token            string    `json:"token,omitempty" gorm:"type:varchar(255);unique;not null"`
+	TokenIssuedAt    LocalTime `json:"token_issued_at,omitempty" gorm:"type:timestamp"`
+	TokenExpiresAt   LocalTime `json:"token_expires_at,omitempty" gorm:"type:timestamp"`
+	TokenRevokedAt   LocalTime `json:"token_revoked_at,omitempty" gorm:"type:timestamp"`
 	Name             string    `json:"name" gorm:"type:varchar(100)"`
 	CpuName          string    `json:"cpu_name" gorm:"type:varchar(100)"`
 	Virtualization   string    `json:"virtualization" gorm:"type:varchar(50)"`

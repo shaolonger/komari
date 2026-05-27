@@ -133,6 +133,13 @@ cat ./data/init_password.txt
 
 [Komari Agent Information Reporting and Event Handling Documentation](https://komari-document.pages.dev/dev/agent.html)
 
+## Security Notes For Agent Tokens
+
+- Komari now expects client/agent control-plane authentication through the `Authorization: Bearer <token>` header instead of a `?token=` query string.
+- Admin APIs now support client token lifecycle operations at `/api/admin/client/:uuid/token`, `/api/admin/client/:uuid/token/rotate`, `/api/admin/client/:uuid/token/revoke`, and `/api/admin/client/:uuid/token/reissue`.
+- `rotate` and `reissue` accept an optional JSON body like `{"expires_in_hours": 24}` to issue a token that expires automatically; `revoke` invalidates the current token immediately.
+- After rotating or reissuing a token, redeploy the agent with the new credential before expecting it to reconnect.
+
 ## Contributing
 
 Issues and Pull Requests are welcome!
