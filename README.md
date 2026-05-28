@@ -41,6 +41,8 @@ chmod +x install-komari.sh
 sudo ./install-komari.sh
 ```
 
+The installer now defaults to downloading release binaries from `shaolonger/komari`. If you maintain a different fork, set `KOMARI_RELEASE_REPO=<owner>/<repo>` before running the script.
+
 If `sudo journalctl -u komari -f` shows `Exec format error` after using an older copy of the installer, re-download the latest `install-komari.sh` and run it again. That error usually means the previous script saved an invalid download instead of a real Linux binary.
 
 ### 2. Docker Deployment

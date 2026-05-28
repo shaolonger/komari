@@ -23,7 +23,7 @@ log_step() {
     echo -e "${YELLOW}$1${NC}"
 }
 
-RELEASE_REPO="${KOMARI_RELEASE_REPO:-komari-monitor/komari}"
+RELEASE_REPO="${KOMARI_RELEASE_REPO:-shaolonger/komari}"
 
 # Global variables
 INSTALL_DIR="/opt/komari"
