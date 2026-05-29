@@ -1,6 +1,9 @@
 name: Attach Release Binaries
 
 on:
+  push:
+    tags:
+      - 'v*'
   release:
     types: [published]
   workflow_dispatch:
@@ -18,11 +21,80 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+concurrency:
+  group: attach-release-binaries-${{ github.event.inputs.tag_name || github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  build-and-attach-binaries:
+  prepare-release:
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release-meta.outputs.release_tag }}
+      should_build: ${{ steps.asset-check.outputs.should_build }}
+
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag_name || github.event.release.tag_name || github.ref_name }}
+
+    steps:
+      - name: Resolve release tag
+        id: release-meta
+        run: echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for release to exist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          max_attempts=120
+          attempt=0
+
+          until gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            if [ "${{ github.event_name }}" != "push" ] || [ "$attempt" -ge "$max_attempts" ]; then
+              echo "Release ${RELEASE_TAG} was not found for event ${{ github.event_name }}." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Check whether all release assets already exist
+        id: asset-check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mapfile -t existing_assets < <(gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+          expected_assets=(
+            "komari-linux-386"
+            "komari-linux-amd64"
+            "komari-linux-arm64"
+            "komari-linux-riscv64"
+            "komari-windows-386.exe"
+            "komari-windows-amd64.exe"
+            "komari-windows-arm64.exe"
+          )
+
+          missing_assets=()
+          for asset in "${expected_assets[@]}"; do
+            if ! printf '%s\n' "${existing_assets[@]}" | grep -Fxq "$asset"; then
+              missing_assets+=("$asset")
+            fi
+          done
+
+          if [ "${#missing_assets[@]}" -eq 0 ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf 'Missing release assets: %s\n' "${missing_assets[*]}"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+
+  build-and-attach-binaries:
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
 
     strategy:
       matrix:
@@ -132,5 +204,5 @@ jobs:
             BINARY_NAME=${BINARY_NAME}.exe
           fi
           # Upload the binary as a release asset using GitHub CLI
-          gh release upload ${RELEASE_TAG} $BINARY_NAME --repo ${{ github.repository }}
+          gh release upload ${RELEASE_TAG} $BINARY_NAME --clobber --repo ${{ github.repository }}
         shell: bash
