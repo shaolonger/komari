@@ -811,8 +811,8 @@ sudo ./install-komari.sh
 
 Linux / macOS：
 
-1. 先备份现有配置文件，例如：`sudo cp /opt/komari/komari-agent.json /opt/komari/komari-agent.json.bak`
-2. 优先重新执行当前 fork 的安装脚本，并直接复用已有配置文件，而不是再次把 token 写进命令行：
+1. 先确认现有配置文件确实存在；如果存在，再备份，例如：`sudo cp /opt/komari/komari-agent.json /opt/komari/komari-agent.json.bak`
+2. 如果 `/opt/komari/komari-agent.json` 已存在，优先重新执行当前 fork 的安装脚本，并直接复用已有配置文件，而不是再次把 token 写进命令行：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
@@ -822,8 +822,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs
   --ping-min-interval-millis 0
 ```
 
-3. 安装脚本会替换二进制、重建服务定义并重新启动 `komari-agent`
-4. 升级后马上检查：
+3. 如果这个配置文件根本不存在，不要把这个路径直接传给 `--config`；请先恢复备份，或者改为传入你当前面板的 `--endpoint` 和新 token，让安装脚本重新生成配置文件
+4. 安装脚本会替换二进制、重建服务定义并重新启动 `komari-agent`
+5. 升级后马上检查：
 
 ```bash
 sudo systemctl status komari-agent
