@@ -539,6 +539,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.git
 komari-agent
 ```
 
+#### 当前 `shaolonger/komari-agent` fork 必须额外记住的 5 件事
+
+1. 默认只开启基础监控；远程终端、远程命令执行和 ping 探测都需要显式开启。
+2. 要使用面板里的“延迟监测”，必须在 Agent 配置里设置 `enable_ping=true`，或者启动时传 `--enable-ping`。
+3. `--ignore-unsafe-cert` 会禁用远程控制和 ping，所以它不能作为“为了让延迟监测跑起来而长期打开”的生产配置。
+4. ping 默认只允许 `tcp,http` 两种类型、只允许 `80,443` 端口，并默认拒绝私有 / 环回 / 链路本地目标；如果你的探测目标不在这个范围内，需要显式放宽对应参数。
+5. 如果同一台节点要同时执行多条相同 `interval` 的延迟监测任务，请提高 `max_concurrent_pings`，并把 `ping_min_interval_millis` 设为 `0`。当前 fork 中，这个值现在会真正关闭最小接收间隔，不会再回退到默认 `500ms`。另外，`max_control_requests` / `control_request_window` 现在只影响远程终端和远程命令执行，不再影响 ping。
+
 #### 方式 B：使用 Auto Discovery Key 自动注册
 
 这适合一口气接入很多机器，不想手动一个个创建设备的场景。
@@ -637,7 +645,12 @@ screen -S komari-agent
 6. `--info-report-interval`：基础信息上报间隔，单位分钟，默认 `5`。
 7. `--reconnect-interval`：断线重连间隔，单位秒，默认 `5`。
 8. `--max-retries`：最大重试次数，默认 `3`。
-9. `-u, --ignore-unsafe-cert`：忽略不安全证书，只建议测试环境临时使用。
+9. `-u, --ignore-unsafe-cert`：忽略不安全证书，只建议测试环境临时使用；当前 fork 中它会直接禁用远程控制和 ping。
+10. `--enable-ping`：显式开启面板“延迟监测”用到的 ping 探测能力。
+11. `--allowed-ping-types`：允许的 ping 类型，默认只有 `tcp,http`。
+12. `--allowed-ping-tcp-ports`：允许的 TCP / HTTP 探测端口，默认只有 `80,443`。
+13. `--max-concurrent-pings`：单机允许的最大并发 ping 任务数。
+14. `--ping-min-interval-millis`：同一台 Agent 接受两条 ping 任务之间的最小间隔。当前 fork 中，显式设为 `0` 就是关闭这个最小间隔。
 
 一个更适合生产环境的 Linux / macOS 示例（假设你已经准备好受限权限的配置文件）：
 
@@ -645,11 +658,38 @@ screen -S komari-agent
 bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
   --config /etc/komari/komari-agent.json \
   --disable-web-ssh \
+  --enable-ping \
   --interval 5.0 \
+  --max-concurrent-pings 24 \
+  --ping-min-interval-millis 0 \
   --max-retries 5 \
   --reconnect-interval 10 \
   --info-report-interval 15
 ```
+
+如果你准备在同一台节点上批量执行多条相同 `interval` 的 TCP / HTTP 延迟任务，推荐至少准备一份类似下面的配置文件：
+
+```json
+{
+  "endpoint": "https://monitor.example.com",
+  "token": "replace-with-real-token",
+  "enable_ping": true,
+  "allowed_ping_types": "tcp,http",
+  "allowed_ping_tcp_ports": "80,443",
+  "max_concurrent_pings": 24,
+  "ping_min_interval_millis": 0
+}
+```
+
+如果你的延迟任务目标是内网地址、私有负载均衡器或环回地址，还需要额外设置：
+
+```json
+{
+  "allow_private_ping_targets": true
+}
+```
+
+只有在你明确知道自己在探测什么、并且能接受相应的安全风险时，才建议放开这个选项。
 
 #### 安装完成后怎么看状态和日志
 
@@ -765,7 +805,41 @@ sudo ./install-komari.sh
 3. 覆盖旧程序。
 4. 重启服务。
 
-### 11.4 备份什么最重要
+### 11.4 已安装 Agent 如何升级到当前修复版
+
+如果你的 Agent 已经装在 VPS 上，推荐按下面的方式升级：
+
+Linux / macOS：
+
+1. 先备份现有配置文件，例如：`sudo cp /opt/komari/komari-agent.json /opt/komari/komari-agent.json.bak`
+2. 优先重新执行当前 fork 的安装脚本，并直接复用已有配置文件，而不是再次把 token 写进命令行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+  --config /opt/komari/komari-agent.json \
+  --enable-ping \
+  --max-concurrent-pings 24 \
+  --ping-min-interval-millis 0
+```
+
+3. 安装脚本会替换二进制、重建服务定义并重新启动 `komari-agent`
+4. 升级后马上检查：
+
+```bash
+sudo systemctl status komari-agent
+sudo journalctl -u komari-agent -n 100 -f
+```
+
+Windows：
+
+1. 以管理员身份备份 `%ProgramFiles%\Komari\komari-agent.json`
+2. 重新执行 `install.ps1`，优先继续用 `--config` 指向现有配置文件
+3. 安装脚本会通过 NSSM 重建并重启 `komari-agent` 服务
+4. 升级后确认配置文件里已经包含你要的 `enable_ping`、`max_concurrent_pings`、`ping_min_interval_millis` 等参数
+
+如果你是手工管理二进制，则直接替换旧 Agent 二进制并重启服务即可，但同样建议先备份配置文件。
+
+### 11.5 备份什么最重要
 
 最重要的是你的数据目录。
 
@@ -839,6 +913,43 @@ chown -R 10001:10001 ./data
 ```
 
 然后重启服务，再重新配置 2FA。
+
+### 12.7 延迟监测任务加了但没结果，或者只出来一部分结果
+
+先在 Agent 所在机器上看日志：
+
+```bash
+sudo journalctl -u komari-agent -n 100 -f
+```
+
+如果你看到这些日志，通常分别代表：
+
+1. `ping capability is disabled`
+说明你没有显式开启 ping。把 Agent 配置里的 `enable_ping` 设为 `true`，或启动参数加上 `--enable-ping`。
+
+2. `ping port ... is not allowed`
+说明目标端口不在白名单里。把 `allowed_ping_tcp_ports` 加上你要探测的端口。
+
+3. `ping target ... resolves to a restricted address`
+说明目标是私有 / 环回 / 链路本地地址。只有在你明确需要探测这些目标时，才把 `allow_private_ping_targets` 设为 `true`。
+
+4. `ping rate limit reached`
+说明同一台节点在同一轮里收到了多条 ping 任务，而 `ping_min_interval_millis` 还不合适。当前 fork 中，显式设为 `0` 才是关闭这个最小间隔。
+
+5. `concurrent ping limit reached`
+说明同一轮同时执行的 ping 数已经超过 `max_concurrent_pings`。把它调大到不小于同一台节点同一时刻会收到的任务数。
+
+如果你批量添加的是“同一台节点、多个相同 interval 的 TCP-Ping 任务”，最常见的最小可用配置通常是：
+
+```json
+{
+  "enable_ping": true,
+  "max_concurrent_pings": 24,
+  "ping_min_interval_millis": 0
+}
+```
+
+升级到当前修复版后，`max_control_requests` / `control_request_window` 不再影响 ping，所以如果你仍然看到问题，优先检查的就应该是 `enable_ping`、端口白名单、私网目标限制和并发 / 最小间隔这几项。
 
 ## 13. 给新手的最终建议
 

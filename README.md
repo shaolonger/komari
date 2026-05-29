@@ -142,6 +142,15 @@ cat ./data/init_password.txt
 - `rotate` and `reissue` accept an optional JSON body like `{"expires_in_hours": 24}` to issue a token that expires automatically; `revoke` invalidates the current token immediately.
 - After rotating or reissuing a token, redeploy the agent with the new credential before expecting it to reconnect.
 
+## Notes For The Current Forked Agent
+
+- The documentation in this fork assumes the agent repository is `shaolonger/komari-agent`, not the upstream `komari-monitor/komari-agent`.
+- In the current forked agent, remote terminal access, remote command execution, and remote ping are opt-in. If you want to use the panel's latency-monitoring page, enable `enable_ping` or pass `--enable-ping`.
+- `--ignore-unsafe-cert` disables remote-control capabilities and remote ping in the current fork. It is only suitable for temporary testing.
+- Ping defaults are intentionally narrow: only `tcp,http` and only ports `80,443`. Widen them only when your monitoring targets truly require it.
+- If one agent is expected to run multiple same-interval latency tasks at the same time, raise `max_concurrent_pings` and set `ping_min_interval_millis` to `0` in the agent config to disable the per-agent minimum-interval guard. Ping traffic is no longer counted against `max_control_requests`; that limiter now remains for terminal / exec traffic only.
+- The step-by-step Chinese guide at `docs/BEGINNER_GUIDE_zh.md` and the agent repository `readme.md` now document the exact config and upgrade flow for this fork.
+
 ## Contributing
 
 Issues and Pull Requests are welcome!

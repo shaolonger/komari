@@ -128,6 +128,14 @@ cat ./data/init_password.txt
 
 [Komariエージェント情報レポートおよびイベント処理ドキュメント](https://komari-document.pages.dev/dev/agent.html)
 
+## 現在の fork agent に関する注意
+
+- この fork のドキュメントは `shaolonger/komari-agent` を前提としており、上流の `komari-monitor/komari-agent` とは既定の挙動が一部異なります。
+- 現在の fork agent は基本監視のみが既定で有効です。リモート terminal、exec、ping は明示的に有効化してください。
+- レイテンシ監視を使う場合は `enable_ping` または `--enable-ping` が必要です。
+- `--ignore-unsafe-cert` を有効にすると、リモート制御と ping は無効になります。常用ではなく一時的な検証用途に限ってください。
+- 同じノードで同一 `interval` の ping タスクを複数同時に動かす場合は、`max_concurrent_pings` を増やし、`ping_min_interval_millis` を `0` に設定してください。現在の fork ではこれにより最小受信間隔が本当に無効化され、既定の `500ms` に戻りません。
+
 ## 貢献
 
 IssueやPull Requestを歓迎します！

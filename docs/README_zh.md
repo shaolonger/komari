@@ -132,6 +132,15 @@ cat ./data/init_password.txt
 
 [Komari Agent 信息上报与事件处理文档](https://komari-document.pages.dev/dev/agent.html)
 
+## 当前 fork Agent 注意事项
+
+- 当前这套文档默认配套的 Agent 仓库是 `shaolonger/komari-agent`，不是上游 `komari-monitor/komari-agent`。
+- 这个 fork 默认只开启基础监控；远程终端、远程命令执行和延迟监测用到的 ping 都需要显式开启。
+- 如果你要在面板里使用“延迟监测”，请在 Agent 配置里启用 `enable_ping` 或启动参数 `--enable-ping`。
+- `--ignore-unsafe-cert` 会禁用远程控制与 ping，只适合临时测试。
+- 同一台节点如果要同时执行多条相同 `interval` 的 ping 任务，请提高 `max_concurrent_pings`，并把 `ping_min_interval_millis` 设为 `0`。当前 fork 中这会真正关闭最小接收间隔，不会再回退到默认 `500ms`。
+- 更完整的安装、配置、延迟监测和升级说明见 [Komari 新手一步步部署与使用指南](./BEGINNER_GUIDE_zh.md) 以及 `shaolonger/komari-agent` 仓库的 `readme.md`。
+
 ## 贡献
 
 欢迎提交 Issue 或 Pull Request！
