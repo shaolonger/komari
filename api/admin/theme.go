@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -19,6 +20,11 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/public"
+)
+
+const (
+	themeArchiveConfigPath = "komari-theme.json"
+	themeArchiveIndexPath  = "dist/index.html"
 )
 
 // UploadTheme 上传主题
@@ -152,6 +158,32 @@ func SetTheme(c *gin.Context) {
 	api.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
 }
 
+func normalizeThemeArchivePath(name string) (string, bool) {
+	normalized := strings.TrimSpace(strings.ReplaceAll(name, "\\", "/"))
+	normalized = strings.TrimLeft(normalized, "/")
+	if normalized == "" {
+		return "", false
+	}
+
+	normalized = path.Clean(normalized)
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") {
+		return "", false
+	}
+
+	return normalized, true
+}
+
+func findThemeArchiveFile(files []*zip.File, want string) *zip.File {
+	for _, f := range files {
+		normalized, ok := normalizeThemeArchivePath(f.Name)
+		if ok && normalized == want {
+			return f
+		}
+	}
+
+	return nil
+}
+
 // extractAndValidateTheme 解压并验证主题
 func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	var themeInfo models.Theme
@@ -200,16 +232,13 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	}
 
 	// 查找komari-theme.json文件
-	var themeConfigFile *zip.File
-	for _, f := range r.File {
-		if f.Name == "komari-theme.json" {
-			themeConfigFile = f
-			break
-		}
-	}
+	themeConfigFile := findThemeArchiveFile(r.File, themeArchiveConfigPath)
 
 	if themeConfigFile == nil {
 		return themeInfo, fmt.Errorf("主题配置文件 komari-theme.json 不存在")
+	}
+	if findThemeArchiveFile(r.File, themeArchiveIndexPath) == nil {
+		return themeInfo, fmt.Errorf("主题缺少必需文件 dist/index.html")
 	}
 
 	// 读取主题配置
@@ -253,21 +282,27 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	}
 
 	// 解压文件到主题目录
+	cleanThemeDir := filepath.Clean(themeDir)
 	for _, f := range r.File {
-		path := filepath.Join(themeDir, f.Name)
+		normalizedName, ok := normalizeThemeArchivePath(f.Name)
+		if !ok {
+			continue
+		}
+
+		targetPath := filepath.Join(cleanThemeDir, filepath.FromSlash(normalizedName))
 
 		// 安全检查，防止路径遍历攻击
-		if !strings.HasPrefix(path, filepath.Clean(themeDir)+string(os.PathSeparator)) {
+		if targetPath != cleanThemeDir && !strings.HasPrefix(targetPath, cleanThemeDir+string(os.PathSeparator)) {
 			continue
 		}
 
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(path, f.FileInfo().Mode())
+			os.MkdirAll(targetPath, f.FileInfo().Mode())
 			continue
 		}
 
 		// 创建目录
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 			return themeInfo, fmt.Errorf("创建目录失败: %v", err)
 		}
 
@@ -277,7 +312,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 			return themeInfo, fmt.Errorf("打开压缩文件失败: %v", err)
 		}
 
-		outFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.FileInfo().Mode())
+		outFile, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.FileInfo().Mode())
 		if err != nil {
 			rc.Close()
 			return themeInfo, fmt.Errorf("创建文件失败: %v", err)
@@ -536,13 +571,7 @@ func peekThemeFromZip(zipPath string) (models.Theme, error) {
 	}
 	defer r.Close()
 
-	var themeConfigFile *zip.File
-	for _, f := range r.File {
-		if f.Name == "komari-theme.json" {
-			themeConfigFile = f
-			break
-		}
-	}
+	themeConfigFile := findThemeArchiveFile(r.File, themeArchiveConfigPath)
 
 	if themeConfigFile == nil {
 		return themeInfo, fmt.Errorf("主题配置文件 komari-theme.json 不存在，不是合法的主题包")
