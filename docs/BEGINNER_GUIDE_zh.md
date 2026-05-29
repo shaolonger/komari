@@ -506,7 +506,7 @@ curl -X POST \
 Linux / macOS：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --install \
   -e http://你的面板地址:25774 \
   -t 你的节点Token
 ```
@@ -514,7 +514,7 @@ bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/h
 如果你的面板已经启用了 HTTPS，把 `http://你的面板地址:25774` 改成正式的 HTTPS 地址，例如：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --install \
   -e https://monitor.example.com \
   -t 你的节点Token
 ```
@@ -522,21 +522,40 @@ bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/h
 Windows PowerShell：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '-e' 'https://monitor.example.com' '-t' '你的节点Token'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--install' '--endpoint' 'https://monitor.example.com' '--token' '你的节点Token'"
 ```
 
-安全提示：上面的 `-t 你的节点Token` 更适合测试环境或一次性快速接入。正式生产部署建议先把 token 写入仅 owner / 服务账户可读的 `komari-agent.json`，再通过 `--config /path/to/komari-agent.json` 安装或启动，避免 token 进入 shell history、进程参数和运维审计日志。
+安全提示：上面的 `-t 你的节点Token` 仍然更适合首次接入或临时接入，但你不需要再手动新建配置文件。当前 fork 的 `install.sh` / `install.ps1` 在执行 `--install` 或 `--reconfigure` 时，如果你传入了 `-t/--token` 且没有显式传 `--config`，会自动在默认安装目录生成受限权限的 `komari-agent.json`，后续服务只引用这个配置文件。正式生产环境里，首次安装完成后，日常版本升级优先直接使用 `--upgrade`；只有当你需要修改 endpoint、token、ping 或其他运行参数时，再使用 `--reconfigure`。
 
 安装脚本会自动：
 
 1. 下载对应平台的 `komari-agent` 二进制。
 2. 安装为系统服务。
 3. 直接启动 Agent。
+4. 后续继续作为统一管理入口使用。
 
 默认服务名通常是：
 
 ```text
 komari-agent
+```
+
+当前这套脚本已经不是“一次性安装器”，而是 Agent 的统一管理入口。无参数执行会进入交互菜单，也支持直接执行常见动作：
+
+Linux / macOS：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --upgrade
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --status
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --logs
+```
+
+Windows PowerShell：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--upgrade'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--status'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--logs'"
 ```
 
 #### 当前 `shaolonger/komari-agent` fork 必须额外记住的 5 件事
@@ -556,7 +575,7 @@ komari-agent
 Linux / macOS：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --install \
   -e https://your-komari-server.com \
   --auto-discovery your-ad-key
 ```
@@ -564,7 +583,7 @@ bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/h
 Windows PowerShell：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '-e' 'https://your-komari-server.com' '--auto-discovery' 'your-ad-key'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--install' '--endpoint' 'https://your-komari-server.com' '--auto-discovery' 'your-ad-key'"
 ```
 
 这种方式下，Agent 会自动向面板注册自己，不需要你提前手动创建节点。
@@ -655,7 +674,7 @@ screen -S komari-agent
 一个更适合生产环境的 Linux / macOS 示例（假设你已经准备好受限权限的配置文件）：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --install \
   --config /etc/komari/komari-agent.json \
   --disable-web-ssh \
   --enable-ping \
@@ -693,7 +712,27 @@ bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/h
 
 #### 安装完成后怎么看状态和日志
 
-如果你用了官方安装脚本并创建了 systemd 服务：
+如果你用了当前 fork 的官方安装脚本，后续推荐继续复用同一个管理脚本来查看状态、日志、重启或停止服务：
+
+Linux / macOS：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --status
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --logs
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --restart
+bash <(curl -sL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --stop
+```
+
+Windows PowerShell：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--status'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--logs'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--restart'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--stop'"
+```
+
+如果你想直接看底层服务管理器输出，Linux / macOS 仍然可以继续用：
 
 ```bash
 sudo systemctl status komari-agent
@@ -811,20 +850,34 @@ sudo ./install-komari.sh
 
 Linux / macOS：
 
-1. 先确认现有配置文件确实存在；如果存在，再备份，例如：`sudo cp /opt/komari/komari-agent.json /opt/komari/komari-agent.json.bak`
-2. 如果 `/opt/komari/komari-agent.json` 已存在，优先重新执行当前 fork 的安装脚本，并直接复用已有配置文件，而不是再次把 token 写进命令行：
+1. 先备份现有配置文件，例如：`sudo cp /opt/komari/komari-agent.json /opt/komari/komari-agent.json.bak`
+2. 如果你只是升级版本，不需要改 endpoint、token 或 ping 参数，直接执行统一升级命令：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) \
-  --config /opt/komari/komari-agent.json \
+bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --upgrade
+```
+
+3. `--upgrade` 只会替换二进制并重启现有服务，不会重建配置文件，也不会要求你手动补 `--config`
+4. 如果你同时还要修改 endpoint、token、Auto Discovery、`enable_ping`、`max_concurrent_pings` 或其他运行参数，改用 `--reconfigure`，例如：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --reconfigure \
+  -e https://monitor.example.com \
+  -t 新的节点Token \
   --enable-ping \
   --max-concurrent-pings 24 \
   --ping-min-interval-millis 0
 ```
 
-3. 如果这个配置文件根本不存在，不要把这个路径直接传给 `--config`；请先恢复备份，或者改为传入你当前面板的 `--endpoint` 和新 token，让安装脚本重新生成配置文件
-4. 安装脚本会替换二进制、重建服务定义并重新启动 `komari-agent`
-5. 升级后马上检查：
+5. 如果你已经有受限权限的配置文件，也可以继续用 `--reconfigure --config /opt/komari/komari-agent.json ...` 这种方式；如果配置文件不存在，不要伪造一个不存在的 `--config` 路径，应该先恢复备份，或者直接改用 `-e + -t` 让脚本自动生成新的默认配置文件
+6. 升级或重配后马上检查：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --status
+bash <(curl -fsSL https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.sh) --logs
+```
+
+你也可以继续直接查看底层 systemd / journalctl：
 
 ```bash
 sudo systemctl status komari-agent
@@ -834,9 +887,26 @@ sudo journalctl -u komari-agent -n 100 -f
 Windows：
 
 1. 以管理员身份备份 `%ProgramFiles%\Komari\komari-agent.json`
-2. 重新执行 `install.ps1`，优先继续用 `--config` 指向现有配置文件
-3. 安装脚本会通过 NSSM 重建并重启 `komari-agent` 服务
-4. 升级后确认配置文件里已经包含你要的 `enable_ping`、`max_concurrent_pings`、`ping_min_interval_millis` 等参数
+2. 如果你只是升级版本，直接执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--upgrade'"
+```
+
+3. `--upgrade` 只会替换二进制并重启已有的 NSSM 服务，不要求你手动补 `--config`
+4. 如果你同时还要改 endpoint、token 或 ping 参数，改用 `--reconfigure`，例如：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--reconfigure' '--endpoint' 'https://monitor.example.com' '--token' '新的节点Token' '--enable-ping' '--max-concurrent-pings' '24' '--ping-min-interval-millis' '0'"
+```
+
+5. 如果 `%ProgramFiles%\Komari\komari-agent.json` 不存在，不要把一个不存在的路径硬传给 `--config`；请先恢复备份，或者直接改用 `-e + -t` 让脚本重新生成默认配置文件
+6. 升级或重配后，优先继续用统一脚本查看状态和日志：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--status'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/shaolonger/komari-agent/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' '--logs'"
+```
 
 如果你是手工管理二进制，则直接替换旧 Agent 二进制并重启服务即可，但同样建议先备份配置文件。
 

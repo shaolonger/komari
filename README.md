@@ -149,7 +149,7 @@ cat ./data/init_password.txt
 - `--ignore-unsafe-cert` disables remote-control capabilities and remote ping in the current fork. It is only suitable for temporary testing.
 - Ping defaults are intentionally narrow: only `tcp,http` and only ports `80,443`. Widen them only when your monitoring targets truly require it.
 - If one agent is expected to run multiple same-interval latency tasks at the same time, raise `max_concurrent_pings` and set `ping_min_interval_millis` to `0` in the agent config to disable the per-agent minimum-interval guard. Ping traffic is no longer counted against `max_control_requests`; that limiter now remains for terminal / exec traffic only.
-- The step-by-step Chinese guide at `docs/BEGINNER_GUIDE_zh.md` and the agent repository `readme.md` now document the exact config and upgrade flow for this fork.
+- The step-by-step Chinese guide at `docs/BEGINNER_GUIDE_zh.md` and the agent repository `readme.md` now document the exact config, management-command, and upgrade flow for this fork.
 
 ## Contributing
 
