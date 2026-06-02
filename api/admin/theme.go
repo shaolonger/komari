@@ -191,7 +191,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	const (
 		MaxZipSize        = 10 * 1024 * 1024 // 10MB
 		MaxTotalUnzipSize = 30 * 1024 * 1024 // 30MB
-		MaxFileCount      = 200
+		MaxFileCount      = 2000
 		MaxSingleFileSize = 5 * 1024 * 1024  // 5MB
 	)
 
@@ -213,7 +213,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 
 	// 2. 限制文件数量
 	if len(r.File) > MaxFileCount {
-		return themeInfo, fmt.Errorf("主题包内文件数量超过限制 (最大 200 个)")
+		return themeInfo, fmt.Errorf("主题包内文件数量超过限制 (最大 %d 个)", MaxFileCount)
 	}
 
 	// 3. 预先计算总解压大小和单文件解压大小限制
