@@ -180,8 +180,12 @@ func CompactRecord() error {
 }
 
 func migrateOldRecords(db *gorm.DB) error {
+	return migrateOldRecordsAt(db, time.Now())
+}
+
+func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 	// 计算 4 小时前的时间
-	fourHoursAgo := time.Now().Add(-4 * time.Hour)
+	fourHoursAgo := now.Add(-4 * time.Hour)
 
 	// 查询 records 表中超过 4 小时的记录
 	var records []models.Record
@@ -349,7 +353,7 @@ func migrateOldRecords(db *gorm.DB) error {
 			}
 		}
 
-		// 删除 records 表中的旧数据
+		// 删除 records 表中的旧数据，保留最近 5 小时的明细数据。
 		if err := tx.Table("records").Where("time < ?", fourHoursAgo.Add(-1*time.Hour)).Delete(&models.Record{}).Error; err != nil {
 			return err
 		}

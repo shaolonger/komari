@@ -21,12 +21,13 @@ var _ = func() bool {
 	return true
 }()
 
-// TestCompactRecord tests the database compaction logic by inserting 4h30m of data (one record per minute),
-// then running migrateOldRecords and verifying the aggregation and cleanup.
+// TestCompactRecord verifies that old records are compacted into 15-minute buckets
+// while keeping the most recent 5 hours of raw data available for short-range views.
 func TestCompactRecord(t *testing.T) {
 	const totalMinutes = 12*60 + 30
-	now := time.Now()
-	threshold := now.Add(-4 * time.Hour)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	compactBefore := now.Add(-4 * time.Hour)
+	deleteBefore := now.Add(-5 * time.Hour)
 
 	// 使用 sqlite 内存数据库并迁移表结构
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -34,7 +35,7 @@ func TestCompactRecord(t *testing.T) {
 	assert.NoError(t, db.AutoMigrate(&models.Record{}))
 	assert.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
 
-	expectedGroups := make(map[time.Time]struct{})
+	expectedGroups := make(map[string]struct{})
 	expectedRemain := 0
 
 	// 插入数据
@@ -44,10 +45,11 @@ func TestCompactRecord(t *testing.T) {
 		err := db.Create(&rec).Error
 		assert.NoError(t, err)
 
-		if recTime.Before(threshold) {
-			slot := recTime.Truncate(time.Hour)
+		if recTime.Before(compactBefore) {
+			slot := recTime.Truncate(15 * time.Minute).Format(time.RFC3339)
 			expectedGroups[slot] = struct{}{}
-		} else {
+		}
+		if !recTime.Before(deleteBefore) {
 			expectedRemain++
 		}
 	}
@@ -75,7 +77,7 @@ func TestCompactRecord(t *testing.T) {
 	}
 
 	// 运行压缩（迁移）逻辑
-	err = migrateOldRecords(db)
+	err = migrateOldRecordsAt(db, now)
 	assert.NoError(t, err)
 
 	// 验证 long-term 表中的聚合记录数
@@ -86,7 +88,7 @@ func TestCompactRecord(t *testing.T) {
 	// 验证原始表中剩余记录数
 	var remainCount int64
 	assert.NoError(t, db.Table("records").Count(&remainCount).Error)
-	assert.Equal(t, int64(expectedRemain), remainCount+1)
+	assert.Equal(t, int64(expectedRemain), remainCount)
 
 	// 导出压缩后的数据到 CSV
 	var compRecs []models.Record
