@@ -22,6 +22,15 @@ import (
 )
 
 var currencyCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+var capabilityBooleanFields = []string{
+	"capability_ping",
+	"capability_terminal",
+	"capability_remote_exec",
+	"capability_remote_control",
+	"capability_gpu",
+	"capability_auto_update",
+	"capability_private_ping_targets",
+}
 
 type ClientTokenStatus struct {
 	Token     string           `json:"token"`
@@ -202,6 +211,9 @@ func SaveClientInfo(update map[string]interface{}) error {
 	}
 
 	if err := verify(update); err != nil {
+		return err
+	}
+	if err := normalizeCapabilityMetadata(update); err != nil {
 		return err
 	}
 
@@ -424,6 +436,28 @@ func normalizeAssetMetadata(updates map[string]interface{}) error {
 	if value, exists := updates["asset_ignored"]; exists {
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("asset_ignored must be a boolean")
+		}
+	}
+	return nil
+}
+
+func normalizeBooleanField(updates map[string]interface{}, key string) error {
+	value, exists := updates[key]
+	if !exists {
+		return nil
+	}
+	booleanValue, ok := value.(bool)
+	if !ok {
+		return fmt.Errorf("%s must be a boolean", key)
+	}
+	updates[key] = booleanValue
+	return nil
+}
+
+func normalizeCapabilityMetadata(updates map[string]interface{}) error {
+	for _, key := range capabilityBooleanFields {
+		if err := normalizeBooleanField(updates, key); err != nil {
+			return err
 		}
 	}
 	return nil

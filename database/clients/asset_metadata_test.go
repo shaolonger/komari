@@ -47,3 +47,29 @@ func TestNormalizeAssetMetadataRejectsNonBooleanAssetIgnored(t *testing.T) {
 		t.Fatal("expected non-boolean asset_ignored to be rejected")
 	}
 }
+
+func TestNormalizeCapabilityMetadataAcceptsBooleanFields(t *testing.T) {
+	updates := map[string]interface{}{
+		"capability_ping":                 true,
+		"capability_terminal":             false,
+		"capability_remote_exec":          true,
+		"capability_remote_control":       false,
+		"capability_gpu":                  true,
+		"capability_auto_update":          true,
+		"capability_private_ping_targets": false,
+	}
+
+	if err := normalizeCapabilityMetadata(updates); err != nil {
+		t.Fatalf("normalizeCapabilityMetadata() error = %v", err)
+	}
+}
+
+func TestNormalizeCapabilityMetadataRejectsInvalidTypes(t *testing.T) {
+	updates := map[string]interface{}{
+		"capability_ping": "true",
+	}
+
+	if err := normalizeCapabilityMetadata(updates); err == nil {
+		t.Fatal("expected invalid capability type to be rejected")
+	}
+}

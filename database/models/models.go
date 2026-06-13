@@ -8,45 +8,52 @@ import (
 
 // Client represents a registered client device
 type Client struct {
-	UUID             string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
-	Token            string    `json:"token,omitempty" gorm:"type:varchar(255);unique;not null"`
-	TokenIssuedAt    LocalTime `json:"token_issued_at,omitempty" gorm:"type:timestamp"`
-	TokenExpiresAt   LocalTime `json:"token_expires_at,omitempty" gorm:"type:timestamp"`
-	TokenRevokedAt   LocalTime `json:"token_revoked_at,omitempty" gorm:"type:timestamp"`
-	Name             string    `json:"name" gorm:"type:varchar(100)"`
-	CpuName          string    `json:"cpu_name" gorm:"type:varchar(100)"`
-	Virtualization   string    `json:"virtualization" gorm:"type:varchar(50)"`
-	Arch             string    `json:"arch" gorm:"type:varchar(50)"`
-	CpuCores         int       `json:"cpu_cores" gorm:"type:int"`
-	OS               string    `json:"os" gorm:"type:varchar(100)"`
-	KernelVersion    string    `json:"kernel_version" gorm:"type:varchar(100)"`
-	GpuName          string    `json:"gpu_name" gorm:"type:varchar(100)"`
-	IPv4             string    `json:"ipv4,omitempty" gorm:"type:varchar(100)"`
-	IPv6             string    `json:"ipv6,omitempty" gorm:"type:varchar(100)"`
-	Region           string    `json:"region" gorm:"type:varchar(100)"`
-	Remark           string    `json:"remark,omitempty" gorm:"type:longtext"`
-	PublicRemark     string    `json:"public_remark,omitempty" gorm:"type:longtext"`
-	MemTotal         int64     `json:"mem_total" gorm:"type:bigint"`
-	SwapTotal        int64     `json:"swap_total" gorm:"type:bigint"`
-	DiskTotal        int64     `json:"disk_total" gorm:"type:bigint"`
-	Version          string    `json:"version,omitempty" gorm:"type:varchar(100)"`
-	Weight           int       `json:"weight" gorm:"type:int"`
-	Price            float64   `json:"price"`
-	BillingCycle     int       `json:"billing_cycle"`
-	AutoRenewal      bool      `json:"auto_renewal" gorm:"default:false"` // 是否自动续费
-	Currency         string    `json:"currency" gorm:"type:varchar(20);default:'$'"`
-	CurrencyCode     string    `json:"currency_code" gorm:"type:varchar(10)"`
-	Provider         string    `json:"provider" gorm:"type:varchar(100)"`
-	BusinessRole     string    `json:"business_role" gorm:"type:varchar(100)"`
-	AssetIgnored     bool      `json:"asset_ignored" gorm:"default:false"`
-	ExpiredAt        LocalTime `json:"expired_at" gorm:"type:timestamp"`
-	Group            string    `json:"group" gorm:"type:varchar(100)"`
-	Tags             string    `json:"tags" gorm:"type:text"` // split by ';'
-	Hidden           bool      `json:"hidden" gorm:"default:false"`
-	TrafficLimit     int64     `json:"traffic_limit" gorm:"type:bigint"`
-	TrafficLimitType string    `json:"traffic_limit_type" gorm:"type:varchar(10);default:'max'"` // 流量阈值类型：sum max min up down
-	CreatedAt        LocalTime `json:"created_at"`
-	UpdatedAt        LocalTime `json:"updated_at"`
+	UUID                         string    `json:"uuid,omitempty" gorm:"type:varchar(36);primaryKey"`
+	Token                        string    `json:"token,omitempty" gorm:"type:varchar(255);unique;not null"`
+	TokenIssuedAt                LocalTime `json:"token_issued_at,omitempty" gorm:"type:timestamp"`
+	TokenExpiresAt               LocalTime `json:"token_expires_at,omitempty" gorm:"type:timestamp"`
+	TokenRevokedAt               LocalTime `json:"token_revoked_at,omitempty" gorm:"type:timestamp"`
+	Name                         string    `json:"name" gorm:"type:varchar(100)"`
+	CpuName                      string    `json:"cpu_name" gorm:"type:varchar(100)"`
+	Virtualization               string    `json:"virtualization" gorm:"type:varchar(50)"`
+	Arch                         string    `json:"arch" gorm:"type:varchar(50)"`
+	CpuCores                     int       `json:"cpu_cores" gorm:"type:int"`
+	OS                           string    `json:"os" gorm:"type:varchar(100)"`
+	KernelVersion                string    `json:"kernel_version" gorm:"type:varchar(100)"`
+	GpuName                      string    `json:"gpu_name" gorm:"type:varchar(100)"`
+	IPv4                         string    `json:"ipv4,omitempty" gorm:"type:varchar(100)"`
+	IPv6                         string    `json:"ipv6,omitempty" gorm:"type:varchar(100)"`
+	Region                       string    `json:"region" gorm:"type:varchar(100)"`
+	Remark                       string    `json:"remark,omitempty" gorm:"type:longtext"`
+	PublicRemark                 string    `json:"public_remark,omitempty" gorm:"type:longtext"`
+	MemTotal                     int64     `json:"mem_total" gorm:"type:bigint"`
+	SwapTotal                    int64     `json:"swap_total" gorm:"type:bigint"`
+	DiskTotal                    int64     `json:"disk_total" gorm:"type:bigint"`
+	Version                      string    `json:"version,omitempty" gorm:"type:varchar(100)"`
+	Weight                       int       `json:"weight" gorm:"type:int"`
+	Price                        float64   `json:"price"`
+	BillingCycle                 int       `json:"billing_cycle"`
+	AutoRenewal                  bool      `json:"auto_renewal" gorm:"default:false"` // 是否自动续费
+	Currency                     string    `json:"currency" gorm:"type:varchar(20);default:'$'"`
+	CurrencyCode                 string    `json:"currency_code" gorm:"type:varchar(10)"`
+	Provider                     string    `json:"provider" gorm:"type:varchar(100)"`
+	BusinessRole                 string    `json:"business_role" gorm:"type:varchar(100)"`
+	AssetIgnored                 bool      `json:"asset_ignored" gorm:"default:false"`
+	CapabilityPing               bool      `json:"capability_ping" gorm:"default:false"`
+	CapabilityTerminal           bool      `json:"capability_terminal" gorm:"default:false"`
+	CapabilityRemoteExec         bool      `json:"capability_remote_exec" gorm:"default:false"`
+	CapabilityRemoteControl      bool      `json:"capability_remote_control" gorm:"default:false"`
+	CapabilityGPU                bool      `json:"capability_gpu" gorm:"default:false"`
+	CapabilityAutoUpdate         bool      `json:"capability_auto_update" gorm:"default:false"`
+	CapabilityPrivatePingTargets bool      `json:"capability_private_ping_targets" gorm:"default:false"`
+	ExpiredAt                    LocalTime `json:"expired_at" gorm:"type:timestamp"`
+	Group                        string    `json:"group" gorm:"type:varchar(100)"`
+	Tags                         string    `json:"tags" gorm:"type:text"` // split by ';'
+	Hidden                       bool      `json:"hidden" gorm:"default:false"`
+	TrafficLimit                 int64     `json:"traffic_limit" gorm:"type:bigint"`
+	TrafficLimitType             string    `json:"traffic_limit_type" gorm:"type:varchar(10);default:'max'"` // 流量阈值类型：sum max min up down
+	CreatedAt                    LocalTime `json:"created_at"`
+	UpdatedAt                    LocalTime `json:"updated_at"`
 }
 
 // User represents an authenticated user
