@@ -82,6 +82,7 @@ type assetAssessment struct {
 	metadataGap    bool
 	underused      bool
 	highRisk       bool
+	riskScore      int
 }
 
 func GetClientAssetSummary(c *gin.Context) {
@@ -348,6 +349,7 @@ func assessClientAsset(
 	}
 
 	assessment.highRisk = riskScore >= 5
+	assessment.riskScore = riskScore
 	return assessment
 }
 
