@@ -74,15 +74,19 @@ type assetPortfolioSummary struct {
 }
 
 type assetAssessment struct {
-	monthlyCost    float64
-	annualizedCost float64
-	remainingValue float64
-	daysRemaining  int
-	hasExpiry      bool
-	metadataGap    bool
-	underused      bool
-	highRisk       bool
-	riskScore      int
+	monthlyCost     float64
+	annualizedCost  float64
+	remainingValue  float64
+	daysRemaining   int
+	hasExpiry       bool
+	metadataGap     bool
+	underused       bool
+	highRisk        bool
+	riskScore       int
+	cpuUsage        float64
+	memoryUsage     float64
+	trafficPct      float64
+	efficiencyScore float64
 }
 
 func GetClientAssetSummary(c *gin.Context) {
@@ -304,6 +308,9 @@ func assessClientAsset(
 		}
 		trafficPct = trafficPercentage(client, report)
 	}
+	assessment.cpuUsage = cpuUsage
+	assessment.memoryUsage = memoryUsage
+	assessment.trafficPct = trafficPct
 
 	assessment.underused =
 		online &&
@@ -314,6 +321,7 @@ func assessClientAsset(
 			cpuUsage < 10 &&
 			memoryUsage < 25 &&
 			trafficPct < 15
+	assessment.efficiencyScore = monthlyCost * (1 - maxFloat(cpuUsage/100, memoryUsage/100, minFloat(trafficPct, 100)/100))
 
 	riskScore := 0
 	if !online {
@@ -351,6 +359,26 @@ func assessClientAsset(
 	assessment.highRisk = riskScore >= 5
 	assessment.riskScore = riskScore
 	return assessment
+}
+
+func maxFloat(values ...float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	max := values[0]
+	for _, value := range values[1:] {
+		if value > max {
+			max = value
+		}
+	}
+	return max
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func metadataMissingFields(client models.Client) []string {

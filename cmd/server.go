@@ -269,6 +269,7 @@ func RunServer() {
 		{
 			clientGroup.POST("/add", admin.AddClient)
 			clientGroup.GET("/list", admin.ListClients)
+			clientGroup.GET("/assets", admin.GetClientAssetInventory)
 			clientGroup.GET("/asset-summary", admin.GetClientAssetSummary)
 			clientGroup.GET("/asset-issues", admin.GetClientAssetIssues)
 			clientGroup.POST("/batch-edit", admin.BatchEditClientAssets)
