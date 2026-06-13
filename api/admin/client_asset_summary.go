@@ -94,6 +94,18 @@ func GetClientAssetSummary(c *gin.Context) {
 		return
 	}
 
+	includeIgnored := true
+	if raw := strings.TrimSpace(c.Query("include_ignored")); raw != "" {
+		includeIgnored = raw != "false" && raw != "0"
+	}
+	allClients = filterAssetSummaryClients(
+		allClients,
+		strings.TrimSpace(c.Query("provider")),
+		strings.TrimSpace(c.Query("currency")),
+		strings.TrimSpace(c.Query("role")),
+		includeIgnored,
+	)
+
 	latest := ws.GetLatestReport()
 	onlineSet := make(map[string]bool)
 	for _, uuid := range ws.GetAllOnlineUUIDs() {
@@ -104,6 +116,36 @@ func GetClientAssetSummary(c *gin.Context) {
 		"status": "success",
 		"data":   buildClientAssetSummary(allClients, latest, onlineSet, time.Now()),
 	})
+}
+
+func filterAssetSummaryClients(
+	allClients []models.Client,
+	provider string,
+	currency string,
+	role string,
+	includeIgnored bool,
+) []models.Client {
+	if provider == "" && currency == "" && role == "" && includeIgnored {
+		return allClients
+	}
+
+	filtered := make([]models.Client, 0, len(allClients))
+	for _, client := range allClients {
+		if !includeIgnored && client.AssetIgnored {
+			continue
+		}
+		if provider != "" && providerLabel(client) != provider {
+			continue
+		}
+		if currency != "" && currencyKey(client) != currency {
+			continue
+		}
+		if role != "" && roleLabel(client) != role {
+			continue
+		}
+		filtered = append(filtered, client)
+	}
+	return filtered
 }
 
 func buildClientAssetSummary(
@@ -334,6 +376,16 @@ func providerLabel(client models.Client) string {
 		return value
 	}
 	return "Unassigned"
+}
+
+func roleLabel(client models.Client) string {
+	if value := strings.TrimSpace(client.BusinessRole); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(client.PublicRemark); value != "" {
+		return value
+	}
+	return "No role label"
 }
 
 func currencyKey(client models.Client) string {

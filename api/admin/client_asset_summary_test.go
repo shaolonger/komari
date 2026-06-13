@@ -189,6 +189,29 @@ func TestBuildClientAssetSummary(t *testing.T) {
 	}
 }
 
+func TestFilterAssetSummaryClients(t *testing.T) {
+	clients := []models.Client{
+		{UUID: "1", Provider: "CloudSilk", BusinessRole: "Ingress", CurrencyCode: "USD"},
+		{UUID: "2", Group: "fallback-group", CurrencyCode: "USD", AssetIgnored: true},
+		{UUID: "3", Provider: "RackNerd", BusinessRole: "Backup", Currency: "¥"},
+	}
+
+	filtered := filterAssetSummaryClients(clients, "CloudSilk", "", "", true)
+	if len(filtered) != 1 || filtered[0].UUID != "1" {
+		t.Fatalf("provider filter mismatch: %+v", filtered)
+	}
+
+	filtered = filterAssetSummaryClients(clients, "", "USD", "", false)
+	if len(filtered) != 1 || filtered[0].UUID != "1" {
+		t.Fatalf("currency/include_ignored filter mismatch: %+v", filtered)
+	}
+
+	filtered = filterAssetSummaryClients(clients, "", "", "Backup", true)
+	if len(filtered) != 1 || filtered[0].UUID != "3" {
+		t.Fatalf("role filter mismatch: %+v", filtered)
+	}
+}
+
 func assertApprox(t *testing.T, got, want, epsilon float64, field string) {
 	t.Helper()
 	if math.Abs(got-want) > epsilon {
