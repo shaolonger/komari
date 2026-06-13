@@ -1,0 +1,10 @@
+{
+  "name": "Komari Default Placeholder",
+  "short": "default",
+  "author": "Komari",
+  "repo": "https://github.com/komari-monitor/komari-web",
+  "description": "Minimal placeholder metadata for source checkouts without bundled frontend assets.",
+  "version": "0.0.0",
+  "type": "managed",
+  "configuration": []
+}

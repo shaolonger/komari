@@ -1,2 +1,6 @@
 dist/*
 defaultTheme/*
+!defaultTheme/dist/
+defaultTheme/dist/*
+!defaultTheme/dist/index.html
+!defaultTheme/komari-theme.json
