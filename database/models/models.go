@@ -35,6 +35,10 @@ type Client struct {
 	BillingCycle     int       `json:"billing_cycle"`
 	AutoRenewal      bool      `json:"auto_renewal" gorm:"default:false"` // 是否自动续费
 	Currency         string    `json:"currency" gorm:"type:varchar(20);default:'$'"`
+	CurrencyCode     string    `json:"currency_code" gorm:"type:varchar(10)"`
+	Provider         string    `json:"provider" gorm:"type:varchar(100)"`
+	BusinessRole     string    `json:"business_role" gorm:"type:varchar(100)"`
+	AssetIgnored     bool      `json:"asset_ignored" gorm:"default:false"`
 	ExpiredAt        LocalTime `json:"expired_at" gorm:"type:timestamp"`
 	Group            string    `json:"group" gorm:"type:varchar(100)"`
 	Tags             string    `json:"tags" gorm:"type:text"` // split by ';'
@@ -98,14 +102,14 @@ type Record struct {
 
 // GPURecord logs individual GPU metrics over time
 type GPURecord struct {
-	Client      string    `json:"client" gorm:"type:varchar(36);index"`           // 客户端UUID
-	Time        LocalTime `json:"time" gorm:"index"`                              // 记录时间
-	DeviceIndex int       `json:"device_index" gorm:"index"`                      // GPU设备索引 (0,1,2...)
-	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"`           // GPU型号
-	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`                   // 显存总量(字节)
-	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`                    // 显存使用(字节)
-	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"`           // GPU使用率(%)
-	Temperature int       `json:"temperature"`                                    // GPU温度(°C)
+	Client      string    `json:"client" gorm:"type:varchar(36);index"` // 客户端UUID
+	Time        LocalTime `json:"time" gorm:"index"`                    // 记录时间
+	DeviceIndex int       `json:"device_index" gorm:"index"`            // GPU设备索引 (0,1,2...)
+	DeviceName  string    `json:"device_name" gorm:"type:varchar(100)"` // GPU型号
+	MemTotal    int64     `json:"mem_total" gorm:"type:bigint"`         // 显存总量(字节)
+	MemUsed     int64     `json:"mem_used" gorm:"type:bigint"`          // 显存使用(字节)
+	Utilization float32   `json:"utilization" gorm:"type:decimal(5,2)"` // GPU使用率(%)
+	Temperature int       `json:"temperature"`                          // GPU温度(°C)
 }
 
 // StringArray represents a slice of strings stored as JSON in the database
