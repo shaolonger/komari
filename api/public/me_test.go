@@ -9,19 +9,24 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetMe(t *testing.T) {
-	// 设置测试模式
 	gin.SetMode(gin.TestMode)
+	_ = accounts.DeleteAccountByUsername("testuser")
+	_ = accounts.DeleteAllSessions()
 
-	// 创建测试用户
 	user, err := accounts.CreateAccount("testuser", "password")
-	if err != nil {
-		t.Fatalf("Failed to create test user: %v", err)
-	}
+	require.NoError(t, err)
 	uuid := user.UUID
-	sessionToken, _ := accounts.CreateSession(uuid, 2592000, "test_user_agent", "127.0.0.1", "oauth")
+	sessionToken, err := accounts.CreateSession(uuid, 2592000, "test_user_agent", "127.0.0.1", "oauth")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = accounts.DeleteAccountByUsername("testuser")
+		_ = accounts.DeleteAllSessions()
+	})
 
 	tests := []struct {
 		name           string
@@ -34,7 +39,12 @@ func TestGetMe(t *testing.T) {
 			sessionToken:   sessionToken,
 			expectedStatus: http.StatusOK,
 			expectedBody: map[string]interface{}{
-				"username": "testuser",
+				"username":    "testuser",
+				"logged_in":   true,
+				"uuid":        uuid,
+				"sso_type":    "",
+				"sso_id":      "",
+				"2fa_enabled": false,
 			},
 		},
 		{
@@ -42,7 +52,8 @@ func TestGetMe(t *testing.T) {
 			sessionToken:   "invalid_token",
 			expectedStatus: http.StatusOK,
 			expectedBody: map[string]interface{}{
-				"username": "Guest",
+				"username":  "Guest",
+				"logged_in": false,
 			},
 		},
 		{
@@ -50,18 +61,17 @@ func TestGetMe(t *testing.T) {
 			sessionToken:   "",
 			expectedStatus: http.StatusOK,
 			expectedBody: map[string]interface{}{
-				"username": "Guest",
+				"username":  "Guest",
+				"logged_in": false,
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建测试路由
 			router := gin.New()
 			router.GET("/me", GetMe)
 
-			// 创建测试请求
 			req, _ := http.NewRequest("GET", "/me", nil)
 			if tt.sessionToken != "" {
 				req.AddCookie(&http.Cookie{
@@ -70,26 +80,16 @@ func TestGetMe(t *testing.T) {
 				})
 			}
 
-			// 创建响应记录器
 			w := httptest.NewRecorder()
-
-			// 执行请求
 			router.ServeHTTP(w, req)
 
-			// 断言状态码
 			assert.Equal(t, tt.expectedStatus, w.Code)
 
-			// 解析响应体
 			var response map[string]interface{}
 			err := json.Unmarshal(w.Body.Bytes(), &response)
 			assert.NoError(t, err)
 
-			// 断言响应体
 			assert.Equal(t, tt.expectedBody, response)
 		})
 	}
-
-	// 清除测试数据
-	accounts.DeleteAccountByUsername("testuser")
-	accounts.DeleteAllSessions()
 }

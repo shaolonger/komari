@@ -15,6 +15,7 @@ var rotateClientTokenFunc = clients.RotateClientToken
 var reissueClientTokenFunc = clients.ReissueClientToken
 var revokeClientTokenFunc = clients.RevokeClientToken
 var auditLogFunc = auditlog.Log
+var saveClientFunc = clients.SaveClient
 
 type clientTokenLifecycleRequest struct {
 	ExpiresInHours int64 `json:"expires_in_hours"`
@@ -82,7 +83,7 @@ func EditClient(c *gin.Context) {
 		return
 	}
 	req["uuid"] = uuid
-	err := clients.SaveClient(req)
+	err := saveClientFunc(req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
@@ -90,6 +91,64 @@ func EditClient(c *gin.Context) {
 	user_uuid, _ := c.Get("uuid")
 	auditLogFunc(c.ClientIP(), user_uuid.(string), "edit client:"+uuid, "info")
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
+}
+
+func BatchEditClientAssets(c *gin.Context) {
+	var req struct {
+		UUIDs   []string               `json:"uuids"`
+		Changes map[string]interface{} `json:"changes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	if len(req.UUIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "uuids is required"})
+		return
+	}
+	if len(req.Changes) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "changes is required"})
+		return
+	}
+	if _, exists := req.Changes["uuid"]; exists {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "uuid cannot be edited in batch"})
+		return
+	}
+
+	seen := make(map[string]struct{}, len(req.UUIDs))
+	updated := 0
+	for _, uuid := range req.UUIDs {
+		if uuid == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "uuids must not contain empty values"})
+			return
+		}
+		if _, exists := seen[uuid]; exists {
+			continue
+		}
+		seen[uuid] = struct{}{}
+
+		payload := make(map[string]interface{}, len(req.Changes)+1)
+		for key, value := range req.Changes {
+			payload[key] = value
+		}
+		payload["uuid"] = uuid
+		if err := saveClientFunc(payload); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status":  "error",
+				"message": err.Error(),
+				"uuid":    uuid,
+			})
+			return
+		}
+		updated++
+	}
+
+	userUUID, _ := c.Get("uuid")
+	auditLogFunc(c.ClientIP(), userUUID.(string), "batch edit clients", "info")
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"updated": updated,
+	})
 }
 
 func RemoveClient(c *gin.Context) {

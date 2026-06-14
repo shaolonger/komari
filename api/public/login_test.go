@@ -10,17 +10,29 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLogin(t *testing.T) {
-	// 设置测试模式
 	gin.SetMode(gin.TestMode)
-	accounts.CreateAccount("testuser", "correctpassword")
+	loginLimiter.Flush()
+	_ = accounts.DeleteAccountByUsername("testuser")
+	_ = accounts.DeleteAllSessions()
+
+	_, err := accounts.CreateAccount("testuser", "correctpassword")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = accounts.DeleteAccountByUsername("testuser")
+		_ = accounts.DeleteAllSessions()
+		loginLimiter.Flush()
+	})
+
 	tests := []struct {
 		name           string
 		requestBody    LoginRequest
 		expectedStatus int
 		expectedBody   map[string]interface{}
+		expectCookie   bool
 	}{
 		{
 			name: "成功登录",
@@ -30,10 +42,14 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusOK,
 			expectedBody: map[string]interface{}{
-				"set-cookie": map[string]interface{}{
-					"session_token": "",
+				"status":  "success",
+				"message": "",
+				"data": map[string]interface{}{
+					"status":  "success",
+					"message": "logged in successfully",
 				},
 			},
+			expectCookie: true,
 		},
 		{
 			name: "无效的请求体",
@@ -43,8 +59,8 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusBadRequest,
 			expectedBody: map[string]interface{}{
-				"status": "error",
-				"error":  "Invalid request body",
+				"status":  "error",
+				"message": "Invalid request body: Username and password are required",
 			},
 		},
 		{
@@ -55,47 +71,45 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusUnauthorized,
 			expectedBody: map[string]interface{}{
-				"status": "error",
-				"error":  "Invalid credentials",
+				"status":  "error",
+				"message": "Invalid credentials",
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建测试路由
+			loginLimiter.Flush()
+
 			router := gin.New()
 			router.POST("/login", Login)
 
-			// 创建测试请求
 			jsonBody, _ := json.Marshal(tt.requestBody)
 			req, _ := http.NewRequest("POST", "/login", bytes.NewBuffer(jsonBody))
 			req.Header.Set("Content-Type", "application/json")
 
-			// 创建响应记录器
 			w := httptest.NewRecorder()
-
-			// 执行请求
 			router.ServeHTTP(w, req)
 
-			// 断言状态码
 			assert.Equal(t, tt.expectedStatus, w.Code)
 
-			// 解析响应体
 			var response map[string]interface{}
 			err := json.Unmarshal(w.Body.Bytes(), &response)
 			assert.NoError(t, err)
 
-			// 断言响应体
-			if tt.expectedStatus == http.StatusOK {
-				// 对于成功的情况，我们只检查响应结构，不检查具体的 session token
-				assert.Contains(t, response, "set-cookie")
-			} else {
-				assert.Equal(t, tt.expectedBody, response)
+			assert.Equal(t, tt.expectedBody, response)
+			if tt.expectCookie {
+				cookies := w.Result().Cookies()
+				require.NotEmpty(t, cookies)
+				found := false
+				for _, cookie := range cookies {
+					if cookie.Name == "session_token" && cookie.Value != "" {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "session_token cookie should be set on successful login")
 			}
 		})
 	}
-	// 清除测试数据
-	accounts.DeleteAccountByUsername("testuser")
-	accounts.DeleteAllSessions()
 }

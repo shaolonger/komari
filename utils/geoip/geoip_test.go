@@ -2,6 +2,8 @@ package geoip_test
 
 import (
 	"net"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/komari-monitor/komari/utils/geoip"
@@ -9,22 +11,39 @@ import (
 
 // 测试GeoIP数据库的初始化和更新功能
 func TestMmdb(t *testing.T) {
-	geoip.CurrentProvider, _ = geoip.NewMaxMindGeoIPService()
+	provider, err := geoip.NewMaxMindGeoIPService()
+	if err != nil {
+		t.Skipf("skipping MaxMind GeoIP test: %v", err)
+	}
+	geoip.CurrentProvider = provider
 	testIpAddr(t)
 }
 func TestIpApi(t *testing.T) {
+	requireGeoIPNetworkTests(t)
 	geoip.CurrentProvider, _ = geoip.NewIPAPIService()
 	testIpAddr(t)
 }
 
 func TestGeojs(t *testing.T) {
+	requireGeoIPNetworkTests(t)
 	geoip.CurrentProvider, _ = geoip.NewGeoJSService()
 	testIpAddr(t)
 }
 
 func TestIpInfo(t *testing.T) {
+	requireGeoIPNetworkTests(t)
 	geoip.CurrentProvider, _ = geoip.NewIPInfoService()
 	testIpAddr(t)
+}
+
+func requireGeoIPNetworkTests(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping network-dependent GeoIP test in short mode")
+	}
+	if !strings.EqualFold(os.Getenv("RUN_GEOIP_NETWORK_TESTS"), "true") {
+		t.Skip("set RUN_GEOIP_NETWORK_TESTS=true to enable network-dependent GeoIP tests")
+	}
 }
 func testIpAddr(t *testing.T) {
 	// IPv4

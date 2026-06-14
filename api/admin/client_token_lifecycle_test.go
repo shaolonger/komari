@@ -122,3 +122,66 @@ func TestRevokeClientTokenReturnsStatus(t *testing.T) {
 		t.Fatalf("active = %v, want false", payload["active"])
 	}
 }
+
+func TestBatchEditClientAssetsUpdatesUniqueUUIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	originalSave := saveClientFunc
+	originalAudit := auditLogFunc
+	defer func() {
+		saveClientFunc = originalSave
+		auditLogFunc = originalAudit
+	}()
+
+	var saved []map[string]interface{}
+	saveClientFunc = func(update map[string]interface{}) error {
+		copied := make(map[string]interface{}, len(update))
+		for key, value := range update {
+			copied[key] = value
+		}
+		saved = append(saved, copied)
+		return nil
+	}
+	auditLogFunc = func(ip, uuid, message, msgType string) {}
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/client/batch-edit", strings.NewReader(`{
+		"uuids":["node-1","node-2","node-1"],
+		"changes":{"provider":"CloudSilk","asset_ignored":true}
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	context.Request = request
+	context.Set("uuid", "admin-uuid")
+
+	BatchEditClientAssets(context)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if len(saved) != 2 {
+		t.Fatalf("len(saved) = %d, want 2", len(saved))
+	}
+	if saved[0]["uuid"] != "node-1" || saved[1]["uuid"] != "node-2" {
+		t.Fatalf("saved uuids = %+v", saved)
+	}
+}
+
+func TestBatchEditClientAssetsRejectsUUIDMutation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/client/batch-edit", strings.NewReader(`{
+		"uuids":["node-1"],
+		"changes":{"uuid":"other-node"}
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	context.Request = request
+
+	BatchEditClientAssets(context)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log"
 	"math"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/common"
@@ -19,12 +21,36 @@ import (
 	"github.com/google/uuid"
 )
 
+var currencyCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+var capabilityBooleanFields = []string{
+	"capability_ping",
+	"capability_terminal",
+	"capability_remote_exec",
+	"capability_remote_control",
+	"capability_gpu",
+	"capability_auto_update",
+	"capability_private_ping_targets",
+}
+
+func normalizeGovernanceStatusValue(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "observe":
+		return "observe"
+	case "ignored", "ignore":
+		return "ignored"
+	case "resolved":
+		return "resolved"
+	default:
+		return "none"
+	}
+}
+
 type ClientTokenStatus struct {
-	Token      string           `json:"token"`
-	IssuedAt   models.LocalTime `json:"issued_at"`
-	ExpiresAt  models.LocalTime `json:"expires_at"`
-	RevokedAt  models.LocalTime `json:"revoked_at"`
-	Active     bool             `json:"active"`
+	Token     string           `json:"token"`
+	IssuedAt  models.LocalTime `json:"issued_at"`
+	ExpiresAt models.LocalTime `json:"expires_at"`
+	RevokedAt models.LocalTime `json:"revoked_at"`
+	Active    bool             `json:"active"`
 }
 
 func clientTokenExpiryFromHours(expiresInHours int64, now time.Time) (models.LocalTime, error) {
@@ -198,6 +224,9 @@ func SaveClientInfo(update map[string]interface{}) error {
 	}
 
 	if err := verify(update); err != nil {
+		return err
+	}
+	if err := normalizeCapabilityMetadata(update); err != nil {
 		return err
 	}
 
@@ -380,6 +409,82 @@ func GetAllClientBasicInfo() (clients []models.Client, err error) {
 	return clients, nil
 }
 
+func normalizeStringField(updates map[string]interface{}, key string, maxLen int) error {
+	value, exists := updates[key]
+	if !exists {
+		return nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("%s must be a string", key)
+	}
+	text = strings.TrimSpace(text)
+	if maxLen > 0 && len(text) > maxLen {
+		return fmt.Errorf("%s exceeds max length %d", key, maxLen)
+	}
+	updates[key] = text
+	return nil
+}
+
+func normalizeAssetMetadata(updates map[string]interface{}) error {
+	if err := normalizeStringField(updates, "provider", 100); err != nil {
+		return err
+	}
+	if err := normalizeStringField(updates, "business_role", 100); err != nil {
+		return err
+	}
+	if err := normalizeStringField(updates, "currency", 20); err != nil {
+		return err
+	}
+	if err := normalizeStringField(updates, "currency_code", 10); err != nil {
+		return err
+	}
+	if value, exists := updates["currency_code"]; exists {
+		code := strings.ToUpper(value.(string))
+		if code != "" && !currencyCodePattern.MatchString(code) {
+			return fmt.Errorf("currency_code must be a 3-letter ISO code")
+		}
+		updates["currency_code"] = code
+	}
+	if value, exists := updates["asset_ignored"]; exists {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("asset_ignored must be a boolean")
+		}
+	}
+	if err := normalizeStringField(updates, "governance_status", 20); err != nil {
+		return err
+	}
+	if value, exists := updates["governance_status"]; exists {
+		updates["governance_status"] = normalizeGovernanceStatusValue(value.(string))
+	}
+	if err := normalizeStringField(updates, "governance_note", 2000); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeBooleanField(updates map[string]interface{}, key string) error {
+	value, exists := updates[key]
+	if !exists {
+		return nil
+	}
+	booleanValue, ok := value.(bool)
+	if !ok {
+		return fmt.Errorf("%s must be a boolean", key)
+	}
+	updates[key] = booleanValue
+	return nil
+}
+
+func normalizeCapabilityMetadata(updates map[string]interface{}) error {
+	for _, key := range capabilityBooleanFields {
+		if err := normalizeBooleanField(updates, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func SaveClient(updates map[string]interface{}) error {
 	db := dbcore.GetDBInstance()
 	clientUUID, ok := updates["uuid"].(string)
@@ -398,6 +503,9 @@ func SaveClient(updates map[string]interface{}) error {
 				return fmt.Errorf("traffic_limit must be a valid non-negative int64 value, got %v", val)
 			}
 		}
+	}
+	if err := normalizeAssetMetadata(updates); err != nil {
+		return err
 	}
 
 	updates["updated_at"] = time.Now()
