@@ -48,6 +48,24 @@ func TestNormalizeAssetMetadataRejectsNonBooleanAssetIgnored(t *testing.T) {
 	}
 }
 
+func TestNormalizeAssetMetadataNormalizesGovernanceFields(t *testing.T) {
+	updates := map[string]interface{}{
+		"governance_status": "  Ignore  ",
+		"governance_note":   "  retire after migration  ",
+	}
+
+	if err := normalizeAssetMetadata(updates); err != nil {
+		t.Fatalf("normalizeAssetMetadata() error = %v", err)
+	}
+
+	if got := updates["governance_status"]; got != "ignored" {
+		t.Fatalf("governance_status = %v, want %q", got, "ignored")
+	}
+	if got := updates["governance_note"]; got != "retire after migration" {
+		t.Fatalf("governance_note = %v, want %q", got, "retire after migration")
+	}
+}
+
 func TestNormalizeCapabilityMetadataAcceptsBooleanFields(t *testing.T) {
 	updates := map[string]interface{}{
 		"capability_ping":                 true,

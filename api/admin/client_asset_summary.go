@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/ws"
 )
 
@@ -71,22 +72,33 @@ type assetPortfolioSummary struct {
 	Providers          []assetProviderSummary `json:"providers"`
 	IgnoredProviders   []assetProviderSummary `json:"ignored_providers"`
 	Currencies         []assetCurrencySummary `json:"currencies"`
+	Governance         assetGovernanceSummary `json:"governance"`
 }
 
 type assetAssessment struct {
-	monthlyCost     float64
-	annualizedCost  float64
-	remainingValue  float64
-	daysRemaining   int
-	hasExpiry       bool
-	metadataGap     bool
-	underused       bool
-	highRisk        bool
-	riskScore       int
-	cpuUsage        float64
-	memoryUsage     float64
-	trafficPct      float64
-	efficiencyScore float64
+	monthlyCost        float64
+	annualizedCost     float64
+	remainingValue     float64
+	daysRemaining      int
+	hasExpiry          bool
+	metadataGap        bool
+	underused          bool
+	highRisk           bool
+	riskScore          int
+	cpuUsage           float64
+	memoryUsage        float64
+	trafficPct         float64
+	efficiencyScore    float64
+	valueScore         int
+	valueScoreFactors  []assetScoreFactor
+	observationQuality string
+	latestReportAt     *time.Time
+	reportAgeMinutes   *int
+	versionDrift       bool
+	tokenStatus        string
+	capabilityGap      bool
+	recentTaskFailure  bool
+	online             bool
 }
 
 func GetClientAssetSummary(c *gin.Context) {
@@ -116,10 +128,11 @@ func GetClientAssetSummary(c *gin.Context) {
 	for _, uuid := range ws.GetAllOnlineUUIDs() {
 		onlineSet[uuid] = true
 	}
+	evaluation := loadAssetEvaluationContext(allClients, time.Now().UTC())
 
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
-		"data":   buildClientAssetSummary(allClients, latest, onlineSet, time.Now()),
+		"data":   buildClientAssetSummaryWithContext(allClients, latest, onlineSet, time.Now().UTC(), evaluation),
 	})
 }
 
@@ -159,8 +172,30 @@ func buildClientAssetSummary(
 	onlineSet map[string]bool,
 	now time.Time,
 ) assetPortfolioSummary {
+	return buildClientAssetSummaryWithContext(
+		allClients,
+		latest,
+		onlineSet,
+		now,
+		defaultAssetEvaluationContext(allClients),
+	)
+}
+
+func buildClientAssetSummaryWithContext(
+	allClients []models.Client,
+	latest map[string]*common.Report,
+	onlineSet map[string]bool,
+	now time.Time,
+	evaluation assetEvaluationContext,
+) assetPortfolioSummary {
 	summary := assetPortfolioSummary{
 		GeneratedAt: now,
+		Governance: assetGovernanceSummary{
+			ServerVersion:              strings.TrimSpace(utils.CurrentVersion),
+			TargetAgentVersion:         evaluation.targetAgentVersion,
+			NotificationChannelEnabled: evaluation.notificationChannelEnabled,
+			ExpireNotificationEnabled:  evaluation.expireNotificationEnabled,
+		},
 	}
 
 	providers := make(map[string]*assetProviderSummary)
@@ -170,7 +205,7 @@ func buildClientAssetSummary(
 	for _, client := range allClients {
 		report := latest[client.UUID]
 		online := onlineSet[client.UUID]
-		assessment := assessClientAsset(client, report, online, now)
+		assessment := assessClientAsset(client, report, online, now, evaluation)
 
 		summary.TotalAssets++
 		if client.AssetIgnored {
@@ -180,6 +215,51 @@ func buildClientAssetSummary(
 		if assessment.highRisk {
 			summary.HighRiskAssets++
 			summary.Queue.HighRisk++
+		}
+		if assessment.capabilityGap {
+			summary.Governance.CapabilityGapAssets++
+		}
+		if assessment.versionDrift {
+			summary.Governance.VersionDriftAssets++
+		}
+		switch assessment.observationQuality {
+		case assetObservationPartial:
+			summary.Governance.ObservationPartialAssets++
+		case assetObservationStale:
+			summary.Governance.ObservationStaleAssets++
+		case assetObservationMissing:
+			summary.Governance.ObservationMissingAssets++
+		}
+		switch assessment.tokenStatus {
+		case assetTokenExpiring:
+			summary.Governance.TokenExpiringAssets++
+		case assetTokenExpired:
+			summary.Governance.TokenExpiredAssets++
+		case assetTokenRevoked:
+			summary.Governance.TokenRevokedAssets++
+		}
+		if evaluation.offlineNotificationCoverage[client.UUID] {
+			summary.Governance.OfflineNotificationCoveredAssets++
+		} else {
+			summary.Governance.OfflineNotificationMissingAssets++
+		}
+		if evaluation.loadNotificationCoverage[client.UUID] {
+			summary.Governance.LoadNotificationCoveredAssets++
+		} else {
+			summary.Governance.LoadNotificationMissingAssets++
+		}
+		if evaluation.recentTaskFailures[client.UUID] {
+			summary.Governance.RecentTaskFailureAssets++
+		}
+		governanceStatus := normalizeGovernanceStatus(client.GovernanceStatus)
+		if governanceStatus != "none" || strings.TrimSpace(client.GovernanceNote) != "" {
+			summary.Governance.GovernanceManagedAssets++
+		}
+		if governanceStatus == "observe" {
+			summary.Governance.GovernanceObserveAssets++
+		}
+		if governanceStatus == "ignored" {
+			summary.Governance.GovernanceIgnoredAssets++
 		}
 		if assessment.metadataGap {
 			summary.Lifecycle.MetadataGap++
@@ -284,12 +364,14 @@ func assessClientAsset(
 	report *common.Report,
 	online bool,
 	now time.Time,
+	evaluation assetEvaluationContext,
 ) assetAssessment {
 	monthlyCost := monthlyCost(client)
 	assessment := assetAssessment{
 		monthlyCost:    monthlyCost,
 		annualizedCost: monthlyCost * 12,
 		remainingValue: remainingValue(client, now),
+		online:         online,
 	}
 	daysRemaining, hasExpiry := daysUntilExpiry(client.ExpiredAt, now)
 	assessment.daysRemaining = daysRemaining
@@ -311,6 +393,18 @@ func assessClientAsset(
 	assessment.cpuUsage = cpuUsage
 	assessment.memoryUsage = memoryUsage
 	assessment.trafficPct = trafficPct
+	assessment.capabilityGap = !client.CapabilityPing || (!client.CapabilityTerminal && !client.CapabilityRemoteExec) || !client.CapabilityAutoUpdate
+	reportUpdatedAt := time.Time{}
+	if report != nil {
+		reportUpdatedAt = report.UpdatedAt
+	}
+	observationPartial := isPartialReport(client, report != nil, cpuUsage, memoryUsage, trafficPct)
+	assessment.observationQuality, assessment.latestReportAt, assessment.reportAgeMinutes = classifyObservationQuality(reportUpdatedAt, report != nil, observationPartial, now)
+	assessment.tokenStatus = classifyTokenStatus(client, now)
+	assessment.versionDrift = strings.TrimSpace(client.Version) != "" &&
+		strings.TrimSpace(evaluation.targetAgentVersion) != "" &&
+		compareVersionLike(strings.TrimSpace(client.Version), strings.TrimSpace(evaluation.targetAgentVersion)) < 0
+	assessment.recentTaskFailure = evaluation.recentTaskFailures[client.UUID]
 
 	assessment.underused =
 		online &&
@@ -355,9 +449,28 @@ func assessClientAsset(
 	if assessment.underused {
 		riskScore += 2
 	}
+	switch assessment.observationQuality {
+	case assetObservationMissing:
+		riskScore += 2
+	case assetObservationStale, assetObservationPartial:
+		riskScore += 1
+	}
+	switch assessment.tokenStatus {
+	case assetTokenExpiring:
+		riskScore += 1
+	case assetTokenExpired, assetTokenRevoked:
+		riskScore += 2
+	}
+	if assessment.versionDrift {
+		riskScore += 1
+	}
+	if assessment.recentTaskFailure {
+		riskScore += 1
+	}
 
 	assessment.highRisk = riskScore >= 5
 	assessment.riskScore = riskScore
+	assessment.valueScore, assessment.valueScoreFactors = buildAssetValueScore(client, assessment)
 	return assessment
 }
 

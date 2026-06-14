@@ -39,6 +39,8 @@ type Client struct {
 	Provider                     string    `json:"provider" gorm:"type:varchar(100)"`
 	BusinessRole                 string    `json:"business_role" gorm:"type:varchar(100)"`
 	AssetIgnored                 bool      `json:"asset_ignored" gorm:"default:false"`
+	GovernanceStatus             string    `json:"governance_status" gorm:"type:varchar(20);default:'none'"`
+	GovernanceNote               string    `json:"governance_note,omitempty" gorm:"type:text"`
 	CapabilityPing               bool      `json:"capability_ping" gorm:"default:false"`
 	CapabilityTerminal           bool      `json:"capability_terminal" gorm:"default:false"`
 	CapabilityRemoteExec         bool      `json:"capability_remote_exec" gorm:"default:false"`

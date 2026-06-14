@@ -26,31 +26,46 @@ type assetInventoryFilters struct {
 }
 
 type assetInventoryItem struct {
-	UUID                  string   `json:"uuid"`
-	Name                  string   `json:"name"`
-	Provider              string   `json:"provider"`
-	Role                  string   `json:"role"`
-	Group                 string   `json:"group"`
-	Currency              string   `json:"currency"`
-	CurrencyLabel         string   `json:"currency_label"`
-	Price                 float64  `json:"price"`
-	BillingCycle          int      `json:"billing_cycle"`
-	AutoRenewal           bool     `json:"auto_renewal"`
-	AssetIgnored          bool     `json:"asset_ignored"`
-	Online                bool     `json:"online"`
-	CPUUsage              float64  `json:"cpu_usage"`
-	MemoryUsage           float64  `json:"memory_usage"`
-	TrafficPercentage     float64  `json:"traffic_percentage"`
-	MonthlyCost           float64  `json:"monthly_cost"`
-	AnnualizedCost        float64  `json:"annualized_cost"`
-	RemainingValue        float64  `json:"remaining_value"`
-	EfficiencyScore       float64  `json:"efficiency_score"`
-	DaysRemaining         *int     `json:"days_remaining,omitempty"`
-	MetadataMissingFields []string `json:"metadata_missing_fields,omitempty"`
-	RiskReasons           []string `json:"risk_reasons"`
-	RiskScore             int      `json:"risk_score"`
-	HighRisk              bool     `json:"high_risk"`
-	Underused             bool     `json:"underused"`
+	UUID                       string             `json:"uuid"`
+	Name                       string             `json:"name"`
+	Provider                   string             `json:"provider"`
+	Role                       string             `json:"role"`
+	Group                      string             `json:"group"`
+	Currency                   string             `json:"currency"`
+	CurrencyLabel              string             `json:"currency_label"`
+	Price                      float64            `json:"price"`
+	BillingCycle               int                `json:"billing_cycle"`
+	AutoRenewal                bool               `json:"auto_renewal"`
+	AssetIgnored               bool               `json:"asset_ignored"`
+	Online                     bool               `json:"online"`
+	CPUUsage                   float64            `json:"cpu_usage"`
+	MemoryUsage                float64            `json:"memory_usage"`
+	TrafficPercentage          float64            `json:"traffic_percentage"`
+	MonthlyCost                float64            `json:"monthly_cost"`
+	AnnualizedCost             float64            `json:"annualized_cost"`
+	RemainingValue             float64            `json:"remaining_value"`
+	EfficiencyScore            float64            `json:"efficiency_score"`
+	ValueScore                 int                `json:"value_score"`
+	ValueScoreFactors          []assetScoreFactor `json:"value_score_factors,omitempty"`
+	DaysRemaining              *int               `json:"days_remaining,omitempty"`
+	MetadataMissingFields      []string           `json:"metadata_missing_fields,omitempty"`
+	RiskReasons                []string           `json:"risk_reasons"`
+	RiskScore                  int                `json:"risk_score"`
+	HighRisk                   bool               `json:"high_risk"`
+	Underused                  bool               `json:"underused"`
+	ObservationQuality         string             `json:"observation_quality"`
+	LatestReportAt             *time.Time         `json:"latest_report_at,omitempty"`
+	ReportAgeMinutes           *int               `json:"report_age_minutes,omitempty"`
+	Version                    string             `json:"version"`
+	VersionDrift               bool               `json:"version_drift"`
+	TargetAgentVersion         string             `json:"target_agent_version,omitempty"`
+	TokenStatus                string             `json:"token_status"`
+	GovernanceStatus           string             `json:"governance_status"`
+	GovernanceNote             string             `json:"governance_note,omitempty"`
+	OfflineNotificationEnabled bool               `json:"offline_notification_enabled"`
+	LoadNotificationCovered    bool               `json:"load_notification_covered"`
+	RecentTaskFailure          bool               `json:"recent_task_failure"`
+	CapabilityGap              bool               `json:"capability_gap"`
 }
 
 type assetInventoryResponse struct {
@@ -106,8 +121,9 @@ func GetClientAssetInventory(c *gin.Context) {
 	for _, uuid := range ws.GetAllOnlineUUIDs() {
 		onlineSet[uuid] = true
 	}
+	evaluation := loadAssetEvaluationContext(allClients, time.Now().UTC())
 
-	response := buildClientAssetInventory(allClients, latest, onlineSet, time.Now().UTC(), filters)
+	response := buildClientAssetInventoryWithContext(allClients, latest, onlineSet, time.Now().UTC(), filters, evaluation)
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
 		"data":   response,
@@ -121,12 +137,30 @@ func buildClientAssetInventory(
 	now time.Time,
 	filters assetInventoryFilters,
 ) assetInventoryResponse {
+	return buildClientAssetInventoryWithContext(
+		allClients,
+		latest,
+		onlineSet,
+		now,
+		filters,
+		defaultAssetEvaluationContext(allClients),
+	)
+}
+
+func buildClientAssetInventoryWithContext(
+	allClients []models.Client,
+	latest map[string]*common.Report,
+	onlineSet map[string]bool,
+	now time.Time,
+	filters assetInventoryFilters,
+	evaluation assetEvaluationContext,
+) assetInventoryResponse {
 	items := make([]assetInventoryItem, 0, len(allClients))
 	for _, client := range allClients {
 		report := latest[client.UUID]
 		online := onlineSet[client.UUID]
-		assessment := assessClientAsset(client, report, online, now)
-		item := buildAssetInventoryItem(client, report, online, assessment)
+		assessment := assessClientAsset(client, report, online, now, evaluation)
+		item := buildAssetInventoryItem(client, report, online, assessment, evaluation)
 		if !matchesInventoryFilter(item, filters.Filter) {
 			continue
 		}
@@ -152,6 +186,7 @@ func buildAssetInventoryItem(
 	report *common.Report,
 	online bool,
 	assessment assetAssessment,
+	evaluation assetEvaluationContext,
 ) assetInventoryItem {
 	var daysRemaining *int
 	if assessment.hasExpiry {
@@ -160,31 +195,46 @@ func buildAssetInventoryItem(
 	}
 
 	return assetInventoryItem{
-		UUID:                  client.UUID,
-		Name:                  client.Name,
-		Provider:              providerLabel(client),
-		Role:                  roleLabel(client),
-		Group:                 client.Group,
-		Currency:              currencyKey(client),
-		CurrencyLabel:         currencyLabel(client),
-		Price:                 client.Price,
-		BillingCycle:          client.BillingCycle,
-		AutoRenewal:           client.AutoRenewal,
-		AssetIgnored:          client.AssetIgnored,
-		Online:                online,
-		CPUUsage:              assessment.cpuUsage,
-		MemoryUsage:           assessment.memoryUsage,
-		TrafficPercentage:     assessment.trafficPct,
-		MonthlyCost:           assessment.monthlyCost,
-		AnnualizedCost:        assessment.annualizedCost,
-		RemainingValue:        assessment.remainingValue,
-		EfficiencyScore:       assessment.efficiencyScore,
-		DaysRemaining:         daysRemaining,
-		MetadataMissingFields: metadataMissingFields(client),
-		RiskReasons:           buildAssetIssueReasons(client, report, online, assessment),
-		RiskScore:             assessment.riskScore,
-		HighRisk:              assessment.highRisk,
-		Underused:             assessment.underused,
+		UUID:                       client.UUID,
+		Name:                       client.Name,
+		Provider:                   providerLabel(client),
+		Role:                       roleLabel(client),
+		Group:                      client.Group,
+		Currency:                   currencyKey(client),
+		CurrencyLabel:              currencyLabel(client),
+		Price:                      client.Price,
+		BillingCycle:               client.BillingCycle,
+		AutoRenewal:                client.AutoRenewal,
+		AssetIgnored:               client.AssetIgnored,
+		Online:                     online,
+		CPUUsage:                   assessment.cpuUsage,
+		MemoryUsage:                assessment.memoryUsage,
+		TrafficPercentage:          assessment.trafficPct,
+		MonthlyCost:                assessment.monthlyCost,
+		AnnualizedCost:             assessment.annualizedCost,
+		RemainingValue:             assessment.remainingValue,
+		EfficiencyScore:            assessment.efficiencyScore,
+		ValueScore:                 assessment.valueScore,
+		ValueScoreFactors:          assessment.valueScoreFactors,
+		DaysRemaining:              daysRemaining,
+		MetadataMissingFields:      metadataMissingFields(client),
+		RiskReasons:                buildAssetIssueReasons(client, report, online, assessment),
+		RiskScore:                  assessment.riskScore,
+		HighRisk:                   assessment.highRisk,
+		Underused:                  assessment.underused,
+		ObservationQuality:         assessment.observationQuality,
+		LatestReportAt:             assessment.latestReportAt,
+		ReportAgeMinutes:           assessment.reportAgeMinutes,
+		Version:                    client.Version,
+		VersionDrift:               assessment.versionDrift,
+		TargetAgentVersion:         evaluation.targetAgentVersion,
+		TokenStatus:                assessment.tokenStatus,
+		GovernanceStatus:           normalizeGovernanceStatus(client.GovernanceStatus),
+		GovernanceNote:             strings.TrimSpace(client.GovernanceNote),
+		OfflineNotificationEnabled: evaluation.offlineNotificationCoverage[client.UUID],
+		LoadNotificationCovered:    evaluation.loadNotificationCoverage[client.UUID],
+		RecentTaskFailure:          assessment.recentTaskFailure,
+		CapabilityGap:              assessment.capabilityGap,
 	}
 }
 
@@ -202,6 +252,16 @@ func matchesInventoryFilter(item assetInventoryItem, filter string) bool {
 		return len(item.MetadataMissingFields) > 0
 	case "underused":
 		return item.Underused
+	case "capability":
+		return item.CapabilityGap
+	case "stale":
+		return item.ObservationQuality != assetObservationFresh
+	case "version":
+		return item.VersionDrift
+	case "token":
+		return item.TokenStatus == assetTokenExpiring || item.TokenStatus == assetTokenExpired || item.TokenStatus == assetTokenRevoked
+	case "observe":
+		return item.GovernanceStatus != "none" || strings.TrimSpace(item.GovernanceNote) != ""
 	case "all":
 		fallthrough
 	default:
@@ -217,6 +277,8 @@ func sortAssetInventoryItems(items []assetInventoryItem, sortMode string, order 
 			less = items[i].MonthlyCost < items[j].MonthlyCost
 		case "remaining":
 			less = items[i].RemainingValue < items[j].RemainingValue
+		case "value":
+			less = items[i].ValueScore < items[j].ValueScore
 		case "expiry":
 			less = daysRemainingValue(items[i].DaysRemaining) < daysRemainingValue(items[j].DaysRemaining)
 		case "efficiency":
@@ -242,7 +304,7 @@ func sortAssetInventoryItems(items []assetInventoryItem, sortMode string, order 
 
 func normalizedInventoryFilter(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "high", "expiring", "manual", "ignored", "metadata", "underused":
+	case "high", "expiring", "manual", "ignored", "metadata", "underused", "capability", "stale", "version", "token", "observe":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "all"
@@ -251,7 +313,7 @@ func normalizedInventoryFilter(value string) string {
 
 func normalizedInventorySort(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "monthly", "remaining", "expiry", "efficiency", "name":
+	case "monthly", "remaining", "value", "expiry", "efficiency", "name":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "risk"

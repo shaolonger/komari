@@ -32,6 +32,19 @@ var capabilityBooleanFields = []string{
 	"capability_private_ping_targets",
 }
 
+func normalizeGovernanceStatusValue(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "observe":
+		return "observe"
+	case "ignored", "ignore":
+		return "ignored"
+	case "resolved":
+		return "resolved"
+	default:
+		return "none"
+	}
+}
+
 type ClientTokenStatus struct {
 	Token     string           `json:"token"`
 	IssuedAt  models.LocalTime `json:"issued_at"`
@@ -437,6 +450,15 @@ func normalizeAssetMetadata(updates map[string]interface{}) error {
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("asset_ignored must be a boolean")
 		}
+	}
+	if err := normalizeStringField(updates, "governance_status", 20); err != nil {
+		return err
+	}
+	if value, exists := updates["governance_status"]; exists {
+		updates["governance_status"] = normalizeGovernanceStatusValue(value.(string))
+	}
+	if err := normalizeStringField(updates, "governance_note", 2000); err != nil {
+		return err
 	}
 	return nil
 }

@@ -199,3 +199,94 @@ func TestBuildClientAssetInventoryRespectsLimit(t *testing.T) {
 		t.Fatalf("expected only ascending-first node-2, got %+v", response.Items)
 	}
 }
+
+func TestBuildClientAssetInventoryIncludesGovernanceAndValueSignals(t *testing.T) {
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	clients := []models.Client{
+		{
+			UUID:             "node-1",
+			Name:             "edge-node",
+			Provider:         "CloudSilk",
+			BusinessRole:     "Ingress",
+			Price:            24,
+			BillingCycle:     30,
+			CurrencyCode:     "USD",
+			ExpiredAt:        models.FromTime(now.Add(5 * 24 * time.Hour)),
+			Version:          "v1.2.2",
+			GovernanceStatus: "observe",
+			GovernanceNote:   "renew after migration",
+			TokenExpiresAt:   models.FromTime(now.Add(48 * time.Hour)),
+			MemTotal:         2 * 1024 * 1024 * 1024,
+			TrafficLimit:     100 * 1024 * 1024 * 1024,
+			TrafficLimitType: "sum",
+		},
+	}
+	latest := map[string]*common.Report{
+		"node-1": {
+			CPU:       common.CPUReport{Usage: 5},
+			Ram:       common.RamReport{Used: 256 * 1024 * 1024},
+			Network:   common.NetworkReport{TotalUp: 0, TotalDown: 0},
+			UpdatedAt: now.Add(-20 * time.Minute),
+		},
+	}
+	onlineSet := map[string]bool{"node-1": true}
+	evaluation := assetEvaluationContext{
+		targetAgentVersion:          "v1.2.4",
+		offlineNotificationCoverage: map[string]bool{},
+		loadNotificationCoverage:    map[string]bool{},
+		recentTaskFailures:          map[string]bool{"node-1": true},
+	}
+
+	response := buildClientAssetInventoryWithContext(
+		clients,
+		latest,
+		onlineSet,
+		now,
+		assetInventoryFilters{
+			IncludeIgnored: true,
+			Filter:         "all",
+			Sort:           "risk",
+			Order:          "desc",
+			Limit:          10,
+		},
+		evaluation,
+	)
+	if response.Total != 1 {
+		t.Fatalf("Total = %d, want 1", response.Total)
+	}
+
+	item := response.Items[0]
+	if item.ValueScore <= 0 {
+		t.Fatalf("ValueScore = %d, want positive", item.ValueScore)
+	}
+	if len(item.ValueScoreFactors) == 0 {
+		t.Fatal("expected value score factors to be present")
+	}
+	if item.ObservationQuality != assetObservationStale {
+		t.Fatalf("ObservationQuality = %q, want %q", item.ObservationQuality, assetObservationStale)
+	}
+	if !item.VersionDrift {
+		t.Fatal("expected version drift to be surfaced")
+	}
+	if item.TokenStatus != assetTokenExpiring {
+		t.Fatalf("TokenStatus = %q, want %q", item.TokenStatus, assetTokenExpiring)
+	}
+	if item.GovernanceStatus != "observe" {
+		t.Fatalf("GovernanceStatus = %q, want %q", item.GovernanceStatus, "observe")
+	}
+	if item.GovernanceNote != "renew after migration" {
+		t.Fatalf("GovernanceNote = %q, want %q", item.GovernanceNote, "renew after migration")
+	}
+	if !item.RecentTaskFailure {
+		t.Fatal("expected recent task failure flag to be true")
+	}
+	if !matchesInventoryFilter(item, "token") {
+		t.Fatal("expected token filter to match")
+	}
+	if !matchesInventoryFilter(item, "version") {
+		t.Fatal("expected version filter to match")
+	}
+	if !matchesInventoryFilter(item, "observe") {
+		t.Fatal("expected observe filter to match")
+	}
+}

@@ -42,6 +42,15 @@ type assetIssueItem struct {
 	HighRisk              bool     `json:"high_risk"`
 	Underused             bool     `json:"underused"`
 	ManualRenew           bool     `json:"manual_renew"`
+	ValueScore            int      `json:"value_score"`
+	ObservationQuality    string   `json:"observation_quality"`
+	Version               string   `json:"version"`
+	VersionDrift          bool     `json:"version_drift"`
+	TokenStatus           string   `json:"token_status"`
+	GovernanceStatus      string   `json:"governance_status"`
+	GovernanceNote        string   `json:"governance_note,omitempty"`
+	RecentTaskFailure     bool     `json:"recent_task_failure"`
+	CapabilityGap         bool     `json:"capability_gap"`
 	CapabilityPing        bool     `json:"capability_ping"`
 	CapabilityTerminal    bool     `json:"capability_terminal"`
 	CapabilityRemoteExec  bool     `json:"capability_remote_exec"`
@@ -98,8 +107,9 @@ func GetClientAssetIssues(c *gin.Context) {
 	for _, uuid := range ws.GetAllOnlineUUIDs() {
 		onlineSet[uuid] = true
 	}
+	evaluation := loadAssetEvaluationContext(allClients, time.Now().UTC())
 
-	response := buildClientAssetIssues(
+	response := buildClientAssetIssuesWithContext(
 		allClients,
 		latest,
 		onlineSet,
@@ -111,6 +121,7 @@ func GetClientAssetIssues(c *gin.Context) {
 			IncludeIgnored: includeIgnored,
 			Limit:          limit,
 		},
+		evaluation,
 	)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -126,6 +137,24 @@ func buildClientAssetIssues(
 	now time.Time,
 	filters assetIssueFilters,
 ) assetIssuesResponse {
+	return buildClientAssetIssuesWithContext(
+		allClients,
+		latest,
+		onlineSet,
+		now,
+		filters,
+		defaultAssetEvaluationContext(allClients),
+	)
+}
+
+func buildClientAssetIssuesWithContext(
+	allClients []models.Client,
+	latest map[string]*common.Report,
+	onlineSet map[string]bool,
+	now time.Time,
+	filters assetIssueFilters,
+	evaluation assetEvaluationContext,
+) assetIssuesResponse {
 	response := assetIssuesResponse{
 		GeneratedAt: now,
 		Filters:     filters,
@@ -134,7 +163,7 @@ func buildClientAssetIssues(
 	for _, client := range allClients {
 		report := latest[client.UUID]
 		online := onlineSet[client.UUID]
-		assessment := assessClientAsset(client, report, online, now)
+		assessment := assessClientAsset(client, report, online, now, evaluation)
 		item := buildAssetIssueItem(client, report, online, assessment)
 
 		if assessment.hasExpiry && assessment.daysRemaining > 0 && assessment.daysRemaining <= 7 && !client.AssetIgnored {
@@ -202,6 +231,15 @@ func buildAssetIssueItem(
 		HighRisk:              assessment.highRisk,
 		Underused:             assessment.underused,
 		ManualRenew:           client.Price > 0 && !client.AutoRenewal,
+		ValueScore:            assessment.valueScore,
+		ObservationQuality:    assessment.observationQuality,
+		Version:               client.Version,
+		VersionDrift:          assessment.versionDrift,
+		TokenStatus:           assessment.tokenStatus,
+		GovernanceStatus:      normalizeGovernanceStatus(client.GovernanceStatus),
+		GovernanceNote:        strings.TrimSpace(client.GovernanceNote),
+		RecentTaskFailure:     assessment.recentTaskFailure,
+		CapabilityGap:         assessment.capabilityGap,
 		CapabilityPing:        client.CapabilityPing,
 		CapabilityTerminal:    client.CapabilityTerminal,
 		CapabilityRemoteExec:  client.CapabilityRemoteExec,
@@ -219,6 +257,14 @@ func buildAssetIssueReasons(
 
 	if !online {
 		reasons = append(reasons, "offline_or_stale")
+	}
+	switch assessment.observationQuality {
+	case assetObservationMissing:
+		reasons = append(reasons, "observation_missing")
+	case assetObservationStale:
+		reasons = append(reasons, "observation_stale")
+	case assetObservationPartial:
+		reasons = append(reasons, "observation_partial")
 	}
 	if assessment.hasExpiry && assessment.daysRemaining <= 7 {
 		reasons = append(reasons, "renewal_due_7d")
@@ -250,6 +296,20 @@ func buildAssetIssueReasons(
 	}
 	if assessment.underused {
 		reasons = append(reasons, "underused_spend")
+	}
+	switch assessment.tokenStatus {
+	case assetTokenExpiring:
+		reasons = append(reasons, "token_expiring")
+	case assetTokenExpired:
+		reasons = append(reasons, "token_expired")
+	case assetTokenRevoked:
+		reasons = append(reasons, "token_revoked")
+	}
+	if assessment.versionDrift {
+		reasons = append(reasons, "version_drift")
+	}
+	if assessment.recentTaskFailure {
+		reasons = append(reasons, "recent_task_failure")
 	}
 
 	return reasons

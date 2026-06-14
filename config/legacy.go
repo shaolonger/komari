@@ -72,6 +72,7 @@ const (
 	ExpireNotificationEnabledKey  = "expire_notification_enabled"
 	ExpireNotificationLeadDaysKey = "expire_notification_lead_days"
 	LoginNotificationKey          = "login_notification"
+	AssetFxSnapshotKey            = "asset_fx_snapshot"
 	TrafficLimitPercentageKey     = "traffic_limit_percentage"
 	RecordEnabledKey              = "record_enabled"
 	RecordPreserveTimeKey         = "record_preserve_time"
