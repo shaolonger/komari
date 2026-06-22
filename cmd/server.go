@@ -195,6 +195,7 @@ func RunServer() {
 
 	r.GET("/api/records/load", public_api.GetRecordsByUUID)
 	r.GET("/api/records/ping", public_api.GetPingRecords)
+	r.GET("/api/traffic/range", public_api.GetTrafficRange)
 	r.GET("/api/task/ping", public_api.GetPublicPingTasks)
 	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
