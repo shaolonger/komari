@@ -2,10 +2,16 @@ package admin
 
 import (
 	"archive/zip"
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestNormalizeThemeArchivePath(t *testing.T) {
@@ -53,10 +59,10 @@ func TestExtractAndValidateThemeRejectsMissingIndex(t *testing.T) {
 
 func TestExtractAndValidateThemeNormalizesWindowsSeparators(t *testing.T) {
 	zipPath := writeThemeArchive(t, map[string]string{
-		themeArchiveConfigPath:  `{"name":"Nebula","short":"Nebula"}`,
+		themeArchiveConfigPath: `{"name":"Nebula","short":"Nebula"}`,
 		`dist\index.html`:      "<html><body>nebula</body></html>",
-		`dist\assets\app.js`:  "console.log('nebula')",
-		`dist\assets\app.css`: "body { color: white; }",
+		`dist\assets\app.js`:   "console.log('nebula')",
+		`dist\assets\app.css`:  "body { color: white; }",
 	})
 
 	workDir := t.TempDir()
@@ -80,6 +86,52 @@ func TestExtractAndValidateThemeNormalizesWindowsSeparators(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestExtractAndValidateThemeRejectsOversizedZip(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "oversized-theme.zip")
+	oversized := bytes.Repeat([]byte("a"), maxThemeZipSize+1)
+	if err := os.WriteFile(zipPath, oversized, 0644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error = %v", zipPath, err)
+	}
+
+	withWorkingDir(t, t.TempDir(), func() {
+		_, err := extractAndValidateTheme(zipPath)
+		if err == nil {
+			t.Fatal("extractAndValidateTheme() error = nil, want oversized zip error")
+		}
+		if !strings.Contains(err.Error(), themeZipSizeLimitMessage()) {
+			t.Fatalf("extractAndValidateTheme() error = %q, want %q", err.Error(), themeZipSizeLimitMessage())
+		}
+	})
+}
+
+func TestUploadThemeRejectsOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPut, "/theme/upload", bytes.NewReader(bytes.Repeat([]byte("a"), maxThemeZipSize+1)))
+
+	UploadTheme(context)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("UploadTheme() status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+
+	var response struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.Status != "error" {
+		t.Fatalf("response.Status = %q, want %q", response.Status, "error")
+	}
+	if response.Message != themeZipSizeLimitMessage() {
+		t.Fatalf("response.Message = %q, want %q", response.Message, themeZipSizeLimitMessage())
+	}
 }
 
 func withWorkingDir(t *testing.T, dir string, fn func()) {
