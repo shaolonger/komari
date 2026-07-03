@@ -339,6 +339,12 @@ func RunServer() {
 				loadAlertGroup.POST("/delete", notification.DeleteLoadNotification)
 				loadAlertGroup.POST("/edit", notification.EditLoadNotification)
 			}
+			trafficReportGroup := notificationGroup.Group("/traffic-report")
+			{
+				trafficReportGroup.GET("", notification.ListTrafficReportNotifications)
+				trafficReportGroup.GET("/", notification.ListTrafficReportNotifications)
+				trafficReportGroup.POST("/edit", notification.EditTrafficReportNotifications)
+			}
 		}
 
 		pingTaskGroup := adminAuthrized.Group("/ping")
