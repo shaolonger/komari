@@ -11,7 +11,7 @@
 ## Todo
 
 - [x] T0 保存本地执行清单，记录背景、范围、验收方式和断点恢复信息。
-- [ ] T1 为 `TrafficReportNotification` 增加日/周/月最后发送时间，避免同一周期重复发送。
+- [x] T1 为 `TrafficReportNotification` 增加日/周/月最后发送时间，避免同一周期重复发送。
 - [ ] T2 增加流量周期报告生成与调度逻辑：读取已启用配置，按日/周/月判断到期，汇总历史流量记录并发送 `TrafficReport` 事件。
 - [ ] T3 将流量报告调度接入服务定时任务启动流程，并确保通知总开关关闭时不会消耗发送周期。
 - [ ] T4 增加后端单元测试，覆盖日/周/月到期判断、窗口计算、重复发送保护和报告内容生成。
@@ -39,4 +39,3 @@
   - `examples/komari-javascript-notification-telegram.js`
   - `api/admin/notification/traffic_report_test.go`
   - `utils/notifier/traffic_report_test.go`
-

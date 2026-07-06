@@ -24,10 +24,13 @@ type LoadNotification struct {
 
 // TrafficReportNotification stores per-client scheduled traffic report settings.
 type TrafficReportNotification struct {
-	Client     string `json:"client" gorm:"type:varchar(36);not null;index;unique;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;foreignKey:client;references:UUID"`
-	ClientInfo Client `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID"`
-	Enable     bool   `json:"enable" gorm:"type:boolean;default:false"`
-	Daily      bool   `json:"daily" gorm:"type:boolean;default:false"`
-	Weekly     bool   `json:"weekly" gorm:"type:boolean;default:false"`
-	Monthly    bool   `json:"monthly" gorm:"type:boolean;default:false"`
+	Client              string    `json:"client" gorm:"type:varchar(36);not null;index;unique;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;foreignKey:client;references:UUID"`
+	ClientInfo          Client    `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID"`
+	Enable              bool      `json:"enable" gorm:"type:boolean;default:false"`
+	Daily               bool      `json:"daily" gorm:"type:boolean;default:false"`
+	Weekly              bool      `json:"weekly" gorm:"type:boolean;default:false"`
+	Monthly             bool      `json:"monthly" gorm:"type:boolean;default:false"`
+	LastDailyNotified   LocalTime `json:"last_daily_notified" gorm:"type:timestamp"`
+	LastWeeklyNotified  LocalTime `json:"last_weekly_notified" gorm:"type:timestamp"`
+	LastMonthlyNotified LocalTime `json:"last_monthly_notified" gorm:"type:timestamp"`
 }
