@@ -150,6 +150,32 @@ func TestFleetReportNotificationTestRejectsInvalidCadence(t *testing.T) {
 	}
 }
 
+func TestFleetReportSettingsPageRendersConfigurationUI(t *testing.T) {
+	router := gin.New()
+	router.GET("/admin/notification/fleet-report-settings", FleetReportSettingsPage)
+	req := httptest.NewRequest(http.MethodGet, "/admin/notification/fleet-report-settings", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"全局运维报告",
+		"/api/admin/notification/fleet-report",
+		"/api/admin/notification/fleet-report/edit",
+		"/api/admin/notification/fleet-report/test",
+		"保存配置",
+		"发送测试报告",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("settings page missing %q", want)
+		}
+	}
+}
+
 func fleetReportTestRouter() *gin.Engine {
 	router := gin.New()
 	router.GET("/api/admin/notification/fleet-report", GetFleetReportNotification)
