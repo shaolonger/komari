@@ -16,7 +16,7 @@
 - [x] T3 将流量报告调度接入服务定时任务启动流程，并确保通知总开关关闭时不会消耗发送周期。
 - [x] T4 增加后端单元测试，覆盖日/周/月到期判断、窗口计算、重复发送保护和报告内容生成。
 - [x] T5 优化 Telegram JavaScript 通知示例：为 `TrafficReport` 增加专用报告视图、增强时间/失败处理、保持普通告警兼容。
-- [ ] T6 运行相关测试与格式化检查，确认后端调度逻辑和 JavaScript provider 入口都能通过。
+- [x] T6 运行相关测试与格式化检查，确认后端调度逻辑和 JavaScript provider 入口都能通过。
 - [ ] T7 更新版本号，创建 tag，push 到 GitHub，并通过 `gh` 创建 release。
 
 ## Acceptance
