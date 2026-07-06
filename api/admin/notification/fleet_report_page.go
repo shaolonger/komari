@@ -334,14 +334,15 @@ const fleetReportSettingsHTML = `<!doctype html>
                 <option value="weekly">周报</option>
                 <option value="monthly">月报</option>
               </select>
+              <p id="testCadenceHint" class="hint">测试将发送日报，统计配置时区中的前一完整自然日。</p>
             </div>
           </div>
 
           <div class="actions">
             <button id="saveButton" class="primary" type="submit">保存配置</button>
-            <button id="testButton" type="button">发送测试报告</button>
+            <button id="testButton" type="button">发送日报测试报告</button>
           </div>
-          <p class="hint">测试发送会使用当前已保存配置生成真实 FleetReport，并发送到当前通知渠道。</p>
+          <p class="hint">测试报告周期只影响手动测试发送，不会修改上方日报、周报、月报的保存配置。</p>
         </div>
       </form>
 
@@ -441,6 +442,30 @@ const fleetReportSettingsHTML = `<!doctype html>
       $("lastWeekly").textContent = formatTime(report.last_weekly_notified);
       $("lastMonthly").textContent = formatTime(report.last_monthly_notified);
       setStatusCard("reportStatus", report.enable ? "已启用" : "未启用", report.enable ? "good" : "warn");
+      updateTestCadenceHint();
+    }
+
+    function updateTestCadenceHint() {
+      const cadence = $("testCadence").value;
+      const copy = {
+        daily: {
+          label: "日报",
+          hint: "测试将发送日报，统计配置时区中的前一完整自然日。"
+        },
+        weekly: {
+          label: "周报",
+          hint: "测试将发送周报，统计配置时区中的上一 ISO 周。"
+        },
+        monthly: {
+          label: "月报",
+          hint: "测试将发送月报，统计配置时区中的上一自然月。"
+        }
+      }[cadence] || {
+        label: "报告",
+        hint: "测试将发送所选周期报告。"
+      };
+      $("testCadenceHint").textContent = copy.hint;
+      $("testButton").textContent = "发送" + copy.label + "测试报告";
     }
 
     function renderSettingsStatus(settings) {
@@ -514,6 +539,8 @@ const fleetReportSettingsHTML = `<!doctype html>
         $("testButton").disabled = false;
       }
     });
+
+    $("testCadence").addEventListener("change", updateTestCadenceHint);
 
     load();
   </script>

@@ -197,8 +197,9 @@ func TestFleetReportSettingsPageRendersConfigurationUI(t *testing.T) {
 		"/api/admin/notification/fleet-report/edit",
 		"/api/admin/notification/fleet-report/test",
 		"保存配置",
-		"发送测试报告",
 		"UTC+8 固定偏移",
+		"测试报告周期只影响手动测试发送",
+		"发送日报测试报告",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("settings page missing %q", want)
