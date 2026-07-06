@@ -9,4 +9,5 @@ const (
 	Alert         = "Alert"
 	Traffic       = "Traffic"
 	TrafficReport = "TrafficReport"
+	FleetReport   = "FleetReport"
 )
