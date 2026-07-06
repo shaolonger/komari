@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils/notifier"
 	"gorm.io/gorm"
 )
 
@@ -27,6 +28,10 @@ type fleetReportNotificationPayload struct {
 	LastDailyNotified   models.LocalTime `json:"last_daily_notified"`
 	LastWeeklyNotified  models.LocalTime `json:"last_weekly_notified"`
 	LastMonthlyNotified models.LocalTime `json:"last_monthly_notified"`
+}
+
+type fleetReportTestRequest struct {
+	Cadence string `json:"cadence"`
 }
 
 func GetFleetReportNotification(c *gin.Context) {
@@ -88,6 +93,24 @@ func EditFleetReportNotification(c *gin.Context) {
 		return
 	}
 	api.RespondSuccess(c, response)
+}
+
+func TestFleetReportNotification(c *gin.Context) {
+	var request fleetReportTestRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		api.RespondError(c, 400, "Invalid request body: "+err.Error())
+		return
+	}
+
+	report, err := notifier.SendFleetReportTest(request.Cadence, time.Now())
+	if err != nil {
+		api.RespondError(c, 500, "Failed to send fleet report test: "+err.Error())
+		return
+	}
+	api.RespondSuccess(c, gin.H{
+		"message": "Fleet report test sent successfully",
+		"report":  report,
+	})
 }
 
 func loadFleetReportNotification() (models.FleetReportNotification, error) {

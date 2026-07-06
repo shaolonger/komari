@@ -1,9 +1,12 @@
 package notifier
 
 import (
+	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -56,6 +59,37 @@ func CheckFleetReportOnce(now time.Time) {
 			slog.Error("failed to mark fleet report notification", "cadence", cadence, "error", err)
 		}
 	}
+}
+
+func SendFleetReportTest(cadenceValue string, now time.Time) (FleetReportData, error) {
+	cadence, err := parseFleetReportCadence(cadenceValue)
+	if err != nil {
+		return FleetReportData{}, err
+	}
+	if err := ensureNotificationDeliveryReady(); err != nil {
+		return FleetReportData{}, err
+	}
+
+	loc := notificationReportLocation()
+	notification, ok, err := getFleetReportNotification()
+	if err != nil {
+		return FleetReportData{}, err
+	}
+	topN := 5
+	if ok && notification.TopN > 0 {
+		topN = notification.TopN
+	}
+
+	localNow := now.In(loc)
+	data, message, reportClients, err := buildFleetOperationsReport(cadence, localNow, loc, topN)
+	if err != nil {
+		return FleetReportData{}, err
+	}
+	event := buildFleetReportEvent(data, message, reportClients, localNow, loc)
+	if err := messageSender.SendEvent(event); err != nil {
+		return FleetReportData{}, err
+	}
+	return data, nil
 }
 
 func getFleetReportNotification() (models.FleetReportNotification, bool, error) {
@@ -113,4 +147,36 @@ func markFleetReportNotified(cadence trafficReportCadence, notifiedAt time.Time)
 		Model(&models.FleetReportNotification{}).
 		Where("id = ?", fleetReportNotificationID).
 		Update(column, models.FromTime(notifiedAt)).Error
+}
+
+func parseFleetReportCadence(value string) (trafficReportCadence, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "daily", "day":
+		return trafficReportDaily, nil
+	case "weekly", "week":
+		return trafficReportWeekly, nil
+	case "monthly", "month":
+		return trafficReportMonthly, nil
+	default:
+		return "", errors.New("invalid report cadence: " + value)
+	}
+}
+
+func ensureNotificationDeliveryReady() error {
+	enabled, err := config.GetAs[bool](config.NotificationEnabledKey, false)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return errors.New("notification channel is disabled")
+	}
+	method, err := config.GetAs[string](config.NotificationMethodKey, "none")
+	if err != nil {
+		return err
+	}
+	method = strings.TrimSpace(strings.ToLower(method))
+	if method == "" || method == "none" {
+		return errors.New("notification method is not configured")
+	}
+	return nil
 }

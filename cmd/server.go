@@ -350,6 +350,7 @@ func RunServer() {
 				fleetReportGroup.GET("", notification.GetFleetReportNotification)
 				fleetReportGroup.GET("/", notification.GetFleetReportNotification)
 				fleetReportGroup.POST("/edit", notification.EditFleetReportNotification)
+				fleetReportGroup.POST("/test", notification.TestFleetReportNotification)
 			}
 		}
 

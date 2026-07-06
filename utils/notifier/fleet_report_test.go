@@ -122,6 +122,27 @@ func TestDueFleetReportCadencesAvoidsDuplicatePeriods(t *testing.T) {
 	}
 }
 
+func TestParseFleetReportCadence(t *testing.T) {
+	cases := map[string]trafficReportCadence{
+		"":        trafficReportDaily,
+		"daily":   trafficReportDaily,
+		"weekly":  trafficReportWeekly,
+		"monthly": trafficReportMonthly,
+	}
+	for input, want := range cases {
+		got, err := parseFleetReportCadence(input)
+		if err != nil {
+			t.Fatalf("parseFleetReportCadence(%q) error = %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("parseFleetReportCadence(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := parseFleetReportCadence("yearly"); err == nil {
+		t.Fatal("parseFleetReportCadence(yearly) error = nil, want error")
+	}
+}
+
 func fleetRecord(client string, at time.Time, cpu float32, ram, ramTotal, disk, diskTotal int64, load float32, totalUp, totalDown int64) models.Record {
 	return models.Record{
 		Client:       client,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -105,11 +106,56 @@ func TestEditFleetReportNotificationRejectsInvalidTimezone(t *testing.T) {
 	}
 }
 
+func TestFleetReportNotificationTestRejectsDisabledChannel(t *testing.T) {
+	clearFleetReportNotifications(t)
+
+	router := fleetReportTestRouter()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/notification/fleet-report/test",
+		bytes.NewReader([]byte(`{"cadence":"daily"}`)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "notification channel is disabled") {
+		t.Fatalf("body = %s, want disabled channel error", rec.Body.String())
+	}
+}
+
+func TestFleetReportNotificationTestRejectsInvalidCadence(t *testing.T) {
+	clearFleetReportNotifications(t)
+
+	router := fleetReportTestRouter()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/notification/fleet-report/test",
+		bytes.NewReader([]byte(`{"cadence":"yearly"}`)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid report cadence") {
+		t.Fatalf("body = %s, want invalid cadence error", rec.Body.String())
+	}
+}
+
 func fleetReportTestRouter() *gin.Engine {
 	router := gin.New()
 	router.GET("/api/admin/notification/fleet-report", GetFleetReportNotification)
 	router.GET("/api/admin/notification/fleet-report/", GetFleetReportNotification)
 	router.POST("/api/admin/notification/fleet-report/edit", EditFleetReportNotification)
+	router.POST("/api/admin/notification/fleet-report/test", TestFleetReportNotification)
 	return router
 }
 
@@ -121,5 +167,8 @@ func clearFleetReportNotifications(t *testing.T) {
 	}
 	if err := db.Exec("DELETE FROM configs WHERE key IN ('notification_timezone', 'notification_report_send_hour')").Error; err != nil {
 		t.Fatalf("failed to clear fleet report config: %v", err)
+	}
+	if err := db.Exec("DELETE FROM configs WHERE key IN ('notification_enabled', 'notification_method')").Error; err != nil {
+		t.Fatalf("failed to clear notification channel config: %v", err)
 	}
 }
