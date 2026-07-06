@@ -34,3 +34,16 @@ type TrafficReportNotification struct {
 	LastWeeklyNotified  LocalTime `json:"last_weekly_notified" gorm:"type:timestamp"`
 	LastMonthlyNotified LocalTime `json:"last_monthly_notified" gorm:"type:timestamp"`
 }
+
+// FleetReportNotification stores global scheduled operations report settings.
+type FleetReportNotification struct {
+	Id                  uint      `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	Enable              bool      `json:"enable" gorm:"type:boolean;default:false"`
+	Daily               bool      `json:"daily" gorm:"type:boolean;default:false"`
+	Weekly              bool      `json:"weekly" gorm:"type:boolean;default:false"`
+	Monthly             bool      `json:"monthly" gorm:"type:boolean;default:false"`
+	TopN                int       `json:"top_n" gorm:"type:int;default:5"`
+	LastDailyNotified   LocalTime `json:"last_daily_notified" gorm:"type:timestamp"`
+	LastWeeklyNotified  LocalTime `json:"last_weekly_notified" gorm:"type:timestamp"`
+	LastMonthlyNotified LocalTime `json:"last_monthly_notified" gorm:"type:timestamp"`
+}

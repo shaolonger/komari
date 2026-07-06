@@ -345,6 +345,12 @@ func RunServer() {
 				trafficReportGroup.GET("/", notification.ListTrafficReportNotifications)
 				trafficReportGroup.POST("/edit", notification.EditTrafficReportNotifications)
 			}
+			fleetReportGroup := notificationGroup.Group("/fleet-report")
+			{
+				fleetReportGroup.GET("", notification.GetFleetReportNotification)
+				fleetReportGroup.GET("/", notification.GetFleetReportNotification)
+				fleetReportGroup.POST("/edit", notification.EditFleetReportNotification)
+			}
 		}
 
 		pingTaskGroup := adminAuthrized.Group("/ping")
