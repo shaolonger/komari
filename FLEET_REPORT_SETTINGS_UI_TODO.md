@@ -18,7 +18,7 @@
 - [x] T2 增加 Komari 原生后台配置页，提供完整表单、状态展示、保存和测试发送交互。
 - [x] T3 将配置页路由接入服务端管理员路由，并保持 `/admin` 现有 SPA 路由不被破坏。
 - [x] T4 增加并运行测试：配置 API、测试发送 API、页面权限/内容、路由编译、全量测试。
-- [ ] T5 更新版本号，打 tag，push 到远程 GitHub，并创建新的 GitHub Release。
+- [x] T5 更新版本号，打 tag，push 到远程 GitHub，并创建新的 GitHub Release。
 
 ## Acceptance
 
