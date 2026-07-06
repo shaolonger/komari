@@ -180,6 +180,7 @@ func RunServer() {
 	r.Any("/ping", func(c *gin.Context) {
 		c.String(200, "pong")
 	})
+	r.GET("/admin/notification/fleet-report-settings", api.RequireRole(api.RoleAdmin), notification.FleetReportSettingsPage)
 	// #region 公开路由
 	r.POST("/api/login", public_api.Login)
 	r.GET("/api/me", public_api.GetMe)
