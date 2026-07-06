@@ -16,7 +16,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestDueTrafficReportCadencesUsesNaturalPeriods(t *testing.T) {
-	now := time.Date(2026, 7, 6, trafficReportSendHour, 0, 0, 0, time.UTC) // Monday
+	now := time.Date(2026, 7, 6, defaultNotificationReportSendHour, 0, 0, 0, time.UTC) // Monday
 	notification := models.TrafficReportNotification{
 		Enable:  true,
 		Daily:   true,
@@ -34,7 +34,7 @@ func TestDueTrafficReportCadencesUsesNaturalPeriods(t *testing.T) {
 }
 
 func TestDueTrafficReportCadencesWaitsForScheduleBoundaries(t *testing.T) {
-	beforeSendHour := time.Date(2026, 7, 6, trafficReportSendHour-1, 59, 0, 0, time.UTC)
+	beforeSendHour := time.Date(2026, 7, 6, defaultNotificationReportSendHour-1, 59, 0, 0, time.UTC)
 	notification := models.TrafficReportNotification{
 		Enable:  true,
 		Daily:   true,
@@ -45,29 +45,30 @@ func TestDueTrafficReportCadencesWaitsForScheduleBoundaries(t *testing.T) {
 		t.Fatalf("due before send hour = %+v, want none", due)
 	}
 
-	monthlyNow := time.Date(2026, 7, 1, trafficReportSendHour, 0, 0, 0, time.UTC)
+	monthlyNow := time.Date(2026, 7, 1, defaultNotificationReportSendHour, 0, 0, 0, time.UTC)
 	monthlyOnly := models.TrafficReportNotification{Enable: true, Monthly: true}
 	assertCadences(t, dueTrafficReportCadences(monthlyOnly, monthlyNow), []trafficReportCadence{trafficReportMonthly})
 
-	notFirstDay := time.Date(2026, 7, 2, trafficReportSendHour, 0, 0, 0, time.UTC)
+	notFirstDay := time.Date(2026, 7, 2, defaultNotificationReportSendHour, 0, 0, 0, time.UTC)
 	if due := dueTrafficReportCadences(monthlyOnly, notFirstDay); len(due) != 0 {
 		t.Fatalf("monthly due on non-first day = %+v, want none", due)
 	}
 }
 
 func TestTrafficReportWindowUsesCompletedNaturalRanges(t *testing.T) {
-	now := time.Date(2026, 7, 6, trafficReportSendHour, 0, 0, 0, time.UTC)
+	loc := time.UTC
+	now := time.Date(2026, 7, 6, defaultNotificationReportSendHour, 0, 0, 0, time.UTC)
 
-	dailyStart, dailyEnd := trafficReportWindow(trafficReportDaily, now)
+	dailyStart, dailyEnd := trafficReportWindow(trafficReportDaily, now, loc)
 	assertTime(t, dailyStart, time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC))
 	assertTime(t, dailyEnd, time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC))
 
-	weeklyStart, weeklyEnd := trafficReportWindow(trafficReportWeekly, now)
+	weeklyStart, weeklyEnd := trafficReportWindow(trafficReportWeekly, now, loc)
 	assertTime(t, weeklyStart, time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC))
 	assertTime(t, weeklyEnd, time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC))
 
-	monthlyNow := time.Date(2026, 7, 1, trafficReportSendHour, 0, 0, 0, time.UTC)
-	monthlyStart, monthlyEnd := trafficReportWindow(trafficReportMonthly, monthlyNow)
+	monthlyNow := time.Date(2026, 7, 1, defaultNotificationReportSendHour, 0, 0, 0, time.UTC)
+	monthlyStart, monthlyEnd := trafficReportWindow(trafficReportMonthly, monthlyNow, loc)
 	assertTime(t, monthlyStart, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
 	assertTime(t, monthlyEnd, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
 }
@@ -92,10 +93,11 @@ func TestBuildTrafficReportMessageIncludesOperationalSummary(t *testing.T) {
 		Quality:  "exact",
 	}
 
-	message := buildTrafficReportMessage(client, trafficReportDaily, start, end, stats)
+	message := buildTrafficReportMessage(client, trafficReportDaily, start, end, stats, time.UTC)
 	for _, want := range []string{
 		"流量报告",
 		"周期: 日报",
+		"时区: UTC",
 		"上行: 1.00 KB",
 		"下行: 2.00 KB",
 		"总计: 3.00 KB",

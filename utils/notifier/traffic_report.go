@@ -22,8 +22,6 @@ const (
 	trafficReportDaily   trafficReportCadence = "daily"
 	trafficReportWeekly  trafficReportCadence = "weekly"
 	trafficReportMonthly trafficReportCadence = "monthly"
-
-	trafficReportSendHour = 9
 )
 
 var trafficReportCadenceOrder = []trafficReportCadence{
@@ -45,8 +43,10 @@ func CheckTrafficReportScheduledWork() {
 }
 
 func CheckTrafficReportOnce(now time.Time) {
-	localNow := now.In(models.GetAppLocation())
-	if localNow.Hour() < trafficReportSendHour {
+	loc := notificationReportLocation()
+	sendHour := notificationReportSendHour()
+	localNow := now.In(loc)
+	if localNow.Hour() < sendHour {
 		return
 	}
 	if !trafficReportNotificationEnabled() {
@@ -78,7 +78,7 @@ func CheckTrafficReportOnce(now time.Time) {
 			continue
 		}
 		for _, cadence := range dueTrafficReportCadences(notification, localNow) {
-			if err := sendTrafficReport(client, cadence, localNow); err != nil {
+			if err := sendTrafficReport(client, cadence, localNow, loc); err != nil {
 				slog.Error("failed to send traffic report", "client", client.UUID, "cadence", cadence, "error", err)
 				continue
 			}
@@ -110,7 +110,9 @@ func getEnabledTrafficReportNotifications() ([]models.TrafficReportNotification,
 }
 
 func dueTrafficReportCadences(notification models.TrafficReportNotification, now time.Time) []trafficReportCadence {
-	if !notification.Enable || now.In(models.GetAppLocation()).Hour() < trafficReportSendHour {
+	loc := notificationReportLocation()
+	sendHour := notificationReportSendHour()
+	if !notification.Enable || now.In(loc).Hour() < sendHour {
 		return nil
 	}
 
@@ -135,8 +137,10 @@ func dueTrafficReportCadences(notification models.TrafficReportNotification, now
 }
 
 func trafficReportCadenceDue(lastNotified time.Time, cadence trafficReportCadence, now time.Time) bool {
-	localNow := now.In(models.GetAppLocation())
-	if localNow.Hour() < trafficReportSendHour {
+	loc := notificationReportLocation()
+	sendHour := notificationReportSendHour()
+	localNow := now.In(loc)
+	if localNow.Hour() < sendHour {
 		return false
 	}
 	if lastNotified.IsZero() {
@@ -145,7 +149,7 @@ func trafficReportCadenceDue(lastNotified time.Time, cadence trafficReportCadenc
 			(cadence == trafficReportMonthly && localNow.Day() == 1)
 	}
 
-	localLast := lastNotified.In(models.GetAppLocation())
+	localLast := lastNotified.In(loc)
 	switch cadence {
 	case trafficReportDaily:
 		return !sameLocalDay(localLast, localNow)
@@ -164,53 +168,54 @@ func sameLocalDay(left, right time.Time) bool {
 	return left.Year() == right.Year() && left.Month() == right.Month() && left.Day() == right.Day()
 }
 
-func sendTrafficReport(client models.Client, cadence trafficReportCadence, now time.Time) error {
-	start, end := trafficReportWindow(cadence, now)
+func sendTrafficReport(client models.Client, cadence trafficReportCadence, now time.Time, loc *time.Location) error {
+	start, end := trafficReportWindow(cadence, now, loc)
 	recs, err := recordsdb.GetRecordsByClientAndTime(client.UUID, start, end)
 	if err != nil {
 		return err
 	}
 	stats := recordsdb.SummarizeTrafficRecords(recs, start, end, 0)
-	message := buildTrafficReportMessage(client, cadence, start, end, stats)
+	message := buildTrafficReportMessage(client, cadence, start, end, stats, loc)
 	return messageSender.SendEvent(models.EventMessage{
-		Event:   messageevent.TrafficReport,
-		Clients: []models.Client{client},
-		Time:    now,
-		Emoji:   "📊",
-		Message: message,
+		Event:    messageevent.TrafficReport,
+		Clients:  []models.Client{client},
+		Time:     now,
+		Emoji:    "📊",
+		Message:  message,
+		Timezone: loc.String(),
 	})
 }
 
-func trafficReportWindow(cadence trafficReportCadence, now time.Time) (time.Time, time.Time) {
-	localNow := now.In(models.GetAppLocation())
+func trafficReportWindow(cadence trafficReportCadence, now time.Time, loc *time.Location) (time.Time, time.Time) {
+	localNow := now.In(loc)
 	switch cadence {
 	case trafficReportWeekly:
-		end := startOfLocalWeek(localNow)
+		end := startOfLocalWeek(localNow, loc)
 		return end.AddDate(0, 0, -7), end
 	case trafficReportMonthly:
-		end := startOfLocalMonth(localNow)
+		end := startOfLocalMonth(localNow, loc)
 		return end.AddDate(0, -1, 0), end
 	case trafficReportDaily:
 		fallthrough
 	default:
-		end := startOfLocalDay(localNow)
+		end := startOfLocalDay(localNow, loc)
 		return end.AddDate(0, 0, -1), end
 	}
 }
 
-func startOfLocalDay(t time.Time) time.Time {
-	local := t.In(models.GetAppLocation())
+func startOfLocalDay(t time.Time, loc *time.Location) time.Time {
+	local := t.In(loc)
 	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
 }
 
-func startOfLocalWeek(t time.Time) time.Time {
-	day := startOfLocalDay(t)
+func startOfLocalWeek(t time.Time, loc *time.Location) time.Time {
+	day := startOfLocalDay(t, loc)
 	offset := (int(day.Weekday()) + 6) % 7
 	return day.AddDate(0, 0, -offset)
 }
 
-func startOfLocalMonth(t time.Time) time.Time {
-	local := t.In(models.GetAppLocation())
+func startOfLocalMonth(t time.Time, loc *time.Location) time.Time {
+	local := t.In(loc)
 	return time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, local.Location())
 }
 
@@ -232,11 +237,12 @@ func markTrafficReportNotified(client string, cadence trafficReportCadence, noti
 		Update(column, models.FromTime(notifiedAt)).Error
 }
 
-func buildTrafficReportMessage(client models.Client, cadence trafficReportCadence, start, end time.Time, stats recordsdb.TrafficStats) string {
+func buildTrafficReportMessage(client models.Client, cadence trafficReportCadence, start, end time.Time, stats recordsdb.TrafficStats, loc *time.Location) string {
 	lines := []string{
 		"流量报告",
 		"周期: " + trafficReportCadenceLabel(cadence),
-		"时间范围: " + formatTrafficReportTime(start) + " - " + formatTrafficReportTime(end),
+		"时区: " + loc.String(),
+		"时间范围: " + formatTrafficReportTime(start, loc) + " - " + formatTrafficReportTime(end, loc),
 		"上行: " + humanBytes(stats.Up),
 		"下行: " + humanBytes(stats.Down),
 		"总计: " + humanBytes(stats.Total),
@@ -251,7 +257,7 @@ func buildTrafficReportMessage(client models.Client, cadence trafficReportCadenc
 		lines = append(lines, "计数器重置: "+fmt.Sprintf("%d 次", stats.Resets))
 	}
 	if stats.FirstSample != "" && stats.LastSample != "" {
-		lines = append(lines, "样本范围: "+formatTrafficReportTimeString(stats.FirstSample)+" - "+formatTrafficReportTimeString(stats.LastSample))
+		lines = append(lines, "样本范围: "+formatTrafficReportTimeString(stats.FirstSample, loc)+" - "+formatTrafficReportTimeString(stats.LastSample, loc))
 	}
 
 	if client.TrafficLimit > 0 {
@@ -316,16 +322,16 @@ func trafficTypeLabelForReport(value string) string {
 	}
 }
 
-func formatTrafficReportTime(t time.Time) string {
-	return t.In(models.GetAppLocation()).Format("2006-01-02 15:04:05")
+func formatTrafficReportTime(t time.Time, loc *time.Location) string {
+	return t.In(loc).Format("2006-01-02 15:04:05")
 }
 
-func formatTrafficReportTimeString(value string) string {
+func formatTrafficReportTimeString(value string, loc *time.Location) string {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return value
 	}
-	return formatTrafficReportTime(parsed)
+	return formatTrafficReportTime(parsed, loc)
 }
 
 func formatPercent(value float64) string {

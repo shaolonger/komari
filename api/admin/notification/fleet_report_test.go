@@ -9,7 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
 )
 
 func TestGetFleetReportNotificationReturnsDefault(t *testing.T) {
@@ -26,7 +25,7 @@ func TestGetFleetReportNotificationReturnsDefault(t *testing.T) {
 	}
 	var response struct {
 		Status string                         `json:"status"`
-		Data   models.FleetReportNotification `json:"data"`
+		Data   fleetReportNotificationPayload `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("response is not valid JSON: %v; body = %s", err, rec.Body.String())
@@ -34,13 +33,16 @@ func TestGetFleetReportNotificationReturnsDefault(t *testing.T) {
 	if response.Data.Enable || !response.Data.Daily || !response.Data.Weekly || !response.Data.Monthly || response.Data.TopN != 5 {
 		t.Fatalf("unexpected default fleet report notification: %+v", response.Data)
 	}
+	if response.Data.Timezone != "UTC" || response.Data.SendHour != 9 {
+		t.Fatalf("unexpected default time settings: %+v", response.Data)
+	}
 }
 
 func TestEditFleetReportNotificationUpsertsSettings(t *testing.T) {
 	clearFleetReportNotifications(t)
 
 	router := fleetReportTestRouter()
-	body := []byte(`{"enable":true,"daily":true,"weekly":false,"monthly":true,"top_n":99}`)
+	body := []byte(`{"enable":true,"daily":true,"weekly":false,"monthly":true,"top_n":99,"timezone":"Asia/Shanghai","send_hour":8}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/notification/fleet-report/edit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -52,13 +54,16 @@ func TestEditFleetReportNotificationUpsertsSettings(t *testing.T) {
 	}
 	var response struct {
 		Status string                         `json:"status"`
-		Data   models.FleetReportNotification `json:"data"`
+		Data   fleetReportNotificationPayload `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("response is not valid JSON: %v; body = %s", err, rec.Body.String())
 	}
 	if !response.Data.Enable || !response.Data.Daily || response.Data.Weekly || !response.Data.Monthly || response.Data.TopN != 20 {
 		t.Fatalf("fleet report notification not normalized correctly: %+v", response.Data)
+	}
+	if response.Data.Timezone != "Asia/Shanghai" || response.Data.SendHour != 8 {
+		t.Fatalf("fleet report time settings not saved correctly: %+v", response.Data)
 	}
 }
 
@@ -70,6 +75,25 @@ func TestEditFleetReportNotificationRejectsEnabledWithoutCadence(t *testing.T) {
 		http.MethodPost,
 		"/api/admin/notification/fleet-report/edit",
 		bytes.NewReader([]byte(`{"enable":true,"daily":false,"weekly":false,"monthly":false}`)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEditFleetReportNotificationRejectsInvalidTimezone(t *testing.T) {
+	clearFleetReportNotifications(t)
+
+	router := fleetReportTestRouter()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/notification/fleet-report/edit",
+		bytes.NewReader([]byte(`{"enable":true,"daily":true,"timezone":"Mars/Olympus","send_hour":9}`)),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -94,5 +118,8 @@ func clearFleetReportNotifications(t *testing.T) {
 	db := dbcore.GetDBInstance()
 	if err := db.Exec("DELETE FROM fleet_report_notifications").Error; err != nil {
 		t.Fatalf("failed to clear fleet report notifications: %v", err)
+	}
+	if err := db.Exec("DELETE FROM configs WHERE key IN ('notification_timezone', 'notification_report_send_hour')").Error; err != nil {
+		t.Fatalf("failed to clear fleet report config: %v", err)
 	}
 }
