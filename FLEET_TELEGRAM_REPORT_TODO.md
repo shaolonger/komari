@@ -19,7 +19,7 @@
 - [x] T4 将全局报告调度接入服务定时任务，保证同一周期不重复发送，通知关闭时不消耗周期。
 - [x] T5 优化 Telegram JavaScript 示例，支持全局运维报告的视觉化排版、排行条、健康分和异常摘要。
 - [x] T6 增加并运行测试：时区窗口、周期去重、报告统计、接口校验、JS 语法与渲染烟测。
-- [ ] T7 更新版本号，打 tag，push 到远程 GitHub，并创建新的 GitHub Release。
+- [x] T7 更新版本号，打 tag，push 到远程 GitHub，并创建新的 GitHub Release。
 
 ## Acceptance
 
