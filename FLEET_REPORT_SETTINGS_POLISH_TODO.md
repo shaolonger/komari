@@ -15,7 +15,7 @@
 - [x] T2 优化报告时区配置：改为真实下拉选项，并让后端支持 `UTC+8`、`GMT+8`、`UTC-05:00` 等固定偏移写法。
 - [x] T3 优化测试报告周期交互：明确说明它只影响测试发送，并在选择变化时更新说明和按钮文案。
 - [x] T4 增加并运行测试：菜单注入、UTC 偏移解析、页面内容、配置 API、全量 Go 测试。
-- [ ] T5 更新版本号，打 tag，push 到远程 GitHub，并创建新的 GitHub Release。
+- [x] T5 更新版本号，打 tag，push 到远程 GitHub，并创建新的 GitHub Release。
 
 ## Acceptance
 
