@@ -17,6 +17,9 @@ const SHOW_NODE_LINK_IN_BODY = true;
 const MAX_TITLE_LENGTH = 80;
 const MAX_TELEGRAM_TEXT_LENGTH = 3900;
 const MAX_CLIENTS_SHOWN = 6;
+const MAX_FLEET_RANKING_SECTIONS = 7;
+const MAX_FLEET_RANK_ITEMS = 5;
+const MAX_FLEET_ANOMALIES_SHOWN = 8;
 const TELEGRAM_RETRY_ATTEMPTS = 3;
 const TELEGRAM_RETRY_DELAY_MS = 800;
 
@@ -156,6 +159,26 @@ function formatTrafficLimit(bytes) {
   const n = Number(bytes || 0);
   if (!n || n <= 0) return "无限制";
   return formatBytes(n, "无限制");
+}
+
+function formatPercentText(value, fallback) {
+  const n = Number(value);
+  if (isNaN(n)) return fallback || "0.0%";
+  return n.toFixed(1) + "%";
+}
+
+function visualBar(percent, width) {
+  width = width || 12;
+  let n = Number(percent || 0);
+  if (isNaN(n)) n = 0;
+  if (n < 0) n = 0;
+  if (n > 100) n = 100;
+  const filled = Math.round(n / 100 * width);
+  return "▰".repeat(filled) + "▱".repeat(width - filled);
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function maskIP(ip) {
@@ -324,12 +347,16 @@ const EVENT_META = {
   recover: { icon: "🟢", title: "告警恢复", severity: "正常", accent: "已恢复" },
   recovered: { icon: "🟢", title: "告警恢复", severity: "正常", accent: "已恢复" },
   report: { icon: "📊", title: "流量定时报告", severity: "报告", accent: "周期汇总" },
+  fleet_report: { icon: "📊", title: "全局运维报告", severity: "报告", accent: "全局健康与异常排行" },
   notice: { icon: "📌", title: "系统通知", severity: "通知", accent: "常规事件" }
 };
 
 function normalizeEventName(event) {
   let name = asString(event && event.event, "").toLowerCase().trim();
   const message = asString(event && event.message, "");
+  const data = eventData(event);
+  if (data && data.kind === "fleet_report") return "fleet_report";
+  if (name.indexOf("fleetreport") >= 0 || name.indexOf("fleet_report") >= 0 || message.indexOf("全局运维报告") >= 0) return "fleet_report";
   if (name.indexOf("report") >= 0 || message.indexOf("流量报告") >= 0 || message.toLowerCase().indexOf("traffic report") >= 0) return "report";
   if (name.indexOf("offline") >= 0) return "offline";
   if (name.indexOf("online") >= 0) return "online";
@@ -341,6 +368,11 @@ function normalizeEventName(event) {
   if (name.indexOf("test") >= 0) return "test";
   if (name.indexOf("recover") >= 0) return "recover";
   return name || "notice";
+}
+
+function eventData(event) {
+  if (!event) return {};
+  return event.data || event.Data || {};
 }
 
 function normalizeClients(event) {
@@ -523,6 +555,102 @@ function buildReportEventMessage(event, meta, clients) {
   return lines.join("\n");
 }
 
+function severityBadge(severity) {
+  severity = asString(severity, "").toLowerCase();
+  if (severity === "critical") return "🔴 严重";
+  if (severity === "warning") return "🟡 警告";
+  return "🔵 提示";
+}
+
+function formatFleetReportEventMessage(event, meta) {
+  const data = eventData(event);
+  const summary = data.summary || data.Summary || {};
+  const rankings = asArray(data.rankings || data.Rankings);
+  const anomalies = asArray(data.anomalies || data.Anomalies);
+  const recommendations = asArray(data.recommendations || data.Recommendations);
+  const rawMessage = firstNonEmpty([event.message, event.Message], "");
+
+  if (!data || data.kind !== "fleet_report") {
+    return rawMessage || "收到全局运维报告，但当前事件没有结构化报告数据。";
+  }
+
+  const lines = [];
+  const cadenceLabel = firstNonEmpty([data.cadence_label, data.CadenceLabel], meta.title);
+  const periodLabel = firstNonEmpty([data.period_label, data.PeriodLabel], "未知周期");
+  const timezone = firstNonEmpty([data.timezone, data.Timezone, event.timezone, event.Timezone], TIMEZONE_LABEL);
+  const generatedAt = firstNonEmpty([data.generated_at, data.GeneratedAt], formatLocalTime(event.time || event.Time));
+  const healthScore = Number(firstNonEmpty([summary.health_score, summary.HealthScore], 0));
+
+  lines.push("🧭 " + cadenceLabel + " · " + periodLabel);
+  lines.push("🌐 时区: " + timezone + " · 生成: " + generatedAt);
+  lines.push("");
+  lines.push("🏆 健康分: " + healthScore + "/100  " + visualBar(healthScore, 12));
+  lines.push("🖥️ 节点: " + firstNonEmpty([summary.total_nodes, summary.TotalNodes], 0) +
+    " 台 / 有数据 " + firstNonEmpty([summary.report_nodes, summary.ReportNodes], 0) +
+    " / 无数据 " + firstNonEmpty([summary.no_data_nodes, summary.NoDataNodes], 0));
+  lines.push("🚨 异常: " + firstNonEmpty([summary.anomaly_nodes, summary.AnomalyNodes], 0) +
+    " 台 / 严重 " + firstNonEmpty([summary.critical_anomalies, summary.CriticalAnomalies], 0) +
+    " / 警告 " + firstNonEmpty([summary.warning_anomalies, summary.WarningAnomalies], 0));
+  lines.push("🧪 覆盖率: " + formatPercentText(firstNonEmpty([summary.data_coverage, summary.DataCoverage], 0)) +
+    "  " + visualBar(firstNonEmpty([summary.data_coverage, summary.DataCoverage], 0), 12));
+  lines.push("📶 总流量: " + firstNonEmpty([summary.total_traffic_text, summary.TotalTrafficText], "0 B"));
+
+  const avgPingP95 = Number(firstNonEmpty([summary.avg_ping_p95, summary.AvgPingP95], 0));
+  const avgPingLoss = Number(firstNonEmpty([summary.avg_ping_loss, summary.AvgPingLoss], 0));
+  if (avgPingP95 > 0 || avgPingLoss > 0) {
+    lines.push("📡 Ping: P95 均值 " + avgPingP95.toFixed(0) + " ms / 丢包均值 " + formatPercentText(avgPingLoss));
+  }
+
+  if (rankings.length > 0) {
+    lines.push("");
+    lines.push("📊 关键榜单");
+    const sectionCount = Math.min(rankings.length, MAX_FLEET_RANKING_SECTIONS);
+    for (let i = 0; i < sectionCount; i++) {
+      const ranking = rankings[i] || {};
+      const items = asArray(ranking.items || ranking.Items);
+      if (items.length === 0) continue;
+      lines.push("");
+      lines.push("▸ " + firstNonEmpty([ranking.title, ranking.Title], "排行"));
+      const itemCount = Math.min(items.length, MAX_FLEET_RANK_ITEMS);
+      for (let j = 0; j < itemCount; j++) {
+        const item = items[j] || {};
+        const name = firstNonEmpty([item.name, item.Name, item.uuid, item.UUID], "未知节点");
+        const value = firstNonEmpty([item.display_value, item.DisplayValue], "");
+        const percent = firstNonEmpty([item.percent, item.Percent], 0);
+        const detail = firstNonEmpty([item.detail, item.Detail], "");
+        lines.push("#" + firstNonEmpty([item.rank, item.Rank], j + 1) + " " + name + "  " + value);
+        lines.push("   " + visualBar(percent, 10) + (detail ? "  " + detail : ""));
+      }
+    }
+  }
+
+  if (anomalies.length > 0) {
+    lines.push("");
+    lines.push("🚨 异常摘要");
+    const limit = Math.min(anomalies.length, MAX_FLEET_ANOMALIES_SHOWN);
+    for (let k = 0; k < limit; k++) {
+      const anomaly = anomalies[k] || {};
+      const name = firstNonEmpty([anomaly.name, anomaly.Name], "全局");
+      const title = firstNonEmpty([anomaly.title, anomaly.Title], "异常");
+      const detail = firstNonEmpty([anomaly.detail, anomaly.Detail], "");
+      lines.push(severityBadge(firstNonEmpty([anomaly.severity, anomaly.Severity], "")) + " " + name + " · " + title);
+      if (detail) lines.push("   " + detail);
+    }
+    if (anomalies.length > limit) {
+      lines.push("… 还有 " + (anomalies.length - limit) + " 条异常，请进入面板查看。");
+    }
+  }
+
+  if (recommendations.length > 0) {
+    lines.push("");
+    lines.push("✅ 建议动作");
+    for (let r = 0; r < Math.min(recommendations.length, 4); r++) {
+      lines.push("• " + recommendations[r]);
+    }
+  }
+  return lines.join("\n");
+}
+
 function splitTelegramText(text) {
   text = asString(text, "");
   if (text.length <= MAX_TELEGRAM_TEXT_LENGTH) return [text];
@@ -631,7 +759,11 @@ async function sendEvent(event) {
     const clients = normalizeClients(event);
     const instanceId = clients.length === 1 ? firstNonEmpty([clients[0].uuid, clients[0].UUID], null) : null;
     const title = meta.icon + " " + meta.title;
-    const message = eventName === "report" ? buildReportEventMessage(event, meta, clients) : buildEventMessage(event, meta, clients);
+    const message = eventName === "fleet_report"
+      ? formatFleetReportEventMessage(event, meta)
+      : eventName === "report"
+        ? buildReportEventMessage(event, meta, clients)
+        : buildEventMessage(event, meta, clients);
     return await sendMessage(message, title, instanceId);
   } catch (error) {
     console.error("sendEvent failed:", error);
