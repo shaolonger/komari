@@ -106,6 +106,35 @@ func TestEditFleetReportNotificationRejectsInvalidTimezone(t *testing.T) {
 	}
 }
 
+func TestEditFleetReportNotificationAcceptsUTCOffsetTimezone(t *testing.T) {
+	clearFleetReportNotifications(t)
+
+	router := fleetReportTestRouter()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/notification/fleet-report/edit",
+		bytes.NewReader([]byte(`{"enable":true,"daily":true,"timezone":"UTC+8","send_hour":9}`)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Status string                         `json:"status"`
+		Data   fleetReportNotificationPayload `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("response is not valid JSON: %v; body = %s", err, rec.Body.String())
+	}
+	if response.Data.Timezone != "UTC+8" {
+		t.Fatalf("timezone = %q, want UTC+8", response.Data.Timezone)
+	}
+}
+
 func TestFleetReportNotificationTestRejectsDisabledChannel(t *testing.T) {
 	clearFleetReportNotifications(t)
 
@@ -169,6 +198,7 @@ func TestFleetReportSettingsPageRendersConfigurationUI(t *testing.T) {
 		"/api/admin/notification/fleet-report/test",
 		"保存配置",
 		"发送测试报告",
+		"UTC+8 固定偏移",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("settings page missing %q", want)

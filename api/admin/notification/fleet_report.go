@@ -179,7 +179,7 @@ func normalizeFleetReportNotificationPayload(payload *fleetReportNotificationPay
 	if payload.Timezone == "" {
 		payload.Timezone = "UTC"
 	}
-	if _, err := time.LoadLocation(payload.Timezone); err != nil {
+	if _, err := notifier.LoadNotificationLocation(payload.Timezone); err != nil {
 		return errors.New("invalid timezone: " + payload.Timezone)
 	}
 	payload.SendHour = normalizeFleetReportSendHour(payload.SendHour)

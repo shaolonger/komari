@@ -73,6 +73,33 @@ func TestTrafficReportWindowUsesCompletedNaturalRanges(t *testing.T) {
 	assertTime(t, monthlyEnd, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
 }
 
+func TestLoadNotificationLocationAcceptsUTCOffsets(t *testing.T) {
+	loc, err := LoadNotificationLocation("UTC+8")
+	if err != nil {
+		t.Fatalf("LoadNotificationLocation(UTC+8) error = %v", err)
+	}
+	if loc.String() != "UTC+8" {
+		t.Fatalf("location name = %q, want UTC+8", loc.String())
+	}
+	_, offset := time.Date(2026, 7, 6, 9, 0, 0, 0, loc).Zone()
+	if offset != 8*3600 {
+		t.Fatalf("offset = %d, want %d", offset, 8*3600)
+	}
+
+	halfHour, err := LoadNotificationLocation("GMT+05:30")
+	if err != nil {
+		t.Fatalf("LoadNotificationLocation(GMT+05:30) error = %v", err)
+	}
+	_, offset = time.Date(2026, 7, 6, 9, 0, 0, 0, halfHour).Zone()
+	if offset != 5*3600+30*60 {
+		t.Fatalf("offset = %d, want %d", offset, 5*3600+30*60)
+	}
+
+	if _, err := LoadNotificationLocation("UTC+15"); err == nil {
+		t.Fatal("LoadNotificationLocation(UTC+15) error = nil, want range error")
+	}
+}
+
 func TestBuildTrafficReportMessageIncludesOperationalSummary(t *testing.T) {
 	start := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
