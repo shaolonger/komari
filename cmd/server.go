@@ -435,6 +435,7 @@ func DoScheduledWork() {
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
 	records.CompactRecord()
 	go notifier.CheckExpireScheduledWork()
+	go notifier.CheckTrafficReportScheduledWork()
 	for {
 		cfg, _ := config.GetManyAs[config.Legacy]()
 		select {
