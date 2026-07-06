@@ -442,6 +442,7 @@ func DoScheduledWork() {
 	records.CompactRecord()
 	go notifier.CheckExpireScheduledWork()
 	go notifier.CheckTrafficReportScheduledWork()
+	go notifier.CheckFleetReportScheduledWork()
 	for {
 		cfg, _ := config.GetManyAs[config.Legacy]()
 		select {

@@ -97,6 +97,31 @@ func TestBuildFleetReportEventCarriesStructuredPayload(t *testing.T) {
 	}
 }
 
+func TestDueFleetReportCadencesAvoidsDuplicatePeriods(t *testing.T) {
+	now := time.Date(2026, 7, 6, defaultNotificationReportSendHour, 0, 0, 0, time.UTC) // Monday
+	notification := models.FleetReportNotification{
+		Enable:  true,
+		Daily:   true,
+		Weekly:  true,
+		Monthly: true,
+	}
+
+	assertCadences(t, dueFleetReportCadences(notification, now), []trafficReportCadence{trafficReportDaily, trafficReportWeekly})
+
+	notification.LastDailyNotified = models.FromTime(now)
+	notification.LastWeeklyNotified = models.FromTime(now)
+	if due := dueFleetReportCadences(notification, now.Add(2*time.Hour)); len(due) != 0 {
+		t.Fatalf("due after same-cycle notification = %+v, want none", due)
+	}
+
+	monthStart := time.Date(2026, 7, 1, defaultNotificationReportSendHour, 0, 0, 0, time.UTC)
+	monthly := models.FleetReportNotification{Enable: true, Monthly: true}
+	assertCadences(t, dueFleetReportCadences(monthly, monthStart), []trafficReportCadence{trafficReportMonthly})
+	if due := dueFleetReportCadences(monthly, monthStart.AddDate(0, 0, 1)); len(due) != 0 {
+		t.Fatalf("monthly due on non-first day = %+v, want none", due)
+	}
+}
+
 func fleetRecord(client string, at time.Time, cpu float32, ram, ramTotal, disk, diskTotal int64, load float32, totalUp, totalDown int64) models.Record {
 	return models.Record{
 		Client:       client,
