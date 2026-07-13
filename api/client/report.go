@@ -277,7 +277,12 @@ func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
 			Value:  reqBody.PingResult,
 			Time:   models.FromTime(reqBody.FinishedAt),
 		}
-		tasks.SavePingRecord(pingResult)
+		if err := tasks.SavePingRecord(pingResult); err != nil {
+			// A ping can finish after its task has been removed. Do not recreate an
+			// orphaned history row; the agent will receive the next schedule from
+			// the refreshed task list.
+			log.Printf("Discarded ping result for client %s, task %d: %v", uuid, reqBody.PingTaskID, err)
+		}
 	default:
 		log.Printf("Unknown message type: %s", msgType.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})

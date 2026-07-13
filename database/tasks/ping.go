@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"errors"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -8,6 +9,8 @@ import (
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 )
+
+var ErrPingTaskNotAssigned = errors.New("ping task is not assigned to this client")
 
 // AddPingTask 创建延迟监测任务。defaultOn 表示新加入的服务器是否自动开启此监测。
 func AddPingTask(clients []string, defaultOn bool, name string, target, task_type string, interval int) (uint, error) {
@@ -46,12 +49,30 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 
 func DeletePingTask(id []uint) error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("id IN ?", id).Delete(&models.PingTask{})
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+	err := db.Transaction(func(tx *gorm.DB) error {
+		// PingRecord has historically existed without a database-enforced foreign
+		// key on some installations. Delete it explicitly so deleting a task never
+		// leaves historical samples that can be mistaken for an active task.
+		var taskCount int64
+		if err := tx.Model(&models.PingTask{}).Where("id IN ?", id).Count(&taskCount).Error; err != nil {
+			return err
+		}
+		if taskCount == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := tx.Where("task_id IN ?", id).Delete(&models.PingRecord{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id IN ?", id).Delete(&models.PingTask{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	ReloadPingSchedule()
-	return result.Error
+	return nil
 }
 
 // EditPingTask 批量更新延迟监测任务配置。
@@ -127,6 +148,13 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 
 func SavePingRecord(record models.PingRecord) error {
 	db := dbcore.GetDBInstance()
+	var task models.PingTask
+	if err := db.Select("id", "clients").First(&task, record.TaskId).Error; err != nil {
+		return err
+	}
+	if !task.AppliesToClient(record.Client) {
+		return ErrPingTaskNotAssigned
+	}
 	return db.Create(&record).Error
 }
 
@@ -238,14 +266,17 @@ func MigrateAllClientsExpansion() error {
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.PingRecord
-	dbQuery := db.Model(&models.PingRecord{})
+	// Old database versions could leave ping_records behind after their
+	// ping_tasks row was removed. An inner join makes those orphaned records
+	// invisible immediately, even before the operator's next retention cleanup.
+	dbQuery := db.Model(&models.PingRecord{}).Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_records.task_id")
 	if uuid != "" {
-		dbQuery = dbQuery.Where("client = ?", uuid)
+		dbQuery = dbQuery.Where("ping_records.client = ?", uuid)
 	}
 	if taskId >= 0 {
-		dbQuery = dbQuery.Where("task_id = ?", uint(taskId))
+		dbQuery = dbQuery.Where("ping_records.task_id = ?", uint(taskId))
 	}
-	if err := dbQuery.Where("time >= ? AND time <= ?", start, end).Order("time DESC").Find(&records).Error; err != nil {
+	if err := dbQuery.Where("ping_records.time >= ? AND ping_records.time <= ?", start, end).Order("ping_records.time DESC").Find(&records).Error; err != nil {
 		return nil, err
 	}
 	return records, nil
