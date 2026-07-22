@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/internal/telemetry"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
 )
 
@@ -46,6 +49,25 @@ func TestUploadReportRejectsOversizedBody(t *testing.T) {
 	recorder := performUpload(body, true)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413; body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSaveClientReportEnforcesBoundedMinute(t *testing.T) {
+	previous := api.Telemetry
+	api.Telemetry = telemetry.NewStore()
+	defer func() { api.Telemetry = previous }()
+	base := time.Now().Truncate(time.Minute)
+	for i := 0; i < telemetry.MaxSamplesPerMinute; i++ {
+		if err := SaveClientReport("node", common.Report{UpdatedAt: base, CPU: common.CPUReport{Usage: 0}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SaveClientReport("node", common.Report{UpdatedAt: base}); !errors.Is(err, telemetry.ErrSampleLimit) {
+		t.Fatalf("sample limit error = %v", err)
+	}
+	aggregates := api.Telemetry.DrainBefore(base.Add(time.Minute))
+	if len(aggregates) != 1 || aggregates[0].Record.Cpu != 0.01 {
+		t.Fatalf("CPU floor or aggregate changed: %+v", aggregates)
 	}
 }
 

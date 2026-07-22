@@ -43,7 +43,7 @@
   - UUID 只信任认证上下文。
   - 测试：超限、畸形 JSON、UUID 伪造、旧 Agent 兼容、fuzz。
 
-- [ ] **K-102 分片实时快照与原子 minute accumulator**
+- [x] **K-102 分片实时快照与原子 minute accumulator**
   - 替换 `go-cache Get/append/Set` 报告切片。
   - 固定 shard 数，值语义不可变 snapshot。
   - 保持当前 Record/GPU 聚合业务语义。

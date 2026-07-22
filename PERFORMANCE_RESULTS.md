@@ -84,6 +84,30 @@ HTTP typed decode 约快 2.3×，分配字节减少 91.6%、分配次数减少 9
 
 安全/兼容验证包括：无认证身份、UUID 伪造、畸形和尾随 JSON、64 KiB+1 HTTP/WS payload、v1 未知扩展、JSON report/ping typed union、v1/v2 golden 对照；两个 JSON fuzz target 本轮合计执行超过 21 万输入且无 panic/身份绕过。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
 
+## K-102 分片快照与有界 minute accumulator
+
+删除 `go-cache` 中每个 UUID 的可增长 `[]common.Report` 和 `Get → append → Set` 竞态，改为 256 个固定 shard。每次更新在单个 shard 锁内原子完成，不同 UUID 可并行；同 UUID 不会覆盖并发样本。每个节点状态只保留：
+
+- 一份深拷贝所有引用字段的最新不可变 snapshot；
+- 当前和至多一个尚未 drain 的分钟窗口；
+- 每个 Record/GPU 指标的固定容量 min-heap，精确保留受支持窗口内 top 30% 所需候选；
+- 120 samples/minute（2 Hz）和 64 GPU devices 的硬上限。
+
+默认 Agent 1 Hz 在上限内保持现有 `AverageReport`/`AverageGPUReports` top-30% 结果逐字段精确一致。第 121 个同分钟样本返回明确错误，HTTP 映射为 429；第三个未 drain 窗口也显式失败，不会静默覆盖。最新 snapshot 即使达到聚合上限仍更新；过期 snapshot 和已 drain 空节点按原来一分钟 TTL 清理。
+
+公开 recent API 和 JSON-RPC 保留原数组/字段结构，但数组现在只包含最新不可变 snapshot，不再把攻击者可控频率转换为整分钟原始 Report 列表。原始输入和返回值的 GPU slice 均深拷贝，调用方不能修改内部状态。
+
+60 reports、2 GPU、完整 Add + snapshot ownership + drain + Record/GPU materialization，10,000 次固定 benchmark：
+
+| 实现 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 原始切片 + 多字段重复排序 | 25,806～28,916 | 30,776 | 112 |
+| 256-shard bounded accumulator | 12,680～15,972 | 7,352 | 9 |
+
+新路径约快 1.6～2.3×，分配字节减少 76.1%，分配次数减少 92.0%；输入频率超过上限时内存保持常量，而旧路径继续线性增长。
+
+验证覆盖：同 UUID 120 goroutine 并发、512 个跨 shard UUID、分钟边界、两个窗口 drain/第三窗口背压、GPU 多设备、120 样本/64 GPU 限制、source/returned snapshot 不可变性、TTL 清理，以及新旧 Record/GPU 完整结构对照。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
+
 ## K-104 Agent 协议 v2 与 v1 兼容协商
 
 服务端 WebSocket 现在按标准 subprotocol 显式协商：优先 `komari.telemetry.v2`，其次 `komari.telemetry.v1`；旧 Agent 或代理未携带/转发 subprotocol 时默认 JSON v1。只有成功协商 v2 的连接可发送二进制帧；v2 连接仍接受 Agent 在编码失败时发送的 JSON v1 text fallback。未知协议和 legacy 连接上的 binary frame fail closed，且 Token/控制能力仍由原认证链决定。

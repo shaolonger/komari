@@ -487,8 +487,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		}
 	}
 
-	raw, _ := api.Records.Get(params.UUID)
-	reports, _ := raw.([]common.Report)
+	reports := api.Telemetry.Recent(params.UUID)
 
 	// 扁平化为 { count, records: [] }
 	type flatRecord struct {

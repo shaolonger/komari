@@ -18,10 +18,10 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/observability"
+	"github.com/komari-monitor/komari/internal/telemetry"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
-	"github.com/patrickmn/go-cache"
 )
 
 const (
@@ -128,6 +128,10 @@ func UploadReport(c *gin.Context) {
 
 	err = SaveClientReport(uuid, report)
 	if err != nil {
+		if errors.Is(err, telemetry.ErrSampleLimit) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%v", err)})
 		return
 	}
@@ -318,15 +322,8 @@ func decodeAgentMessage(message []byte, decoded *agentMessage) error {
 }
 
 func SaveClientReport(uuid string, report common.Report) error {
-	reports, _ := api.Records.Get(uuid)
-	if reports == nil {
-		reports = []common.Report{}
-	}
 	if report.CPU.Usage < 0.01 {
 		report.CPU.Usage = 0.01
 	}
-	reports = append(reports.([]common.Report), report)
-	api.Records.Set(uuid, reports, cache.DefaultExpiration)
-
-	return nil
+	return api.Telemetry.Add(uuid, report)
 }
