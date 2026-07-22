@@ -88,10 +88,7 @@ func GetLatestRecord(uuid string) (Record []models.Record, err error) {
 
 func DeleteRecordBefore(before time.Time) error {
 	db := dbcore.GetDBInstance()
-	db.Table("records_long_term").Where("time < ?", before).Delete(&models.Record{})
-	db.Table("gpu_records_long_term").Where("time < ?", before).Delete(&models.GPURecord{})
-	db.Where("time < ?", before).Delete(&models.GPURecord{})
-	return db.Where("time < ?", before).Delete(&models.Record{}).Error
+	return ApplyTierRetentionAt(context.Background(), db, time.Now(), before)
 }
 
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
@@ -188,6 +185,12 @@ func CompactRecord() (err error) {
 		return err
 	}
 	buckets += gpuStats.Buckets
+	hourlyStats, err := buildHourlyRollupsAt(context.Background(), db, time.Now())
+	if err != nil {
+		log.Printf("Error building hourly telemetry rollups: %v", err)
+		return err
+	}
+	buckets += hourlyStats.Buckets
 
 	if flags.DatabaseType == "sqlite" {
 		if checkpoint := db.Exec("PRAGMA wal_checkpoint(PASSIVE);"); checkpoint.Error != nil {

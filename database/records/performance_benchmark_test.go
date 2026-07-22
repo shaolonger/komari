@@ -150,6 +150,57 @@ func BenchmarkHistoryRangeQuery(b *testing.B) {
 	b.ReportMetric(float64(counter.statements.Load())/float64(b.N), "sql/op")
 }
 
+func BenchmarkTieredYearRangeQuery(b *testing.B) {
+	db, counter := benchmarkDB(b, "tiered-year-query")
+	if err := ensureTierSchema(db); err != nil {
+		b.Fatal(err)
+	}
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	hourly := make([]models.Record, 365*24)
+	for index := range hourly {
+		hourly[index] = models.Record{Client: "year-node", Time: models.FromTime(start.Add(time.Duration(index) * time.Hour)), Cpu: float32(index % 100)}
+	}
+	fifteen := make([]models.Record, 365*24*4)
+	for index := range fifteen {
+		fifteen[index] = models.Record{Client: "year-node", Time: models.FromTime(start.Add(time.Duration(index) * 15 * time.Minute)), Cpu: float32(index % 100)}
+	}
+	if err := db.Table("records_hourly").CreateInBatches(&hourly, 500).Error; err != nil {
+		b.Fatal(err)
+	}
+	if err := db.Table("records_long_term").CreateInBatches(&fifteen, 500).Error; err != nil {
+		b.Fatal(err)
+	}
+	end := start.Add(365 * 24 * time.Hour)
+	b.Run("15m", func(b *testing.B) {
+		counter.statements.Store(0)
+		b.ReportAllocs()
+		for range b.N {
+			var result []models.Record
+			if err := db.Table("records_long_term").Where("client = ? AND time >= ? AND time < ?", "year-node", start, end).Order("time").Find(&result).Error; err != nil {
+				b.Fatal(err)
+			}
+			if len(result) != len(fifteen) {
+				b.Fatalf("15m rows=%d", len(result))
+			}
+		}
+		b.ReportMetric(float64(counter.statements.Load())/float64(b.N), "sql/op")
+	})
+	b.Run("1h", func(b *testing.B) {
+		counter.statements.Store(0)
+		b.ReportAllocs()
+		for range b.N {
+			var result []models.Record
+			if err := db.Table("records_hourly").Where("client = ? AND time >= ? AND time < ?", "year-node", start, end).Order("time").Find(&result).Error; err != nil {
+				b.Fatal(err)
+			}
+			if len(result) != len(hourly) {
+				b.Fatalf("1h rows=%d", len(result))
+			}
+		}
+		b.ReportMetric(float64(counter.statements.Load())/float64(b.N), "sql/op")
+	})
+}
+
 var benchmarkTrafficStats TrafficStats
 
 func BenchmarkTrafficSummary(b *testing.B) {

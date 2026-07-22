@@ -44,6 +44,9 @@ func newCompactionTestDB(t testing.TB) *gorm.DB {
 	if err := ensureCompactionSchema(db, gpuStream); err != nil {
 		t.Fatal(err)
 	}
+	if err := ensureTierSchema(db); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 

@@ -251,6 +251,9 @@ func compactRecordStreamAt(ctx context.Context, db *gorm.DB, now time.Time, opti
 	if err := ensureCompactionSchema(db.WithContext(ctx), recordStream); err != nil {
 		return stats, err
 	}
+	if err := ensureTierSchema(db.WithContext(ctx)); err != nil {
+		return stats, err
+	}
 	if err := resumePendingCompactions(ctx, db, recordStream, "records", now, options); err != nil {
 		return stats, err
 	}
@@ -327,8 +330,10 @@ func compactRecordWindow(ctx context.Context, db *gorm.DB, start, end time.Time,
 		buckets[slot] = struct{}{}
 	}
 	aggregates := make([]models.Record, 0, len(grouped))
+	summaryByKey := make(map[recordBucketKey]recordRollupSummary, len(grouped))
 	for key, records := range grouped {
 		aggregates = append(aggregates, aggregateRecordBucket(key, records))
+		summaryByKey[key] = summarizeRecordBucket(key, records, fifteenMinuteResolution)
 	}
 	sort.Slice(aggregates, func(i, j int) bool {
 		if !aggregates[i].Time.ToTime().Equal(aggregates[j].Time.ToTime()) {
@@ -339,14 +344,13 @@ func compactRecordWindow(ctx context.Context, db *gorm.DB, start, end time.Time,
 	for offset := 0; offset < len(aggregates); offset += compactionGroupPageSize {
 		limit := min(offset+compactionGroupPageSize, len(aggregates))
 		page := aggregates[offset:limit]
+		summaryPage := make([]recordRollupSummary, 0, len(page))
+		for _, record := range page {
+			key := recordBucketKey{Client: record.Client, Slot: record.Time.ToTime()}
+			summaryPage = append(summaryPage, summaryByKey[key])
+		}
 		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			return tx.Table("records_long_term").Clauses(clause.OnConflict{
-				Columns: []clause.Column{{Name: "client"}, {Name: "time"}},
-				DoUpdates: clause.AssignmentColumns([]string{
-					"cpu", "gpu", "ram", "ram_total", "swap", "swap_total", "load", "temp", "disk", "disk_total",
-					"net_in", "net_out", "net_total_up", "net_total_down", "process", "connections", "connections_udp",
-				}),
-			}).Create(&page).Error
+			return upsertFifteenMinuteRecords(tx, page, summaryPage)
 		}); err != nil {
 			return 0, 0, false, err
 		}
@@ -389,21 +393,18 @@ func compactRecordBucket(ctx context.Context, db *gorm.DB, bucket time.Time, max
 			grouped[key] = append(grouped[key], record)
 		}
 		aggregates := make([]models.Record, 0, len(grouped))
+		summaryByClient := make(map[string]recordRollupSummary, len(grouped))
 		for key, records := range grouped {
 			aggregates = append(aggregates, aggregateRecordBucket(key, records))
+			summaryByClient[key.Client] = summarizeRecordBucket(key, records, fifteenMinuteResolution)
 		}
 		sort.Slice(aggregates, func(i, j int) bool { return aggregates[i].Client < aggregates[j].Client })
+		summaries := make([]recordRollupSummary, 0, len(aggregates))
+		for _, record := range aggregates {
+			summaries = append(summaries, summaryByClient[record.Client])
+		}
 		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if len(aggregates) == 0 {
-				return nil
-			}
-			return tx.Table("records_long_term").Clauses(clause.OnConflict{
-				Columns: []clause.Column{{Name: "client"}, {Name: "time"}},
-				DoUpdates: clause.AssignmentColumns([]string{
-					"cpu", "gpu", "ram", "ram_total", "swap", "swap_total", "load", "temp", "disk", "disk_total",
-					"net_in", "net_out", "net_total_up", "net_total_down", "process", "connections", "connections_udp",
-				}),
-			}).CreateInBatches(&aggregates, compactionGroupPageSize).Error
+			return upsertFifteenMinuteRecords(tx, aggregates, summaries)
 		}); err != nil {
 			return totalRows, err
 		}

@@ -75,6 +75,43 @@ var schemaMigrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 3,
+		name:    "hourly_telemetry_rollups",
+		statements: []string{
+			"CREATE TABLE IF NOT EXISTS records_hourly AS SELECT * FROM records WHERE 0",
+			"CREATE TABLE IF NOT EXISTS gpu_records_hourly AS SELECT * FROM gpu_records WHERE 0",
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_records_hourly_bucket ON records_hourly(client, time)",
+			"CREATE INDEX IF NOT EXISTS idx_records_hourly_time ON records_hourly(time)",
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_gpu_records_hourly_bucket ON gpu_records_hourly(client, time, device_index)",
+			"CREATE INDEX IF NOT EXISTS idx_gpu_records_hourly_time ON gpu_records_hourly(time)",
+			`CREATE TABLE IF NOT EXISTS record_rollup_summaries (
+				client varchar(36) NOT NULL,
+				time DATETIME NOT NULL,
+				resolution_seconds INTEGER NOT NULL,
+				sample_count INTEGER NOT NULL,
+				first_time DATETIME NOT NULL,
+				last_time DATETIME NOT NULL,
+				first_net_total_up INTEGER,
+				last_net_total_up INTEGER,
+				first_net_total_down INTEGER,
+				last_net_total_down INTEGER,
+				first_net_in INTEGER,
+				last_net_in INTEGER,
+				first_net_out INTEGER,
+				last_net_out INTEGER,
+				traffic_up INTEGER,
+				traffic_down INTEGER,
+				counter_resets INTEGER,
+				cpu_peak decimal(5,2),
+				gpu_peak decimal(5,2),
+				load_peak decimal(5,2),
+				temperature_peak decimal(5,2),
+				PRIMARY KEY(client, time, resolution_seconds)
+			)`,
+			"CREATE INDEX IF NOT EXISTS idx_rollup_summary_resolution_time ON record_rollup_summaries(resolution_seconds, time)",
+		},
+	},
 }
 
 func ensureMigrationTable(db *gorm.DB) error {

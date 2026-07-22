@@ -260,3 +260,24 @@ version 1 为 recent/long-term Record、GPU、Ping 和 Session 增加与实际�
 新路径在相同量级的端到端耗时下把 SQL 数减少 90%，分配字节减少约 16.7%，分配次数减少约 14.5%；后续稳定运行只扫描 high-watermark 的一小时重叠窗口，而基线每次重新读取全部历史。额外的 1,000,000 raw rows、1,000 clients 固定基准为 9.177 秒（约 109k rows/s）、265 SQL；总 allocation 2.68 GB，但运行时单页最多 64 groups/10 万 rows，峰值不会随数据库总历史量无界增长。
 
 验证覆盖：4/5 小时精确边界、partial bucket、重复执行、high-watermark、迟到数据重算、分块删除中途崩溃与恢复、GPU 多设备隔离、旧新 Record 语义对照、version 2 旧库去重/唯一索引升级和百万行 benchmark。仓库 `go test ./...`、Records/迁移专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-303 多级聚合与独立保留
+
+服务端的数据层次现在明确为：内存最新 snapshot（raw）、分钟 accumulator 持久化表（1m）、`records_long_term` / GPU 对应表（15m）、`records_hourly` / GPU 对应表（1h）。`SelectRecordTier` 根据窗口、点数预算和是否需要 live snapshot 选择能满足预算的最细粒度；K-402 查询规划器直接消费该选择结果。
+
+version 3 migration 增加 hourly 表、复合唯一/时间索引和 `record_rollup_summaries`。1h builder 只读取已完成的 15m bucket，以独立 monotonic high-watermark 增量推进，并重算最近 1 小时以吸收 K-302 的迟到更新。每小时按最多 64 个 client 分页；GPU 页继承 K-102 的每节点 64 设备硬上限，所有读取和 UPSERT 均有界。崩溃发生在页提交后、watermark 前时只会幂等重做，不会产生重复行。
+
+代表性指标继续使用兼容的分位数聚合；同时每个 15m/1h bucket 保存 sample count、首末累计上下行计数器、首末速率、精确层内流量、counter reset 次数，以及 CPU/GPU/load/温度峰值。合并 1h 时会把四个 15m bucket 内部流量相加，并补算相邻 bucket 首末样本之间的 delta/reset。因此 counter reset、总量和峰值不会因降低展示采样密度而消失。60 个分钟样本（含一次上下行 counter reset）对照测试中，1h summary 的 up/down/reset 与直接对原分钟序列执行 `SummarizeTrafficRecords` 完全一致。
+
+保留策略彼此独立：raw/1m 工作集由 K-302 保持 5 小时；15m 默认保持 7 天；1h 保持到用户配置的最终保留边界。15m 删除前必须检查对应 1h stream 的 durable watermark；没有 watermark、构建落后或构建失败时宁可保留数据。所有层按 5,000 行短块删除，summary 与数据使用相同安全边界；用户明确配置的最终边界始终优先，因为边界之外本就不属于保留合同。
+
+一年单节点范围读取（35,040 个 15m 点对 8,760 个 1h 点），Apple M4、三次固定结果：
+
+| 层级 | ns/op | B/op | allocs/op | SQL/op |
+|---|---:|---:|---:|---:|
+| 15m | 122,816,833～126,084,541 | 55,562,080～55,566,816 | 1,086,491～1,086,565 | 1 |
+| 1h | 30,775,750～31,349,000 | 14,988,888～14,990,608 | 315,621～315,641 | 1 |
+
+1h 层将一年查询耗时降低约 74–76%（约 3.9–4.1×），分配字节降低约 73%，分配次数降低约 71%，同时保留 summary 中的总量/reset/峰值语义。
+
+验证覆盖：raw/1m/15m/1h 预算选择、完整/partial hour、15m→1h 一致性、跨 bucket counter reset、峰值、GPU 多设备、迟到 overlap 重建、watermark 落后时禁止删除、watermark 推进后安全过期、version 3 旧库迁移和一年范围 benchmark。仓库 `go test ./...`、Records/迁移专项 `go test -race`、`go vet ./...` 全部通过。

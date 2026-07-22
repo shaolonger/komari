@@ -48,11 +48,11 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		t.Fatalf("repeated migration failed: %v", err)
 	}
 	version, err := CurrentSchemaVersion(ctx, db)
-	if err != nil || version != 2 {
-		t.Fatalf("schema version=%d err=%v, want 2", version, err)
+	if err != nil || version != 3 {
+		t.Fatalf("schema version=%d err=%v, want 3", version, err)
 	}
 	var migrationCount, dataCount int64
-	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 2 {
+	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 3 {
 		t.Fatalf("migration rows=%d err=%v", migrationCount, err)
 	}
 	if err := db.Table("records").Count(&dataCount).Error; err != nil || dataCount != 1 {
@@ -76,6 +76,7 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		"idx_ping_record_client_task_time", "idx_ping_record_task_time_client",
 		"idx_sessions_digest", "idx_sessions_expires", "idx_sessions_uuid",
 		"idx_record_lt_bucket", "idx_gpu_record_lt_bucket",
+		"idx_records_hourly_bucket", "idx_gpu_records_hourly_bucket", "idx_rollup_summary_resolution_time",
 	} {
 		var count int64
 		if err := db.Raw("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&count).Error; err != nil || count != 1 {
