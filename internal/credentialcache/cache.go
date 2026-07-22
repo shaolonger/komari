@@ -54,7 +54,7 @@ func New[V any](capacity int) *Cache[V] {
 	return c
 }
 
-func digest(secret string) [sha256.Size]byte {
+func Digest(secret string) [sha256.Size]byte {
 	// The temporary read-only view avoids allocating a plaintext []byte copy.
 	// It is consumed synchronously by Sum256 and is never retained or mutated.
 	return sha256.Sum256(unsafe.Slice(unsafe.StringData(secret), len(secret)))
@@ -68,7 +68,7 @@ func (c *Cache[V]) shardFor(key [sha256.Size]byte) *shard[V] {
 // is deliberately returned to the caller because expired and revoked
 // credentials must be rejected rather than treated as database misses.
 func (c *Cache[V]) Get(secret string, now time.Time) (entry Entry[V], cached bool) {
-	key := digest(secret)
+	key := Digest(secret)
 	s := c.shardFor(key)
 	s.mu.RLock()
 	entry, ok := s.entries[key]
@@ -102,7 +102,7 @@ func (c *Cache[V]) put(secret string, entry Entry[V], now time.Time, generation 
 	if secret == "" || (!entry.CacheExpiresAt.IsZero() && !now.Before(entry.CacheExpiresAt)) {
 		return false
 	}
-	key := digest(secret)
+	key := Digest(secret)
 	s := c.shardFor(key)
 	s.mu.Lock()
 	if conditional && c.invalidation.Load() != generation {
@@ -141,7 +141,7 @@ func (c *Cache[V]) Invalidate(secret string) {
 	if secret == "" {
 		return
 	}
-	key := digest(secret)
+	key := Digest(secret)
 	c.invalidation.Add(1)
 	s := c.shardFor(key)
 	s.mu.Lock()

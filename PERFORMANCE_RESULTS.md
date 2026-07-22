@@ -201,3 +201,24 @@ Apple M4、macOS arm64、Go 1.26.4，`-benchtime=200ms -count=3`：
 Client Token 和 Session 稳态认证均约快 54～56×，完全移除缓存命中时的 SQLite 访问、heap allocation 和明文凭据副本分配。API Key 的短、等长、超长错误输入 benchmark 均处于同一约 90ns 区间。
 
 验证覆盖：摘要键结构扫描、严格容量上限、TTL/negative entry、stale generation 拒绝回填、10 万随机凭据、有/无命中、Token 过期/轮换/吊销/客户端删除、Session 过期自动删除/主动删除/密码变更、32 goroutine 并发失效、API Key 输入长度行为、GORM 实际日志脱敏和固定低基数指标。最终仓库 `go test ./...`、相关包 `go test -race` 和 `go vet ./...` 全部通过。
+
+## K-203 Session 活跃信息合并与节流写回
+
+认证请求不再同步执行 `UPDATE sessions`。新增容量固定为 16,384 的 activity tracker，以 K-202 同一个 32-byte SHA-256 Session 摘要作为唯一内存键；状态中不保留明文 Session。单槽 wake channel 合并通知，默认 5ms 内把 UA/IP 真实变化提交给后台 writer；相同 Session 的 `latest_online` 每 60 秒最多写回一次。相同 UA/IP 的高频请求只在锁内更新时间并进入 0 SQL、0 allocation 热路径。
+
+tracker 每批最多 256 个 Session，在一个 SQLite transaction 中复用 prepared `UPDATE`。更新条件包含摘要索引和 `expires > now`，过期或已删除 Session 不会被活动写回重新激活。数据库失败时 dirty state 不清除，1 秒后重试；容量全部被未提交状态占用时返回明确背压错误，不会无界增长或静默覆盖。已成功写入且空闲 10 分钟的状态会清理，容量压力下只淘汰 clean state。
+
+Session schema 增加唯一 `session_digest` BLOB、`expires` 索引和 `uuid` 索引。新 Session 创建时直接持久化摘要；旧数据库中的 Session 在第一次成功认证时懒回填摘要，因此升级不需要使现有登录全部失效。管理端删除、账户密码变更、账户删除和过期清理同时移除缓存/活动状态。`/api/me` 在生产中复用 Identity middleware 已认证的 UUID，避免同一请求再次认证 Session。
+
+关闭顺序在停止 HTTP、关闭 Agent 连接和最终遥测 flush 之后，使用独立 5 秒 context drain 全部 Session activity batch，再关闭 prepared statement；超时和数据库错误明确返回并记录。固定低基数指标只记录 activity batch/rows/errors，不含 Session、UUID、UA 或 IP label。
+
+Apple M4、macOS arm64、Go 1.26.4，`-benchtime=300ms -count=3`：
+
+| 实现 | ns/op | B/op | allocs/op | 稳态 SQL/request |
+|---|---:|---:|---:|---:|
+| 原每请求 GORM `Updates` | 17,749～18,220 | 7,323～7,325 | 89 | 1 |
+| 摘要 tracker coalesced touch | 62.03～62.19 | 0 | 0 | 0 |
+
+稳态请求约快 285～294×，同时完全移除每请求 SQLite 写锁和 heap allocation。1,000 次相同 Session/UA/IP 触碰在专项测试中合并为 1 行；此后一分钟内保持 0 写，UA 变化立即产生 1 行更新，60 秒边界再产生 1 行 online 更新。
+
+验证覆盖：写入次数、UA/IP 状态变化、时间不回退、过期 Session 拒写、旧 Session 摘要回填、三个索引、失败保留/重试、300 条跨 3 批退出 drain、deadline 取消、输入长度限制、容量耗尽/clean eviction、明文结构扫描、32 goroutine × 1,000 次并发触碰、真实 SQLite transaction 和 Identity context 复用。最终仓库 `go test ./...`、相关包 `go test -race` 和 `go vet ./...` 全部通过。

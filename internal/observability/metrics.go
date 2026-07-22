@@ -38,6 +38,9 @@ type Registry struct {
 	credentialHits  atomic.Uint64
 	credentialMiss  atomic.Uint64
 	credentialEvict atomic.Uint64
+	activityFlushes atomic.Uint64
+	activityRows    atomic.Uint64
+	activityErrors  atomic.Uint64
 }
 
 var durationBounds = [...]time.Duration{
@@ -138,6 +141,16 @@ func CredentialCacheHit()          { defaultRegistry.credentialHits.Add(1) }
 func CredentialCacheMiss()         { defaultRegistry.credentialMiss.Add(1) }
 func CredentialCacheInvalidation() { defaultRegistry.credentialEvict.Add(1) }
 
+func ObserveSessionActivity(rows int, failed bool) {
+	defaultRegistry.activityFlushes.Add(1)
+	if rows > 0 {
+		defaultRegistry.activityRows.Add(uint64(rows))
+	}
+	if failed {
+		defaultRegistry.activityErrors.Add(1)
+	}
+}
+
 // WritePrometheus writes a stable Prometheus text exposition. Metric names and
 // labels are fixed at compile time, preventing credential/high-cardinality leaks.
 func WritePrometheus(w io.Writer) error { return defaultRegistry.writePrometheus(w) }
@@ -172,6 +185,9 @@ func (r *Registry) writePrometheus(w io.Writer) error {
 		{"komari_credential_cache_hits_total", "Credential cache hits without credential labels.", "counter", r.credentialHits.Load()},
 		{"komari_credential_cache_misses_total", "Credential cache misses without credential labels.", "counter", r.credentialMiss.Load()},
 		{"komari_credential_cache_invalidations_total", "Credential cache invalidations without credential labels.", "counter", r.credentialEvict.Load()},
+		{"komari_credential_activity_flushes_total", "Credential activity flush batches.", "counter", r.activityFlushes.Load()},
+		{"komari_credential_activity_rows_total", "Credential activity rows submitted.", "counter", r.activityRows.Load()},
+		{"komari_credential_activity_errors_total", "Failed credential activity flush batches.", "counter", r.activityErrors.Load()},
 		{"komari_runtime_heap_bytes", "Current Go heap allocation.", "gauge", mem.HeapAlloc},
 		{"komari_runtime_goroutines", "Current Go goroutine count.", "gauge", runtime.NumGoroutine()},
 	}

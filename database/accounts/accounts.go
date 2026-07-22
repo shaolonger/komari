@@ -85,6 +85,7 @@ func ForceResetPassword(username, passwd string) (err error) {
 		return err
 	}
 	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
@@ -135,6 +136,7 @@ func DeleteAccountByUsername(username string) (err error) {
 		return err
 	}
 	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
@@ -250,6 +252,7 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 	}
 	if password != nil {
 		clearSessionCredentials()
+		clearDefaultSessionActivity()
 	}
 	return nil
 }

@@ -93,3 +93,27 @@ func TestGetMe(t *testing.T) {
 		})
 	}
 }
+
+func TestGetMeReusesAuthenticatedIdentityContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	user, err := accounts.CreateAccount("context-user", "password")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = accounts.DeleteAccountByUsername("context-user") })
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("session", "already-authenticated")
+		c.Set("uuid", user.UUID)
+		c.Next()
+	})
+	router.GET("/me", GetMe)
+	request := httptest.NewRequest(http.MethodGet, "/me", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	var response map[string]interface{}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, true, response["logged_in"])
+	assert.Equal(t, user.UUID, response["uuid"])
+}

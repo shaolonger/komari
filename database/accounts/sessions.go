@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
+	"github.com/komari-monitor/komari/internal/credentialcache"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -32,15 +33,17 @@ func GetAllSessions() (sessions []models.Session, err error) {
 func CreateSession(uuid string, expires int, userAgent, ip, login_method string) (string, error) {
 	db := dbcore.GetDBInstance()
 	session := utils.GenerateRandomString(32)
+	digest := credentialcache.Digest(session)
 
 	sessionRecord := models.Session{
-		UUID:         uuid,
-		Session:      session,
-		Expires:      models.FromTime(time.Now().Add(time.Duration(expires) * time.Second)),
-		UserAgent:    userAgent,
-		Ip:           ip,
-		LoginMethod:  login_method,
-		LatestOnline: models.FromTime(time.Now()),
+		UUID:          uuid,
+		Session:       session,
+		SessionDigest: append([]byte(nil), digest[:]...),
+		Expires:       models.FromTime(time.Now().Add(time.Duration(expires) * time.Second)),
+		UserAgent:     userAgent,
+		Ip:            ip,
+		LoginMethod:   login_method,
+		LatestOnline:  models.FromTime(time.Now()),
 	}
 	notifyLogin := func() {
 		LoginNotification, _ := config.GetAs[bool](config.LoginNotificationKey, false)
@@ -92,7 +95,19 @@ func GetSession(session string) (uuid string, err error) {
 
 	db := dbcore.GetDBInstance()
 	var sessionRecord models.Session
-	err = db.Select("uuid", "expires", "created_at").Where("session = ?", session).First(&sessionRecord).Error
+	digest := credentialcache.Digest(session)
+	err = db.Select("uuid", "expires", "created_at").Where("session_digest = ?", digest[:]).First(&sessionRecord).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Existing databases gain the digest column through AutoMigrate. Lazily
+		// backfill legacy rows on their first successful authentication so active
+		// sessions migrate without storing plaintext in the activity tracker.
+		err = db.Select("uuid", "expires", "created_at").Where("session = ?", session).First(&sessionRecord).Error
+		if err == nil {
+			if updateErr := db.Model(&models.Session{}).Where("session = ?", session).Update("session_digest", digest[:]).Error; updateErr != nil {
+				return "", updateErr
+			}
+		}
+	}
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			cacheMissingSessionCredential(session, now, generation)
@@ -126,6 +141,7 @@ func DeleteSession(session string) (err error) {
 		return result.Error
 	}
 	invalidateSessionCredential(session)
+	forgetDefaultSessionActivity(session)
 	return nil
 }
 
@@ -136,6 +152,7 @@ func DeleteAllSessions() error {
 		return result.Error
 	}
 	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
@@ -149,30 +166,39 @@ func DeleteSessionsByUUID(uuid string) error {
 	// bounded cache makes account-level revocation immediate without retaining
 	// session identifiers or building a high-cardinality UUID index.
 	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
 func UpdateLatestOnline(session string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_online", time.Now()).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.TouchOnline(session, time.Now())
 }
 
 func UpdateLatestUserAgent(session, userAgent string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_user_agent", userAgent).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.TouchUserAgent(session, userAgent, time.Now())
 }
 func UpdateLatestIp(session, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_ip", ip).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.TouchIP(session, ip, time.Now())
 }
 
 func UpdateLatest(session, useragent, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{
-		"latest_online":     time.Now(),
-		"latest_user_agent": useragent,
-		"latest_ip":         ip,
-	}).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.Touch(session, useragent, ip, time.Now())
 }
 
 func RemoveExpiredSessions() error {
@@ -182,5 +208,6 @@ func RemoveExpiredSessions() error {
 		return result.Error
 	}
 	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }

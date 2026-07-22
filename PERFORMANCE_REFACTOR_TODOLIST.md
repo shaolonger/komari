@@ -75,7 +75,7 @@
   - 不增加明文凭据驻留和日志暴露。
   - 测试：命中、过期、轮换、吊销、并发失效、恒定行为、安全回归、race。
 
-- [ ] **K-203 Session 活跃信息合并与节流写回**
+- [x] **K-203 Session 活跃信息合并与节流写回**
   - latest_online 定期写回；IP/UA 变化立即写入。
   - shutdown 前有界 drain。
   - 增加 expires/uuid 必要索引。

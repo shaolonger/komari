@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/credentialcache"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -119,6 +121,88 @@ func TestSessionAccountPasswordChangeRevokesOnlyAccountSessions(t *testing.T) {
 	}
 }
 
+func TestLegacySessionDigestBackfillAndIndexes(t *testing.T) {
+	resetSessionCredentialCacheForTest()
+	record := insertSessionCredential(t, time.Now().Add(time.Hour))
+	if _, err := GetSession(record.Session); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.Session
+	if err := dbcore.GetDBInstance().Select("session_digest").Where("session = ?", record.Session).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.SessionDigest) != 32 {
+		t.Fatalf("legacy digest length = %d, want 32", len(stored.SessionDigest))
+	}
+
+	var indexes []struct{ Name string }
+	if err := dbcore.GetDBInstance().Raw("PRAGMA index_list('sessions')").Scan(&indexes).Error; err != nil {
+		t.Fatal(err)
+	}
+	found := make(map[string]bool)
+	for _, index := range indexes {
+		found[index.Name] = true
+	}
+	for _, name := range []string{"idx_sessions_digest", "idx_sessions_expires", "idx_sessions_uuid"} {
+		if !found[name] {
+			t.Fatalf("missing session index %q; indexes=%v", name, found)
+		}
+	}
+}
+
+func TestSQLiteActivityStoreWritesActiveAndSkipsExpiredSession(t *testing.T) {
+	db := dbcore.GetDBInstance()
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &sqliteActivityStore{db: sqlDB}
+	tracker := manualActivityTracker(t, store, 32)
+
+	active := insertSessionCredential(t, time.Now().Add(time.Hour))
+	if _, err := GetSession(active.Session); err != nil {
+		t.Fatal(err)
+	}
+	seen := time.Now().Add(time.Second).Truncate(time.Millisecond)
+	if err := tracker.Touch(active.Session, "changed-agent", "198.51.100.7", seen); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.Session
+	if err := db.Where("session = ?", active.Session).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.LatestUserAgent != "changed-agent" || stored.LatestIp != "198.51.100.7" || stored.LatestOnline.ToTime().Before(seen.Add(-time.Millisecond)) {
+		t.Fatalf("stored activity = %+v", stored)
+	}
+
+	expiredToken := "expired-activity-" + uuid.NewString()
+	digest := credentialcache.Digest(expiredToken)
+	expired := models.Session{
+		UUID: uuid.NewString(), Session: expiredToken, SessionDigest: append([]byte(nil), digest[:]...),
+		Expires: models.FromTime(time.Now().Add(-time.Minute)), CreatedAt: models.FromTime(time.Now()),
+	}
+	if err := db.Create(&expired).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Delete(&models.Session{}, "session = ?", expiredToken).Error })
+	if err := tracker.Touch(expiredToken, "must-not-write", "203.0.113.9", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored = models.Session{}
+	if err := db.Where("session = ?", expiredToken).First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.LatestUserAgent != "" || stored.LatestIp != "" {
+		t.Fatalf("expired activity was written: %+v", stored)
+	}
+}
+
 func BenchmarkSessionCredentialLookup(b *testing.B) {
 	resetSessionCredentialCacheForTest()
 	record := insertSessionCredential(b, time.Now().Add(time.Hour))
@@ -138,6 +222,41 @@ func BenchmarkSessionCredentialLookup(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			if _, err := GetSession(record.Session); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkSessionActivityUpdate(b *testing.B) {
+	record := insertSessionCredential(b, time.Now().Add(time.Hour))
+	if _, err := GetSession(record.Session); err != nil {
+		b.Fatal(err)
+	}
+	db := dbcore.GetDBInstance().Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
+	b.Run("database-per-request", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if err := db.Model(&models.Session{}).Where("session = ?", record.Session).Updates(map[string]interface{}{
+				"latest_online": time.Now(), "latest_user_agent": "benchmark-agent", "latest_ip": "192.0.2.1",
+			}).Error; err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	store := &fakeActivityStore{}
+	tracker := manualActivityTracker(b, store, 128)
+	base := time.Now()
+	if err := tracker.Touch(record.Session, "benchmark-agent", "192.0.2.1", base); err != nil {
+		b.Fatal(err)
+	}
+	if err := tracker.Flush(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("coalesced-touch", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if err := tracker.Touch(record.Session, "benchmark-agent", "192.0.2.1", base.Add(time.Second)); err != nil {
 				b.Fatal(err)
 			}
 		}

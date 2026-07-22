@@ -405,6 +405,11 @@ func RunServer() {
 	if err := api.FlushClientReports(); err != nil {
 		log.Printf("Final telemetry flush failed: %v", err)
 	}
+	activityCtx, activityCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := accounts.CloseSessionActivity(activityCtx); err != nil {
+		log.Printf("Session activity drain failed: %v", err)
+	}
+	activityCancel()
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := telemetrywriter.CloseDefault(drainCtx); err != nil {
 		log.Printf("Telemetry writer drain failed: %v", err)
