@@ -37,7 +37,7 @@
 
 ## Phase K1：接收、聚合和实时快照
 
-- [ ] **K-101 有界、一次、类型化的 HTTP/WS 报告解码**
+- [x] **K-101 有界、一次、类型化的 HTTP/WS 报告解码**
   - HTTP body 和 WS message 设置硬上限。
   - 删除重复 `map[string]interface{}` 解码。
   - UUID 只信任认证上下文。

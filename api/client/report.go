@@ -1,8 +1,8 @@
 package client
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -15,7 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/observability"
@@ -103,41 +102,29 @@ func UploadReport(c *gin.Context) {
 	accepted := false
 	bodySize := 0
 	defer func() { observability.ObserveReport(bodySize, time.Since(started), accepted) }()
+	uuid, ok := authenticatedClientUUID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authenticated client identity is required"})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, telemetryv2.MaxFrameSize)
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	bodySize = len(bodyBytes)
 	if err != nil {
-		log.Println("Failed to read request body:", err)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Report exceeds maximum size"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-
-	var data map[string]interface{}
-	err = json.Unmarshal(bodyBytes, &data)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-	// Save report to database
 	var report common.Report
-	err = json.Unmarshal(bodyBytes, &report)
-	if err != nil {
+	if err := decodeAuthenticatedJSONReport(bodyBytes, uuid, &report); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 	report.UpdatedAt = time.Now()
-
-	// 优先使用 body 中的 UUID，若为空则从中间件注入的上下文中获取
-	uuid := report.UUID
-	if uuid == "" {
-		if v, ok := c.Get("client_uuid"); ok {
-			uuid, _ = v.(string)
-		}
-	}
-	if uuid == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "UUID is required"})
-		return
-	}
-	report.UUID = uuid
 
 	err = SaveClientReport(uuid, report)
 	if err != nil {
@@ -152,11 +139,33 @@ func UploadReport(c *gin.Context) {
 	// POST 上报后标记节点在线，超时未收到新 POST 则触发离线
 	refreshPostPresence(uuid)
 
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore the body for further use
 	c.JSON(200, gin.H{"status": "success"})
 }
 
+func authenticatedClientUUID(c *gin.Context) (string, bool) {
+	value, exists := c.Get("client_uuid")
+	if !exists {
+		return "", false
+	}
+	uuid, ok := value.(string)
+	return uuid, ok && uuid != ""
+}
+
+func decodeAuthenticatedJSONReport(body []byte, uuid string, report *common.Report) error {
+	*report = common.Report{}
+	if err := json.Unmarshal(body, report); err != nil {
+		return err
+	}
+	report.UUID = uuid
+	return nil
+}
+
 func WebSocketReport(c *gin.Context) {
+	uuid, ok := authenticatedClientUUID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "Authenticated client identity is required"})
+		return
+	}
 	// 升级ws
 	if !websocket.IsWebSocketUpgrade(c.Request) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
@@ -188,25 +197,6 @@ func WebSocketReport(c *gin.Context) {
 		log.Println("Error reading message:", err)
 		return
 	}
-	// it should ok,token was verfied in the middleware
-	token := ""
-	var errMsg string
-
-	// 优先使用统一的 Token 提取方法
-	token = api.ExtractClientToken(c)
-
-	// 如果 token 为空，返回错误
-	if token == "" {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
-		return
-	}
-
-	uuid, err := clients.GetClientUUIDByToken(token)
-	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
-		return
-	}
-
 	// 接受新连接，并处理旧连接
 	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
 		observability.WSReconnected()
@@ -258,6 +248,7 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Invalid telemetry frame"})
 			return
 		}
+		report.UUID = uuid
 		report.UpdatedAt = time.Now()
 		if err := SaveClientReport(uuid, report); err != nil {
 			_ = conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
@@ -271,62 +262,59 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 		_ = conn.WriteJSON(gin.H{"status": "error", "error": "Unsupported WebSocket message type"})
 		return
 	}
-	type MessageType struct {
-		Type string `json:"type"`
-	}
-	var msgType MessageType
-	err := json.Unmarshal(message, &msgType)
-	if err != nil {
+	var decoded agentMessage
+	if err := decodeAgentMessage(message, &decoded); err != nil {
 		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
 		return
 	}
 
-	switch msgType.Type {
+	switch decoded.Type {
 	case "", "report":
-		report := common.Report{}
-		err = json.Unmarshal(message, &report)
-		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid report format"})
-			return
-		}
+		report := decoded.Report
+		report.UUID = uuid
 		report.UpdatedAt = time.Now()
-		err = SaveClientReport(uuid, report)
-		if err != nil {
+		if err := SaveClientReport(uuid, report); err != nil {
 			conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
 			return
 		}
 		ws.SetLatestReport(uuid, &report)
 		accepted = true
 	case "ping_result":
-		var reqBody struct {
-			PingTaskID uint      `json:"task_id"`
-			PingResult int       `json:"value"`
-			PingType   string    `json:"ping_type"`
-			FinishedAt time.Time `json:"finished_at"`
-		}
-		err = json.Unmarshal(message, &reqBody)
-		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid ping result format"})
-			return
-		}
 		pingResult := models.PingRecord{
 			Client: uuid,
-			TaskId: reqBody.PingTaskID,
-			Value:  reqBody.PingResult,
-			Time:   models.FromTime(reqBody.FinishedAt),
+			TaskId: decoded.PingTaskID,
+			Value:  decoded.PingResult,
+			Time:   models.FromTime(decoded.FinishedAt),
 		}
 		if err := tasks.SavePingRecord(pingResult); err != nil {
 			// A ping can finish after its task has been removed. Do not recreate an
 			// orphaned history row; the agent will receive the next schedule from
 			// the refreshed task list.
-			log.Printf("Discarded ping result for client %s, task %d: %v", uuid, reqBody.PingTaskID, err)
+			log.Printf("Discarded ping result for client %s, task %d: %v", uuid, decoded.PingTaskID, err)
 		} else {
 			accepted = true
 		}
 	default:
-		log.Printf("Unknown message type: %s", msgType.Type)
+		log.Printf("Unknown message type: %s", decoded.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
 	}
+}
+
+type agentMessage struct {
+	common.Report
+	Type       string    `json:"type"`
+	PingTaskID uint      `json:"task_id"`
+	PingResult int       `json:"value"`
+	PingType   string    `json:"ping_type"`
+	FinishedAt time.Time `json:"finished_at"`
+}
+
+func decodeAgentMessage(message []byte, decoded *agentMessage) error {
+	*decoded = agentMessage{}
+	if err := json.Unmarshal(message, decoded); err != nil {
+		return err
+	}
+	return nil
 }
 
 func SaveClientReport(uuid string, report common.Report) error {

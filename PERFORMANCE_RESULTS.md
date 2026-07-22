@@ -67,6 +67,23 @@ pprof、CPU profile 和 runtime trace 默认不注册。只有显式设置 `--di
 
 验证包括：未认证 metrics/pprof 全部拒绝、诊断默认关闭、Admin metrics 可读且禁止缓存、输出敏感词/高基数字段扫描、16 个 goroutine 并发写入和采集；首次 race 运行发现并修复了复制原子桶的问题。最终专项 `go test -race`、仓库 `go test ./...` 和 `go vet ./...` 全部通过。
 
+## K-101 有界、一次、类型化的报告解码
+
+HTTP 上报现在先要求认证中间件提供 `client_uuid`，再用 `http.MaxBytesReader` 把 body 限制为 64 KiB；读取后仅对 `common.Report` 做一次 `json.Unmarshal`。删除了原先无界 `io.ReadAll` 后先解码 `map[string]interface{}`、再解码 `common.Report` 的路径。畸形/多值 JSON 返回 400，超过上限返回 413。
+
+WebSocket 在升级前要求同一个认证身份，升级后立即设置 64 KiB read limit。JSON v1 使用一个静态 typed union 一次性解析 report/ping type 和 payload，不再先解析 type 再解析 report；binary v2 继续使用 K-104 的严格长度/schema decoder。HTTP 和 WS 都无条件用认证上下文覆盖消息内 UUID，Admin 身份没有目标 client identity 时不能代替 Agent 上报。旧 Agent 不发送 UUID、携带未知扩展字段或不协商 subprotocol 的行为保持兼容。
+
+相同 445-byte v1 fixture、100,000 次固定 benchmark：
+
+| 路径 | 修改前 ns/op | 修改后 ns/op | 修改前 B/op | 修改后 B/op | 修改前 allocs/op | 修改后 allocs/op |
+|---|---:|---:|---:|---:|---:|---:|
+| HTTP JSON v1 | 8,611～8,748 | 3,747～3,770 | 5,504 | 464 | 138 | 12 |
+| WS JSON v1 | 5,936～6,223 | 3,918～3,934 | 664 | 464 | 16 | 12 |
+
+HTTP typed decode 约快 2.3×，分配字节减少 91.6%、分配次数减少 91.3%；WS decode 约快 1.5×，并消除重复反序列化。表中不含网络和有界 body buffer，确保只比较被替换的 decode 逻辑。
+
+安全/兼容验证包括：无认证身份、UUID 伪造、畸形和尾随 JSON、64 KiB+1 HTTP/WS payload、v1 未知扩展、JSON report/ping typed union、v1/v2 golden 对照；两个 JSON fuzz target 本轮合计执行超过 21 万输入且无 panic/身份绕过。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
+
 ## K-104 Agent 协议 v2 与 v1 兼容协商
 
 服务端 WebSocket 现在按标准 subprotocol 显式协商：优先 `komari.telemetry.v2`，其次 `komari.telemetry.v1`；旧 Agent 或代理未携带/转发 subprotocol 时默认 JSON v1。只有成功协商 v2 的连接可发送二进制帧；v2 连接仍接受 Agent 在编码失败时发送的 JSON v1 text fallback。未知协议和 legacy 连接上的 binary frame fail closed，且 Token/控制能力仍由原认证链决定。
