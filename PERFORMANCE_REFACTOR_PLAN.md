@@ -1,7 +1,7 @@
 # Komari 极致性能重构设计
 
 状态：执行中  
-基线：`v1.2.13` / `aea0d7e`  
+基线：`v1.2.13` / `aea0d7e`；实测结果见 [`PERFORMANCE_RESULTS.md`](PERFORMANCE_RESULTS.md#k-001-服务端性能基线与虚拟-agent-回放器)
 配套清单：[`PERFORMANCE_REFACTOR_TODOLIST.md`](PERFORMANCE_REFACTOR_TODOLIST.md)
 
 ## 1. 文档目标
@@ -288,4 +288,3 @@ flush 通过有界 channel 发送到 writer。writer 负责：
 - 新数据路径先由 feature flag/配置控制，完成双读对比后切换；
 - Release 使用新的 SemVer tag，不覆盖既有 tag；
 - Release 创建后等待 GitHub Actions 完成并核对全部二进制资产。
-
