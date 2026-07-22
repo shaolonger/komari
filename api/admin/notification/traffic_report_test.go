@@ -62,6 +62,15 @@ func TestListTrafficReportNotificationsReturnsJSON(t *testing.T) {
 
 func TestEditTrafficReportNotificationsUpsertsSettings(t *testing.T) {
 	clearTrafficReportNotifications(t)
+	db := dbcore.GetDBInstance()
+	for _, client := range []models.Client{
+		{UUID: "node-1", Token: "traffic-report-token-node-1", Name: "node-1"},
+		{UUID: "node-2", Token: "traffic-report-token-node-2", Name: "node-2"},
+	} {
+		if err := db.Create(&client).Error; err != nil {
+			t.Fatalf("create traffic report client %s: %v", client.UUID, err)
+		}
+	}
 
 	router := trafficReportTestRouter()
 	body := []byte(`[
@@ -132,5 +141,8 @@ func clearTrafficReportNotifications(t *testing.T) {
 	db := dbcore.GetDBInstance()
 	if err := db.Exec("DELETE FROM traffic_report_notifications").Error; err != nil {
 		t.Fatalf("failed to clear traffic report notifications: %v", err)
+	}
+	if err := db.Where("uuid IN ?", []string{"node-1", "node-2"}).Delete(&models.Client{}).Error; err != nil {
+		t.Fatalf("failed to clear traffic report clients: %v", err)
 	}
 }

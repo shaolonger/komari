@@ -222,3 +222,22 @@ Apple M4、macOS arm64、Go 1.26.4，`-benchtime=300ms -count=3`：
 稳态请求约快 285～294×，同时完全移除每请求 SQLite 写锁和 heap allocation。1,000 次相同 Session/UA/IP 触碰在专项测试中合并为 1 行；此后一分钟内保持 0 写，UA 变化立即产生 1 行更新，60 秒边界再产生 1 行 online 更新。
 
 验证覆盖：写入次数、UA/IP 状态变化、时间不回退、过期 Session 拒写、旧 Session 摘要回填、三个索引、失败保留/重试、300 条跨 3 批退出 drain、deadline 取消、输入长度限制、容量耗尽/clean eviction、明文结构扫描、32 goroutine × 1,000 次并发触碰、真实 SQLite transaction 和 Identity context 复用。最终仓库 `go test ./...`、相关包 `go test -race` 和 `go vet ./...` 全部通过。
+
+## K-301 SQLite 连接治理、版本迁移与复合索引
+
+SQLite 不再把整个应用限制为一个通用连接。普通 GORM 查询使用按 `GOMAXPROCS` 调整、最多 8 条连接的 WAL read/general pool；K-103 遥测批写和 K-203 Session 活跃写回共用独立的单连接 writer pool，从结构上保持 SQLite 单写者，同时允许已有读事务与写事务并行。writer 使用 `BEGIN IMMEDIATE`，避免事务执行一半才升级锁。
+
+所有新建连接都通过 driver `ConnectHook` 设置 `foreign_keys=ON`、5 秒 `busy_timeout`、`synchronous=NORMAL`、8 MiB page cache、memory temp store 和 256 MiB mmap；WAL 也写入 DSN。测试会同时固定多条连接逐一读取 PRAGMA，防止只配置连接池中的偶然第一条连接。相对旧配置，本次还真正启用了每连接外键检查；由此暴露并修正了 Ping、Session 和通知测试中的非法孤儿夹具。
+
+新增仅追加的 `schema_migrations` 账本和 SQLite `user_version`。每条迁移有 SHA-256 checksum，在单个 transaction 中执行 DDL、写入版本记录并更新 `user_version`；重复启动幂等，迁移内容被修改、数据库版本高于程序、版本重复/乱序都会拒绝继续。回滚演练使用故意失败的第二条 DDL，验证已执行的第一条 DDL、迁移账本和版本号全部回滚。升级不会扫描或重写历史遥测行。
+
+version 1 为 recent/long-term Record、GPU、Ping 和 Session 增加与实际过滤、排序相匹配的复合/唯一索引。10 万行 Record 固定范围查询、Apple M4/macOS arm64、三次结果：
+
+| 索引 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 原分离 `client`/`time` 索引 | 1,289,003～1,337,755 | 824 | 21 |
+| `(client,time)` 复合索引 | 5,380～5,396 | 824 | 21 |
+
+同一 SQL 在不改变结果或内存分配的情况下约快 239～249×。`EXPLAIN QUERY PLAN` 测试同时锁定 Record、GPU、Ping 和 Session 查询使用目标索引，避免未来 schema 漂移造成静默退化。
+
+验证覆盖：带空格绝对路径和共享内存 DSN、连接池上限、每连接 PRAGMA、WAL reader snapshot 与并发 writer、writer 外键约束、旧库数据保留升级、重复迁移、checksum/新版本拒绝、事务回滚、所有热查询计划和 10 万行 benchmark。仓库 `go test ./...`、涉及数据库与并发包的 `go test -race`、`go vet ./...` 全部通过。

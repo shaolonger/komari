@@ -19,8 +19,16 @@ import (
 func insertSessionCredential(t testing.TB, expires time.Time) models.Session {
 	t.Helper()
 	now := time.Now()
+	userID := uuid.NewString()
+	user := models.User{
+		UUID: userID, Username: "fixture-" + userID[:8], Passwd: "fixture-only-not-a-login-hash",
+		CreatedAt: models.FromTime(now), UpdatedAt: models.FromTime(now),
+	}
+	if err := dbcore.GetDBInstance().Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
 	record := models.Session{
-		UUID:      uuid.NewString(),
+		UUID:      userID,
 		Session:   "session-" + uuid.NewString(),
 		Expires:   models.FromTime(expires),
 		CreatedAt: models.FromTime(now),
@@ -31,6 +39,7 @@ func insertSessionCredential(t testing.TB, expires time.Time) models.Session {
 	t.Cleanup(func() {
 		invalidateSessionCredential(record.Session)
 		_ = dbcore.GetDBInstance().Delete(&models.Session{}, "session = ?", record.Session).Error
+		_ = dbcore.GetDBInstance().Delete(&models.User{}, "uuid = ?", userID).Error
 	})
 	return record
 }
@@ -181,7 +190,7 @@ func TestSQLiteActivityStoreWritesActiveAndSkipsExpiredSession(t *testing.T) {
 	expiredToken := "expired-activity-" + uuid.NewString()
 	digest := credentialcache.Digest(expiredToken)
 	expired := models.Session{
-		UUID: uuid.NewString(), Session: expiredToken, SessionDigest: append([]byte(nil), digest[:]...),
+		UUID: active.UUID, Session: expiredToken, SessionDigest: append([]byte(nil), digest[:]...),
 		Expires: models.FromTime(time.Now().Add(-time.Minute)), CreatedAt: models.FromTime(time.Now()),
 	}
 	if err := db.Create(&expired).Error; err != nil {

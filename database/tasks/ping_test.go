@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -34,11 +35,21 @@ func resetPingTaskData(t *testing.T) *gorm.DB {
 	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.PingTask{}).Error; err != nil {
 		t.Fatalf("clear ping tasks: %v", err)
 	}
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.Client{}).Error; err != nil {
+		t.Fatalf("clear clients: %v", err)
+	}
 	return db
 }
 
 func createPingTask(t *testing.T, db *gorm.DB, client string) models.PingTask {
 	t.Helper()
+	if err := db.Create(&models.Client{
+		UUID:  client,
+		Token: "ping-test-token-" + client,
+		Name:  client,
+	}).Error; err != nil {
+		t.Fatalf("create ping client: %v", err)
+	}
 	task := models.PingTask{
 		Name:     "Delete lifecycle test",
 		Clients:  models.StringArray{client},
@@ -95,16 +106,33 @@ func TestGetPingRecordsExcludesLegacyOrphans(t *testing.T) {
 	}
 
 	// This models records left by versions that deleted the task row without
-	// cascading to ping_records. Raw SQL intentionally bypasses model-level
-	// association checks so the query guard is exercised.
-	if err := db.Exec(
+	// cascading to ping_records. A pinned connection temporarily disables the
+	// newly enforced foreign-key check solely to reproduce that legacy state.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get SQL database: %v", err)
+	}
+	connection, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("get SQL connection: %v", err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(context.Background(), "PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys for legacy fixture: %v", err)
+	}
+	defer connection.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+	if _, err := connection.ExecContext(
+		context.Background(),
 		"INSERT INTO ping_records (client, task_id, time, value) VALUES (?, ?, ?, ?)",
 		client,
 		999_999,
 		models.FromTime(now),
 		80,
-	).Error; err != nil {
+	); err != nil {
 		t.Fatalf("create legacy orphan ping record: %v", err)
+	}
+	if _, err := connection.ExecContext(context.Background(), "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("restore foreign keys after legacy fixture: %v", err)
 	}
 
 	records, err := GetPingRecords(client, -1, now.Add(-time.Minute), now.Add(time.Minute))

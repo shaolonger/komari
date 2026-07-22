@@ -22,7 +22,7 @@ func Default() (*Writer, error) {
 	if defaultWriter != nil {
 		return defaultWriter, nil
 	}
-	sqlDB, err := dbcore.GetDBInstance().DB()
+	sqlDB, err := dbcore.GetWriterDBInstance()
 	if err != nil {
 		return nil, err
 	}

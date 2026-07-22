@@ -83,7 +83,7 @@
 
 ## Phase K3：SQLite、压缩和保留
 
-- [ ] **K-301 SQLite 连接治理、schema 版本与热路径索引**
+- [x] **K-301 SQLite 连接治理、schema 版本与热路径索引**
   - writer/reader 连接策略和每连接 PRAGMA。
   - 增加 Record、GPU、Ping、Session 复合/唯一索引。
   - 引入可验证 schema version migration。

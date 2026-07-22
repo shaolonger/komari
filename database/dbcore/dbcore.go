@@ -2,6 +2,7 @@ package dbcore
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,6 @@ import (
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/models"
 	logutil "github.com/komari-monitor/komari/utils/log"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -442,27 +442,14 @@ func GetDBInstance() *gorm.DB {
 			}
 		}()
 
-		logConfig := &gorm.Config{
-			Logger: logutil.NewGormLogger(),
-		}
-
 		// 根据数据库类型选择不同的连接方式
 		switch flags.DatabaseType {
 		case "sqlite", "":
-			// SQLite 连接
-			instance, err = gorm.Open(sqlite.Open(flags.DatabaseFile), logConfig)
+			instance, writerInstance, err = openSQLiteDatabase(flags.DatabaseFile, logutil.NewGormLogger())
 			if err != nil {
 				log.Fatalf("Failed to connect to SQLite3 database: %v", err)
 			}
 			log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
-			instance.Exec("PRAGMA wal = ON;")
-			if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
-				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
-			}
-			instance.Exec("PRAGMA synchronous = NORMAL;")
-			instance.Exec("PRAGMA cache_size = -65536;")
-			instance.Exec("PRAGMA temp_store = MEMORY;")
-			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		// case "mysql":
 		// 	// MySQL 连接
 		// 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=True&loc=Local",
@@ -529,13 +516,8 @@ func GetDBInstance() *gorm.DB {
 			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
 		}
 
-		// Manually create composite indexes
-		if flags.DatabaseType == "sqlite" || flags.DatabaseType == "" {
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_client_time ON records(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_record_lt_client_time ON records_long_term(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_gpu_record_client_time ON gpu_records(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_gpu_record_lt_client_time ON gpu_records_long_term(client, time)")
-			instance.Exec("CREATE INDEX IF NOT EXISTS idx_ping_record_client_time ON ping_records(client, time)")
+		if err := RunMigrations(context.Background(), instance); err != nil {
+			log.Fatalf("Failed to migrate database schema: %v", err)
 		}
 
 	})

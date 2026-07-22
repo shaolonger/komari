@@ -488,7 +488,7 @@ func defaultSessionActivity() (*ActivityTracker, error) {
 	if defaultActivityTracker != nil {
 		return defaultActivityTracker, nil
 	}
-	db, err := dbcore.GetDBInstance().DB()
+	db, err := dbcore.GetWriterDBInstance()
 	if err != nil {
 		return nil, err
 	}
