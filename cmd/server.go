@@ -381,10 +381,7 @@ func RunServer() {
 		r.NoRoute(handlers...)
 	})
 
-	srv := &http.Server{
-		Addr:    flags.Listen,
-		Handler: r,
-	}
+	srv := newHTTPServer(flags.Listen, r, productionHTTPServerLimits())
 	log.Printf("Starting server on %s ...", flags.Listen)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

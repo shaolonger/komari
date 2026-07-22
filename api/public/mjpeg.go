@@ -322,34 +322,49 @@ func MjpegLiveHandler(c *gin.Context) {
 	defer ticker.Stop()
 
 	// 立即发送第一帧
-	sendFrame(c.Writer, ctx, lang, tzOffset)
+	if !sendFrame(c.Writer, ctx, lang, tzOffset) {
+		return
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sendFrame(c.Writer, ctx, lang, tzOffset)
+			if !sendFrame(c.Writer, ctx, lang, tzOffset) {
+				return
+			}
 		}
 	}
 }
 
-func sendFrame(w http.ResponseWriter, ctx context.Context, lang string, tzOffset *int) {
+func sendFrame(w http.ResponseWriter, ctx context.Context, lang string, tzOffset *int) bool {
+	// The server has a finite whole-response WriteTimeout. MJPEG is an
+	// intentional long stream, so replace it with a rolling per-frame deadline;
+	// a client that cannot consume one frame within 15 seconds is disconnected.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil && err != http.ErrNotSupported {
+		return false
+	}
 	img := renderFrame(ctx, lang, tzOffset)
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
-		return
+		return false
 	}
 
-	fmt.Fprintf(w, "--frame\r\n")
-	fmt.Fprintf(w, "Content-Type: image/jpeg\r\n")
-	fmt.Fprintf(w, "Content-Length: %d\r\n\r\n", buf.Len())
-	w.Write(buf.Bytes())
-	fmt.Fprintf(w, "\r\n")
+	if _, err := fmt.Fprintf(w, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", buf.Len()); err != nil {
+		return false
+	}
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		return false
+	}
+	if _, err := fmt.Fprint(w, "\r\n"); err != nil {
+		return false
+	}
 
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+	return true
 }
 
 func renderFrame(ctx context.Context, lang string, tzOffset *int) *image.RGBA {

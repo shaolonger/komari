@@ -417,3 +417,13 @@ Apple M4/macOS arm64，store 已包含 10,000 个节点：
 | 10k 舰队中的单节点写入 + delta | 308.2～312.1 | 656 | 4 |
 
 单节点增量约 0.31µs，CPU 相比每次重建 10k snapshot 下降约 4,200 倍，单次分配字节下降约 6,500 倍；完整 snapshot 仍保留严格所有权，且只用于首次订阅或 sequence 恢复。验证覆盖输入/输出深拷贝、嵌套 GPU slice、snapshot/delta 顺序、通知无丢失、删除/离线、journal overflow 自动恢复、匿名/admin/单节点权限过滤和 10k benchmark。仓库 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 全部通过。
+
+## K-504 HTTP Server 资源超时与生产日志策略
+
+生产 `http.Server` 不再使用全部为零的默认资源边界：`ReadHeaderTimeout=5s` 单独抵御 slowloris，完整 request read/write 各限制 5 分钟，keep-alive idle 为 90 秒，request header 最多 64 KiB。较长 read/write 预算允许受 100 MiB 上限保护的备份上传下载完成，同时所有连接仍有确定上界。WebSocket upgrade 后由 K-502 更短的逐连接 deadline 接管。MJPEG 是唯一有意保持的长响应，它不再受 5 分钟绝对 deadline 截断，而是在每个 2 秒 frame 开始时设置滚动 15 秒 write deadline；任意慢读客户端无法在一个 frame 内完成时立即退出。
+
+Gin access log 改为结构化固定字段，不再把 `RawQuery` 拼入 message：只记录 method、无控制字符且限长的 path、status、latency、remote IP，以及布尔意义的 `query=<redacted>`。Authorization、Cookie、OAuth code/state、token 和任意 query value 从未进入记录。handler error 只记录数量，不复制可能包含用户输入/凭据的错误字符串；panic 保留请求、状态和 panic 类型，但不记录可能含密钥的 panic value。SQL logger 继续使用既有参数过滤，安全/审计业务日志路径未改变。
+
+成功的 Agent report、ping result 和 task result 使用单调 counter 确定性保留首条及每 256 条中的一条，减少约 99.6% 高频 access-log 格式化、锁竞争和日志 I/O；所有 4xx/5xx、Gin errors、普通 API、连接建立/结束与审计事件 100% 保留。采样在 handler 返回后决定，失败永远不会因高频 endpoint 被漏掉。
+
+验证覆盖：真实 TCP 只发送半个 header 时在 40ms 测试 deadline 后由 server 主动释放；生产 timeout/MaxHeaderBytes 精确值；活跃请求在 graceful shutdown 中完整 drain；25 条成功上报按 1/10 策略精确保留 3 条；5 条 401 全部保留；query/Header/panic 三类秘密均不出现在捕获日志。仓库 `go test ./...`、Cmd/Log/Public 专项 `go test -race`、`go vet ./...` 全部通过。

@@ -149,7 +149,7 @@
   - 丢 sequence 可请求重新同步。
   - 测试：不可变性、顺序、丢包恢复、权限过滤、10k 节点 benchmark。
 
-- [ ] **K-504 HTTP Server 资源超时与生产日志策略**
+- [x] **K-504 HTTP Server 资源超时与生产日志策略**
   - header/read/write/idle timeout 和 MaxHeaderBytes。
   - 高频成功上报采样；错误、安全、审计日志保留。
   - URL query 和认证材料脱敏。
