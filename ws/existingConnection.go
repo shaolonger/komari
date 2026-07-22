@@ -52,6 +52,20 @@ func DeleteConnectedClients(uuid string) {
 	delete(connectedClients, uuid)
 }
 
+// CloseAllAgentConnections stops new telemetry before the persistence writer is drained.
+func CloseAllAgentConnections() {
+	mu.Lock()
+	connections := make([]*SafeConn, 0, len(connectedClients))
+	for uuid, connection := range connectedClients {
+		connections = append(connections, connection)
+		delete(connectedClients, uuid)
+	}
+	mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+}
+
 // SetPresence sets or clears presence for non-WebSocket agents.
 // When present=false, it only clears if the connectionID matches current one.
 // KeepAlivePresence sets presence with TTL for non-WebSocket agents.

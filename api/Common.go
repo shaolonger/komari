@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"sync"
@@ -8,10 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/telemetrywriter"
 	"github.com/komari-monitor/komari/internal/telemetry"
-	"gorm.io/gorm"
 )
 
 var (
@@ -22,10 +22,19 @@ var (
 )
 
 func SaveClientReportToDB() error {
+	return saveClientReportsBefore(time.Now())
+}
+
+// FlushClientReports drains the partial current minute during graceful shutdown.
+func FlushClientReports() error {
+	return saveClientReportsBefore(time.Now().Add(time.Minute))
+}
+
+func saveClientReportsBefore(cutoff time.Time) error {
 	telemetryFlushMu.Lock()
 	defer telemetryFlushMu.Unlock()
 	if len(pendingRecords) == 0 && len(pendingGPURecords) == 0 {
-		aggregates := Telemetry.DrainBefore(time.Now())
+		aggregates := Telemetry.DrainBefore(cutoff)
 		pendingRecords = make([]models.Record, 0, len(aggregates))
 		for _, aggregate := range aggregates {
 			pendingRecords = append(pendingRecords, aggregate.Record)
@@ -36,20 +45,9 @@ func SaveClientReportToDB() error {
 		return nil
 	}
 
-	db := dbcore.GetDBInstance()
-	err := db.Transaction(func(tx *gorm.DB) error {
-		if len(pendingRecords) > 0 {
-			if err := tx.Model(&models.Record{}).Create(&pendingRecords).Error; err != nil {
-				return err
-			}
-		}
-		if len(pendingGPURecords) > 0 {
-			if err := tx.Model(&models.GPURecord{}).Create(&pendingGPURecords).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := telemetrywriter.Submit(ctx, telemetrywriter.Batch{Records: pendingRecords, GPURecords: pendingGPURecords})
 	if err != nil {
 		log.Printf("Failed to save telemetry batch to database: %v", err)
 		return err

@@ -49,7 +49,7 @@
   - 保持当前 Record/GPU 聚合业务语义。
   - 测试：并发同 UUID、跨 UUID、分钟边界、GPU 多设备、旧新结果对照、race、benchmark。
 
-- [ ] **K-103 有界批次和 SQLite 单写器**
+- [x] **K-103 有界批次和 SQLite 单写器**
   - flush 使用有界队列和明确背压。
   - prepared SQL 批量写入 Record/GPURecord/PingRecord。
   - 失败批次有限重试且不可静默丢失。

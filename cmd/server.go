@@ -33,6 +33,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/database/telemetrywriter"
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
@@ -41,6 +42,7 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/utils/oauth"
+	"github.com/komari-monitor/komari/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -391,12 +393,24 @@ func RunServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	OnShutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		log.Printf("HTTP server graceful shutdown failed: %v", err)
 	}
+	if err := StopNezhaCompat(); err != nil {
+		log.Printf("Nezha compatibility server shutdown failed: %v", err)
+	}
+	ws.CloseAllAgentConnections()
+	if err := api.FlushClientReports(); err != nil {
+		log.Printf("Final telemetry flush failed: %v", err)
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := telemetrywriter.CloseDefault(drainCtx); err != nil {
+		log.Printf("Telemetry writer drain failed: %v", err)
+	}
+	drainCancel()
+	OnShutdown()
 
 }
 

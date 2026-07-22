@@ -108,6 +108,27 @@ HTTP typed decode 约快 2.3×，分配字节减少 91.6%、分配次数减少 9
 
 验证覆盖：同 UUID 120 goroutine 并发、512 个跨 shard UUID、分钟边界、两个窗口 drain/第三窗口背压、GPU 多设备、120 样本/64 GPU 限制、source/returned snapshot 不可变性、TTL 清理，以及新旧 Record/GPU 完整结构对照。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
 
+## K-103 有界批次与 SQLite 单写器
+
+新增进程级 SQLite telemetry writer，Record、GPURecord 和完成鉴权/任务归属校验的 PingRecord 统一走一个后台写协程。队列默认 64、硬上限 1,024 batches；单批最多 100,000 rows；调用方 context 在满队列时形成明确背压，不创建每批 goroutine，也不静默丢弃。
+
+writer 按最多 256 rows 构建和缓存 prepared multi-row INSERT，同一批的三类记录在一个 `database/sql` transaction 中提交；任何一种写入失败都会回滚整批。prepared statements 在进入 transaction 前建立，因此 `MaxOpenConns(1)` 下不会发生“事务占住唯一连接、Prepare 等待另一连接”的死锁。
+
+SQLite `BUSY`/`LOCKED` 使用 10ms 起始的指数退避，默认最多重试 4 次；context 取消、schema/constraint 等永久错误不重试。重试耗尽会把错误返回给调用方。分钟 flush 保留失败批次并在下次调用重试，在失败未解决前不继续 drain 新窗口；内存由两分钟 accumulator 上限约束。Ping handler 同步等待 durable result，保持原先“成功即已写入”的语义。
+
+优雅关闭顺序改为：停止 HTTP、停止 Nezha compatibility listener、关闭 Agent WebSocket、flush 当前部分分钟、向 writer 队列尾部发送 drain barrier，最后关闭 prepared statements。deadline 到期会取消当前 transaction 并返回/记录错误，不伪装成功。
+
+与 K-001 相同的 256 Record 批次：
+
+| 实现 | ns/op | B/op | allocs/op | SQL/op |
+|---|---:|---:|---:|---:|
+| GORM `Create` baseline | 1,564,222 | 834,293 | 6,485 | 1 |
+| prepared single-writer | 1,359,453～1,497,863 | 480,465～480,858 | 2,088～2,089 | 1 |
+
+端到端 Submit/queue/transaction 路径延迟改善约 4～13%，分配字节减少约 42.4%，分配次数减少约 67.8%；主要收益是消除多写者争用、提供原子混合批次和可证明的失败语义。
+
+验证覆盖：300+300+Ping 原子提交、跨 chunk、注入两次 BUSY 后成功、永久 schema 失败整批回滚、满队列 context 背压、6 批 shutdown drain、关闭后拒绝、真实 `BEGIN IMMEDIATE` 锁释放恢复、32 个并发批次下 WAL 查询，以及任务归属验证后的 Ping writer。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
+
 ## K-104 Agent 协议 v2 与 v1 兼容协商
 
 服务端 WebSocket 现在按标准 subprotocol 显式协商：优先 `komari.telemetry.v2`，其次 `komari.telemetry.v1`；旧 Agent 或代理未携带/转发 subprotocol 时默认 JSON v1。只有成功协商 v2 的连接可发送二进制帧；v2 连接仍接受 Agent 在编码失败时发送的 JSON v1 text fallback。未知协议和 legacy 连接上的 binary frame fail closed，且 Token/控制能力仍由原认证链决定。

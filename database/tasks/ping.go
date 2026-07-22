@@ -1,11 +1,13 @@
 package tasks
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/telemetrywriter"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 )
@@ -155,7 +157,9 @@ func SavePingRecord(record models.PingRecord) error {
 	if !task.AppliesToClient(record.Client) {
 		return ErrPingTaskNotAssigned
 	}
-	return db.Create(&record).Error
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return telemetrywriter.Submit(ctx, telemetrywriter.Batch{PingRecords: []models.PingRecord{record}})
 }
 
 func DeletePingRecordsBefore(time time.Time) error {

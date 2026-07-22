@@ -115,3 +115,25 @@ func TestGetPingRecordsExcludesLegacyOrphans(t *testing.T) {
 		t.Fatalf("visible ping records = %+v, want only active task %d", records, activeTask.Id)
 	}
 }
+
+func TestSavePingRecordUsesValidatedWriter(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-writer-client"
+	task := createPingTask(t, db, client)
+	record := models.PingRecord{Client: client, TaskId: task.Id, Time: models.FromTime(time.Now()), Value: 25}
+	if err := SavePingRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&models.PingRecord{}).Where("client = ? AND task_id = ?", client, task.Id).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("ping records = %d, want 1", count)
+	}
+
+	record.Client = "not-assigned"
+	if err := SavePingRecord(record); !errors.Is(err, ErrPingTaskNotAssigned) {
+		t.Fatalf("unassigned ping result error = %v", err)
+	}
+}
