@@ -1,6 +1,7 @@
 package records
 
 import (
+	"context"
 	"log"
 	"sort"
 	"strings"
@@ -171,22 +172,27 @@ func GetAllRecords() ([]models.Record, error) {
 // 压缩数据库
 func CompactRecord() (err error) {
 	started := time.Now()
-	defer func() { observability.ObserveCompression(0, time.Since(started), err != nil) }()
+	buckets := 0
+	defer func() { observability.ObserveCompression(buckets, time.Since(started), err != nil) }()
 	db := dbcore.GetDBInstance()
-	err = migrateOldRecords(db)
+	recordStats, err := compactRecordStreamAt(context.Background(), db, time.Now(), compactionRunOptions{})
 	if err != nil {
 		log.Printf("Error migrating old records: %v", err)
 		return err
 	}
+	buckets += recordStats.Buckets
 
-	err = migrateGPURecords(db)
+	gpuStats, err := compactGPUStreamAt(context.Background(), db, time.Now(), compactionRunOptions{})
 	if err != nil {
 		log.Printf("Error migrating GPU records: %v", err)
 		return err
 	}
+	buckets += gpuStats.Buckets
 
 	if flags.DatabaseType == "sqlite" {
-		db.Exec("PRAGMA wal_checkpoint(PASSIVE);")
+		if checkpoint := db.Exec("PRAGMA wal_checkpoint(PASSIVE);"); checkpoint.Error != nil {
+			return checkpoint.Error
+		}
 	}
 	//log.Printf("Record compaction completed")
 	return nil
@@ -197,6 +203,13 @@ func migrateOldRecords(db *gorm.DB) error {
 }
 
 func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
+	_, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{})
+	return err
+}
+
+// legacyMigrateOldRecordsAt remains temporarily as a semantic oracle for
+// differential tests while the incremental compactor is rolled out.
+func legacyMigrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 	// 计算 4 小时前的时间
 	fourHoursAgo := now.Add(-4 * time.Hour)
 
@@ -377,6 +390,13 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 
 // migrateGPURecords 压缩GPU记录数据
 func migrateGPURecords(db *gorm.DB) error {
+	_, err := compactGPUStreamAt(context.Background(), db, time.Now(), compactionRunOptions{})
+	return err
+}
+
+// legacyMigrateGPURecords remains temporarily as a semantic oracle for
+// differential tests while the incremental compactor is rolled out.
+func legacyMigrateGPURecords(db *gorm.DB) error {
 	fourHoursAgo := time.Now().Add(-4 * time.Hour)
 
 	// 查询超过4小时的GPU记录

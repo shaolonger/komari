@@ -89,7 +89,7 @@
   - 引入可验证 schema version migration。
   - 测试：旧库升级、重复迁移、索引查询计划、WAL 并发、回滚演练。
 
-- [ ] **K-302 增量、分块、幂等的 Record/GPU 历史压缩**
+- [x] **K-302 增量、分块、幂等的 Record/GPU 历史压缩**
   - high watermark、稳定时间边界和 chunk。
   - 结构化 bucket key、选择算法、批量 UPSERT。
   - 删除分块，限制事务时间。

@@ -32,6 +32,14 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 	if err := db.Exec("INSERT INTO records(client,time,value) VALUES(?,?,?)", "node-a", "2026-01-01 00:00:00", 7).Error; err != nil {
 		t.Fatal(err)
 	}
+	for _, statement := range []string{
+		"INSERT INTO records_long_term(client,time,value) VALUES('node-a','2026-01-01 00:00:00',1),('node-a','2026-01-01 00:00:00',2)",
+		"INSERT INTO gpu_records_long_term(client,time,device_index) VALUES('node-a','2026-01-01 00:00:00',0),('node-a','2026-01-01 00:00:00',0)",
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx := context.Background()
 	if err := RunMigrations(ctx, db); err != nil {
 		t.Fatal(err)
@@ -40,15 +48,26 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		t.Fatalf("repeated migration failed: %v", err)
 	}
 	version, err := CurrentSchemaVersion(ctx, db)
-	if err != nil || version != 1 {
-		t.Fatalf("schema version=%d err=%v, want 1", version, err)
+	if err != nil || version != 2 {
+		t.Fatalf("schema version=%d err=%v, want 2", version, err)
 	}
 	var migrationCount, dataCount int64
-	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 1 {
+	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 2 {
 		t.Fatalf("migration rows=%d err=%v", migrationCount, err)
 	}
 	if err := db.Table("records").Count(&dataCount).Error; err != nil || dataCount != 1 {
 		t.Fatalf("legacy data rows=%d err=%v", dataCount, err)
+	}
+	for _, table := range []string{"records_long_term", "gpu_records_long_term"} {
+		if err := db.Table(table).Count(&dataCount).Error; err != nil || dataCount != 1 {
+			t.Fatalf("deduplicated %s rows=%d err=%v, want 1", table, dataCount, err)
+		}
+	}
+	for _, table := range []string{"telemetry_compaction_state", "telemetry_compaction_pending"} {
+		var count int64
+		if err := db.Raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count).Error; err != nil || count != 1 {
+			t.Fatalf("table %s count=%d err=%v", table, count, err)
+		}
 	}
 
 	for _, name := range []string{
@@ -56,6 +75,7 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		"idx_gpu_record_client_time_device", "idx_gpu_record_lt_client_time_device",
 		"idx_ping_record_client_task_time", "idx_ping_record_task_time_client",
 		"idx_sessions_digest", "idx_sessions_expires", "idx_sessions_uuid",
+		"idx_record_lt_bucket", "idx_gpu_record_lt_bucket",
 	} {
 		var count int64
 		if err := db.Raw("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&count).Error; err != nil || count != 1 {

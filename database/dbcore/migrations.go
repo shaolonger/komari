@@ -53,6 +53,28 @@ var schemaMigrations = []migration{
 			"CREATE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid)",
 		},
 	},
+	{
+		version: 2,
+		name:    "incremental_telemetry_compaction",
+		statements: []string{
+			"DELETE FROM records_long_term WHERE rowid NOT IN (SELECT MAX(rowid) FROM records_long_term GROUP BY client, time)",
+			"DELETE FROM gpu_records_long_term WHERE rowid NOT IN (SELECT MAX(rowid) FROM gpu_records_long_term GROUP BY client, time, device_index)",
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_record_lt_bucket ON records_long_term(client, time)",
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_gpu_record_lt_bucket ON gpu_records_long_term(client, time, device_index)",
+			`CREATE TABLE IF NOT EXISTS telemetry_compaction_state (
+				stream TEXT PRIMARY KEY NOT NULL,
+				watermark DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS telemetry_compaction_pending (
+				stream TEXT NOT NULL,
+				bucket DATETIME NOT NULL,
+				bucket_end DATETIME NOT NULL,
+				max_row_id INTEGER NOT NULL,
+				PRIMARY KEY(stream, bucket)
+			)`,
+		},
+	},
 }
 
 func ensureMigrationTable(db *gorm.DB) error {

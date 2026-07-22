@@ -241,3 +241,22 @@ version 1 为 recent/long-term Record、GPU、Ping 和 Session 增加与实际�
 同一 SQL 在不改变结果或内存分配的情况下约快 239～249×。`EXPLAIN QUERY PLAN` 测试同时锁定 Record、GPU、Ping 和 Session 查询使用目标索引，避免未来 schema 漂移造成静默退化。
 
 验证覆盖：带空格绝对路径和共享内存 DSN、连接池上限、每连接 PRAGMA、WAL reader snapshot 与并发 writer、writer 外键约束、旧库数据保留升级、重复迁移、checksum/新版本拒绝、事务回滚、所有热查询计划和 10 万行 benchmark。仓库 `go test ./...`、涉及数据库与并发包的 `go test -race`、`go vet ./...` 全部通过。
+
+## K-302 增量、分块、幂等的 Record/GPU 历史压缩
+
+原实现每次把所有 4 小时前的 Record/GPU 行完整加载到内存，以拼接字符串作为 bucket key，对每个 bucket 先 `COUNT` 再逐条 `CREATE/UPDATE`，最后在一个长事务中删除全部 5 小时前的数据。新实现以结构化 `(client,slot)` / `(client,device,slot)` 为 key，只处理 4 小时稳定边界之前的完整 15 分钟 bucket，并将已完成边界写入 `telemetry_compaction_state`。每次重跑只扫描 high-watermark 前 1 小时到新边界，既避免重复遍历全部历史，又允许仍在 5 小时 raw 保留窗口内的迟到数据重新计算。
+
+稀疏/常规数据按最多 24 小时、10 万 raw rows 的有界窗口处理；超过上限的密集窗口退化为每页 64 个 client/device group，仍保持内存上限。聚合结果依赖 version 2 migration 新增的唯一 bucket 索引，通过批量 `ON CONFLICT DO UPDATE` 写入，不再执行每 bucket 的存在性查询。Record 的 70%/网络速率 20% 分位数语义已用旧实现作为 oracle 逐字段对照；GPU 按 `(client,device_index,slot)` 聚合，设备名称取该窗口最后一个非空值。
+
+删除使用每次最多 5,000 行的短事务。开始聚合前捕获本窗口 `max(rowid)`；聚合完成后把 `[bucket,bucket_end)`、rowid 上界写入 durable pending marker，再开始删除。新到达的行具有更大 rowid，不会被本轮误删。若进程在任意删除 chunk 后崩溃，重启先根据 marker 继续删除，不会用残余 raw 子集覆盖完整 aggregate；marker 清除与 monotonic watermark 更新在同一事务完成。
+
+与 K-001 相同的 2,000 行、33 小时稀疏历史输入，单次结果：
+
+| 实现 | ns/op | B/op | allocs/op | SQL/op |
+|---|---:|---:|---:|---:|
+| 原全表扫描/逐 bucket upsert | 11,315,403 | 5,576,005 | 114,198 | 270 |
+| 增量窗口/批量 upsert | 10,329,125～15,095,751 | 4,638,672～4,642,576 | 97,610～97,645 | 27 |
+
+新路径在相同量级的端到端耗时下把 SQL 数减少 90%，分配字节减少约 16.7%，分配次数减少约 14.5%；后续稳定运行只扫描 high-watermark 的一小时重叠窗口，而基线每次重新读取全部历史。额外的 1,000,000 raw rows、1,000 clients 固定基准为 9.177 秒（约 109k rows/s）、265 SQL；总 allocation 2.68 GB，但运行时单页最多 64 groups/10 万 rows，峰值不会随数据库总历史量无界增长。
+
+验证覆盖：4/5 小时精确边界、partial bucket、重复执行、high-watermark、迟到数据重算、分块删除中途崩溃与恢复、GPU 多设备隔离、旧新 Record 语义对照、version 2 旧库去重/唯一索引升级和百万行 benchmark。仓库 `go test ./...`、Records/迁移专项 `go test -race`、`go vet ./...` 全部通过。

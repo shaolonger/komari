@@ -97,6 +97,37 @@ func BenchmarkHistoryCompression(b *testing.B) {
 	}
 }
 
+func BenchmarkIncrementalCompactionMillionRows(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		db, counter := benchmarkDB(b, fmt.Sprintf("million-row-compression-%d", i))
+		now := time.Unix(1_700_100_000+int64(i*24*60*60), 0).UTC().Truncate(15 * time.Minute)
+		bucket := now.Add(-7 * time.Hour)
+		if err := db.Exec(`WITH RECURSIVE sequence(value) AS (
+			VALUES(0)
+			UNION ALL SELECT value + 1 FROM sequence WHERE value < 999999
+		)
+		INSERT INTO records(client,time,cpu,ram,net_in,net_out,net_total_up,net_total_down)
+		SELECT printf('node-%04d', value % 1000),
+		       strftime('%Y-%m-%d %H:%M:%S.0000000', ?, printf('+%d seconds', value % 900)),
+		       value % 100, value, value * 2, value * 3, value * 4, value * 5
+		FROM sequence`, bucket).Error; err != nil {
+			b.Fatal(err)
+		}
+		counter.statements.Store(0)
+		b.StartTimer()
+		stats, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if stats.Rows != 1_000_000 {
+			b.Fatalf("compacted rows=%d, want 1000000", stats.Rows)
+		}
+		b.ReportMetric(float64(counter.statements.Load()), "sql/op")
+	}
+}
+
 func BenchmarkHistoryRangeQuery(b *testing.B) {
 	db, counter := benchmarkDB(b, "query")
 	start := time.Unix(1_700_000_000, 0).UTC()
