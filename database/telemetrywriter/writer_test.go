@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/mattn/go-sqlite3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -79,8 +80,12 @@ func TestWriterPersistsAllRecordTypesAtomically(t *testing.T) {
 	}
 	batch := testBatch(1, 300)
 	batch.PingRecords = []models.PingRecord{{Client: "node", TaskId: task.Id, Time: models.FromTime(time.Now()), Value: 12}}
+	generation := historycache.Generation()
 	if err := writer.Submit(context.Background(), batch); err != nil {
 		t.Fatal(err)
+	}
+	if historycache.Generation() <= generation {
+		t.Fatal("durable telemetry commit did not invalidate history responses")
 	}
 	for model, want := range map[any]int64{&models.Record{}: 300, &models.GPURecord{}: 300, &models.PingRecord{}: 1} {
 		var count int64

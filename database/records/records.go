@@ -12,21 +12,32 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/internal/observability"
 )
 
 func RecordOne(rec models.Record) error {
 	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
+	if err := db.Create(&rec).Error; err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func RecordGPU(rec models.GPURecord) error {
 	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
+	if err := db.Create(&rec).Error; err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func DeleteAll() error {
 	db := dbcore.GetDBInstance()
+	historycache.Invalidate()
+	defer historycache.Invalidate()
 	if err := db.Exec("DELETE FROM records_long_term").Error; err != nil {
 		return err
 	}
@@ -36,7 +47,10 @@ func DeleteAll() error {
 	if err := db.Exec("DELETE FROM gpu_records").Error; err != nil {
 		return err
 	}
-	return db.Exec("DELETE FROM records").Error
+	if err := db.Exec("DELETE FROM records").Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据
@@ -60,7 +74,12 @@ func GetLatestRecord(uuid string) (Record []models.Record, err error) {
 
 func DeleteRecordBefore(before time.Time) error {
 	db := dbcore.GetDBInstance()
-	return ApplyTierRetentionAt(context.Background(), db, time.Now(), before)
+	defer historycache.Invalidate()
+	if err := ApplyTierRetentionAt(context.Background(), db, time.Now(), before); err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
@@ -101,6 +120,7 @@ func GetAllRecords() ([]models.Record, error) {
 
 // 压缩数据库
 func CompactRecord() (err error) {
+	defer historycache.Invalidate()
 	started := time.Now()
 	buckets := 0
 	defer func() { observability.ObserveCompression(buckets, time.Since(started), err != nil) }()

@@ -2,6 +2,7 @@ package jsonRpc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/utils/rpc"
 )
 
@@ -20,6 +22,27 @@ func init() {
 }
 
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	meta := rpc.MetaFromContext(ctx)
+	params, err := json.Marshal(req.Params)
+	if err == nil {
+		key := fmt.Sprintf("jsonrpc-records-v1|permission=%s|minute=%d|params=%s", meta.Permission, time.Now().Unix()/60, params)
+		generation := historycache.Generation()
+		if cached, ok := historycache.Get(key, generation); ok {
+			return json.RawMessage(cached), nil
+		}
+		result, rpcErr := getRecordsUncached(ctx, req)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		if encoded, marshalErr := json.Marshal(result); marshalErr == nil {
+			historycache.PutIfGeneration(key, encoded, generation)
+		}
+		return result, nil
+	}
+	return getRecordsUncached(ctx, req)
+}
+
+func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
 	var params struct {
 		Type     string `json:"type"`      // "load" | "ping"; default "load"

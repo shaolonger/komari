@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -128,6 +129,7 @@ func DeleteClient(clientUuid string) error {
 		return err
 	}
 	invalidateClientCredential(oldToken)
+	historycache.Invalidate()
 	return nil
 }
 
@@ -202,6 +204,7 @@ func UpdateOrInsertBasicInfo(cbi common.ClientInfo) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	return nil
 }
 func SaveClientInfo(update map[string]interface{}) error {
@@ -255,6 +258,7 @@ func SaveClientInfo(update map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	return nil
 }
 
@@ -265,6 +269,7 @@ func UpdateClientConfig(config common.ClientConfig) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	return nil
 }
 
@@ -274,6 +279,7 @@ func EditClientName(clientUUID, clientName string) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	return nil
 }
 
@@ -317,6 +323,7 @@ func CreateClient() (clientUUID, token string, err error) {
 		return "", "", err
 	}
 	invalidateClientCredential(token)
+	historycache.Invalidate()
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		log.Println("Failed to apply default-on ping tasks to new client:", err)
 	}
@@ -344,6 +351,7 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 		return "", "", err
 	}
 	invalidateClientCredential(token)
+	historycache.Invalidate()
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		log.Println("Failed to apply default-on ping tasks to new client:", err)
 	}
@@ -555,5 +563,6 @@ func SaveClient(updates map[string]interface{}) error {
 	if tokenChanged {
 		invalidateClientCredential(oldToken, newToken)
 	}
+	historycache.Invalidate()
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	records "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/historycache"
 )
 
 func GetRecordsByUUID(c *gin.Context) {
@@ -80,66 +81,63 @@ func GetRecordsByUUID(c *gin.Context) {
 		api.RespondError(c, 400, err.Error())
 		return
 	}
+	permissionScope := "public"
+	if isLogin {
+		permissionScope = "admin"
+	}
+	cacheKey := historyRecordCacheKey(permissionScope, uuid, hoursInt, loadType, maxPoints)
+	generation := historycache.Generation()
+	if cached, ok := historycache.Get(cacheKey, generation); ok {
+		writeCachedHistory(c, cached)
+		return
+	}
 
-	clientRecords, err := records.GetRecordsByClientAndTimeBudgeted(uuid, startTime, endTime, loadType, maxPoints)
+	clientRecords, err := records.QueryRecords(c.Request.Context(), dbcore.GetDBInstance(), records.RecordQuery{
+		Client: uuid, Start: startTime, End: endTime, LoadType: loadType, MaxPoints: maxPoints,
+	})
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
 	}
 	clientRecords = records.DownsampleRecords(clientRecords, maxPoints, loadType)
 
-	// 准备基本响应
-	response := gin.H{
-		"records": clientRecords,
-		"count":   len(clientRecords),
-	}
+	payload := recordHistoryPayload{records: clientRecords}
 
 	// 如果有load_type过滤，应用过滤
 	if loadType != "" && loadType != "all" {
 		filteredRecords := filterRecordsByLoadType(clientRecords, loadType)
-		response = gin.H{
-			"records":   filteredRecords,
-			"count":     len(filteredRecords),
-			"load_type": loadType,
-		}
+		payload.filtered = true
+		payload.flatRecords = filteredRecords
+		payload.loadType = loadType
 	}
 
 	// 自动检测是否有GPU数据并附加到响应中
 	if loadType == "" || loadType == "all" || loadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTimeBudgeted(uuid, startTime, endTime, maxPoints)
+		payload.includeGPU = true
+		gpuRecords, err := records.QueryGPURecords(c.Request.Context(), dbcore.GetDBInstance(), records.GPUQuery{
+			Client: uuid, Start: startTime, End: endTime, MaxPoints: maxPoints,
+		})
+		if err != nil && c.Request.Context().Err() != nil {
+			return
+		}
 		if err == nil && len(gpuRecords) > 0 {
 			gpuRecords = records.DownsampleGPURecords(gpuRecords, maxPoints)
-			// 按设备索引分组数据，构建简化的设备结构
-			gpuDevices := make(map[string]interface{})
+			gpuDevices := make(map[string]*historyGPUDevice)
 
 			for _, record := range gpuRecords {
 				deviceKey := strconv.Itoa(record.DeviceIndex)
-
-				// 如果设备还没有初始化，创建设备信息
 				if gpuDevices[deviceKey] == nil {
-					gpuDevices[deviceKey] = gin.H{
-						"device_index": record.DeviceIndex,
-						"device_name":  record.DeviceName,
-						"records":      []models.GPURecord{},
-					}
+					gpuDevices[deviceKey] = &historyGPUDevice{DeviceIndex: record.DeviceIndex, DeviceName: record.DeviceName}
 				}
-
-				// 添加记录到设备
-				device := gpuDevices[deviceKey].(gin.H)
-				records := device["records"].([]models.GPURecord)
-				device["records"] = append(records, record)
-				gpuDevices[deviceKey] = device
+				gpuDevices[deviceKey].Records = append(gpuDevices[deviceKey].Records, record)
 			}
-
-			// 添加优化后的GPU数据结构到响应
-			response["gpu_devices"] = gpuDevices
-			response["has_gpu_data"] = true
-		} else {
-			response["has_gpu_data"] = false
+			payload.gpuDevices = gpuDevices
+			payload.hasGPUData = true
+			payload.totalGPUData = len(gpuRecords)
 		}
 	}
 
-	api.RespondSuccess(c, response)
+	_ = respondRecordHistory(c, payload, cacheKey, generation)
 }
 
 // filterRecordsByLoadType 根据 load_type 过滤记录，只返回相关字段

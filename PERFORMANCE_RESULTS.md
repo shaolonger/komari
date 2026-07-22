@@ -352,3 +352,23 @@ version 3 migration 增加 hourly 表、复合唯一/时间索引和 `record_rol
 端到端约 15.7～18.9ms；旧实现仅 Record 查询就需要 10,000 条 SQL，百分比指标还会按每条 Record 再查询一次 Client，新实现稳定为 2 条读取 SQL。该基准保留完整 Client 模型是为了通知模板兼容，主要 allocation 来自 1,000 个完整节点模型和 GORM/SQLite materialization，不再随 task × client 乘积产生数据库往返。
 
 验证覆盖：集合结果与逐节点旧查询/旧纯统计逐字段对照、CPU/RAM 阈值、ratio/cooldown、无数据节点、隐藏节点在全局运维报告与显式通知中的正确保留、授权集合过滤、超 bind 阈值过滤、空授权集合零查询、孤儿 Ping 排除、Dashboard Ping avg/p50/p99/tail/loss/latest 兼容、缓存命中零查询、取消、SQL 次数和 10k assignment benchmark。仓库 `go test ./...`、Records/Tasks/Notifier/JSON-RPC 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-405 权限感知历史缓存与流式 JSON
+
+新增进程内历史响应缓存，专门缓存小型、已经编码完成的公共 REST/JSON-RPC 历史结果。cache key 包含 endpoint schema version、public/admin 权限域、完整查询参数、有效点数预算以及相对窗口的分钟 bucket；内存中只保留 key 的 SHA-256 digest。缓存最多 256 项、总计 32 MiB、单项最多 1 MiB，REST 只有 Record+GPU 合计不超过 1,000 点才尝试写入。外部响应始终设置 `Cache-Control: private, no-store`，防止浏览器或共享代理跨登录状态复用；内部 `X-Komari-History-Cache` 只暴露 hit/miss，不含 key 或身份。
+
+每次读取先捕获单调 data/visibility generation。SQLite 单写器只有在包含 Record/GPU/Ping 的事务 durable commit 后才推进 generation；直接 Record/GPU 写入、历史删除、保留、压缩、Ping task/record 变化、Client 创建/删除/隐藏/配置更新也主动失效。失效会原子推进 generation 并清空所有项，查询期间发生失效时 `PutIfGeneration` 拒绝旧结果回填。匿名 REST 即使 cache hit 前仍重新执行隐藏节点门禁；public/admin key 物理隔离。节点被隐藏后已有公开缓存立即不可达且请求返回原有错误，重新公开后第一条请求使用新 generation。
+
+公共 Record handler 不再用 background context 查询，Record/GPU 规划器都继承请求 context。1,000 点以上不再让 Gin 对整个 response 二次 `json.Marshal`；编码器使用固定 32 KiB buffer，逐个 Record、GPU device 和 GPURecord 写出，任何时刻只额外保留一个 point 的 JSON。慢客户端形成自然写背压，disconnect/deadline 会在下一 chunk 终止。JSON-RPC 因协议需要完整 response framing，仍由 transport 统一编码，但 1 MiB 以下 result 可复用权限隔离的已编码 `json.RawMessage`。
+
+Apple M4/macOS arm64 实测：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 512 KiB cache hit | 60.27～61.05 | 0 | 0 |
+| 原整包 `json.Marshal` 100k Record | 52,526,167～53,449,750 | 104,205,408～104,208,576 | 400,055～400,110 |
+| 32 KiB bounded stream 100k Record | 58,597,750～65,413,875 | 53,749,128～53,764,744 | 700,050～700,201 |
+
+流式路径为有界峰值内存付出约 10～23% 编码 CPU，累计分配字节减少约 48.4%，并消除约 50 MiB 级整包 output buffer；它不会把 100k point 响应放入缓存。缓存命中读取 512 KiB payload 约 60～61ns、零 allocation，随后直接交给 ResponseWriter，完全跳过 SQLite、降采样和重新编码。
+
+验证覆盖：public/admin 隔离、参数隔离、旧 generation 拒绝回填、Client hidden/unhidden 主动失效、新 telemetry durable commit 失效、严格 entry/总内存上限、明文 key 结构扫描、2,000 点流式 JSON 完整性、最大 32 KiB writer chunk、慢客户端 deadline、并发 get/put/invalidate race、100k point stream/marshal 对照和 cache hit benchmark。仓库 `go test ./...`、Cache/Writer/Clients/Records/Tasks/Public/JSON-RPC 专项 `go test -race`、`go vet ./...` 全部通过。

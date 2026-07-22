@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/internal/observability"
 	"github.com/mattn/go-sqlite3"
 )
@@ -219,7 +220,11 @@ func (w *Writer) writeBatch(ctx context.Context, batch Batch) error {
 	if err := w.writePingRecords(ctx, tx, batch.PingRecords); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func (w *Writer) prepareBatch(ctx context.Context, batch Batch) error {

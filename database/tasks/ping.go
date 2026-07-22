@@ -8,6 +8,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/telemetrywriter"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 )
@@ -52,6 +53,7 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 	if err != nil {
 		return 0, err
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return task.Id, nil
 }
@@ -80,6 +82,7 @@ func DeletePingTask(id []uint) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return nil
 }
@@ -103,6 +106,7 @@ func EditPingTask(tasks []*models.PingTask) error {
 			return gorm.ErrRecordNotFound
 		}
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return nil
 }
@@ -151,6 +155,7 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return nil
 }
@@ -172,6 +177,9 @@ func SavePingRecord(record models.PingRecord) error {
 func DeletePingRecordsBefore(time time.Time) error {
 	db := dbcore.GetDBInstance()
 	err := db.Where("time < ?", time).Delete(&models.PingRecord{}).Error
+	if err == nil {
+		historycache.Invalidate()
+	}
 	return err
 }
 
@@ -181,6 +189,9 @@ func DeletePingRecords(id []uint) error {
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
+	if result.Error == nil {
+		historycache.Invalidate()
+	}
 	return result.Error
 }
 
@@ -189,6 +200,9 @@ func DeleteAllPingRecords() error {
 	result := db.Exec("DELETE FROM ping_records")
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
+	}
+	if result.Error == nil {
+		historycache.Invalidate()
 	}
 	return result.Error
 }
@@ -234,6 +248,7 @@ func AddDefaultOnClientUUID(uuid string) error {
 		changed = true
 	}
 	if changed {
+		historycache.Invalidate()
 		return ReloadPingSchedule()
 	}
 	return nil

@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/historycache"
 
 	"gorm.io/gorm"
 )
@@ -245,6 +246,7 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 		return err
 	}
 
+	historycache.Invalidate()
 	return nil
 }
 
