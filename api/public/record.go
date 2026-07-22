@@ -81,7 +81,7 @@ func GetRecordsByUUID(c *gin.Context) {
 		return
 	}
 
-	clientRecords, err := records.GetRecordsByClientAndTimeProjected(uuid, startTime, endTime, loadType)
+	clientRecords, err := records.GetRecordsByClientAndTimeBudgeted(uuid, startTime, endTime, loadType, maxPoints)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
@@ -106,7 +106,7 @@ func GetRecordsByUUID(c *gin.Context) {
 
 	// 自动检测是否有GPU数据并附加到响应中
 	if loadType == "" || loadType == "all" || loadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTime(uuid, startTime, endTime)
+		gpuRecords, err := records.GetGPURecordsByClientAndTimeBudgeted(uuid, startTime, endTime, maxPoints)
 		if err == nil && len(gpuRecords) > 0 {
 			gpuRecords = records.DownsampleGPURecords(gpuRecords, maxPoints)
 			// 按设备索引分组数据，构建简化的设备结构

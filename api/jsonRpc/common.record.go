@@ -108,7 +108,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	switch params.Type {
 	case "load":
 		// fetch load records
-		recs, err := getLoadRecordsCombined(params.UUID, startTime, endTime, params.LoadType)
+		recs, err := getLoadRecordsCombined(ctx, params.UUID, startTime, endTime, params.LoadType, maxCount)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
 		}
@@ -513,58 +513,10 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 // getLoadRecordsCombined fetches records for a client or all clients within a time range,
 // combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombined(uuid string, start, end time.Time, loadType string) ([]models.Record, error) {
-	projection, err := recordsdb.RecordProjection(loadType)
-	if err != nil {
-		return nil, err
-	}
-	// prefer the existing function when uuid provided
-	if uuid != "" {
-		return recordsdb.GetRecordsByClientAndTimeProjected(uuid, start, end, loadType)
-	}
-	db := dbcore.GetDBInstance()
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recent []models.Record
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		if err := db.Table("records").Select(projection).Where("time >= ? AND time <= ?", recentStart, end).Order("time ASC").Find(&recent).Error; err != nil {
-			return nil, err
-		}
-	}
-
-	var longTerm []models.Record
-	if err := db.Table("records_long_term").Select(projection).Where("time >= ? AND time <= ?", start, end).Order("time ASC").Find(&longTerm).Error; err != nil {
-		return nil, err
-	}
-
-	// if no long term, return all recent
-	if len(longTerm) == 0 {
-		return recent, nil
-	}
-
-	// group recent by client+15min, keep latest in bucket
-	type key struct {
-		c    string
-		slot string
-	}
-	grouped := make(map[key]models.Record)
-	for _, rec := range recent {
-		k := key{c: rec.Client, slot: rec.Time.ToTime().Truncate(15 * time.Minute).Format(time.RFC3339)}
-		if old, ok := grouped[k]; !ok || rec.Time.ToTime().After(old.Time.ToTime()) {
-			grouped[k] = rec
-		}
-	}
-	flat := make([]models.Record, 0, len(grouped))
-	for _, rec := range grouped {
-		flat = append(flat, rec)
-	}
-	sort.Slice(flat, func(i, j int) bool { return flat[i].Time.ToTime().Before(flat[j].Time.ToTime()) })
-	flat = append(flat, longTerm...)
-	return flat, nil
+func getLoadRecordsCombined(ctx context.Context, uuid string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
+	return recordsdb.QueryRecords(ctx, dbcore.GetDBInstance(), recordsdb.RecordQuery{
+		Client: uuid, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
+	})
 }
 
 // ---------- downsampling helpers ----------

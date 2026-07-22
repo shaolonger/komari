@@ -59,7 +59,7 @@ func TestGetRecordsByUUIDEnforcesBudgetAndProjection(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Data.Count != 10 || len(response.Data.Records) != 10 {
+	if response.Data.Count < 1 || response.Data.Count > 10 || len(response.Data.Records) != response.Data.Count {
 		t.Fatalf("bounded response=%+v", response.Data)
 	}
 	foundSpike := false

@@ -41,43 +41,15 @@ func DeleteAll() error {
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据
 func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.GPURecord, error) {
+	return GetGPURecordsByClientAndTimeBudgeted(uuid, start, end, 0)
+}
+
+func GetGPURecordsByClientAndTimeBudgeted(uuid string, start, end time.Time, maxPoints int) ([]models.GPURecord, error) {
 	started := time.Now()
-	queryFailed := false
 	db := dbcore.GetDBInstance()
-	var records []models.GPURecord
-	defer func() { observability.ObserveQuery(len(records), time.Since(started), queryFailed) }()
-
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recentRecords []models.GPURecord
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).
-			Order("time ASC, device_index ASC").Find(&recentRecords).Error
-		if err != nil {
-			queryFailed = true
-			log.Printf("Error fetching recent GPU records for client %s between %s and %s: %v", uuid, recentStart, end, err)
-			return nil, err
-		}
-	}
-
-	var longTermRecords []models.GPURecord
-	err := db.Table("gpu_records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).
-		Order("time ASC, device_index ASC").Find(&longTermRecords).Error
-	if err != nil {
-		queryFailed = true
-		log.Printf("Error fetching long-term GPU records for client %s between %s and %s: %v", uuid, start, end, err)
-		return recentRecords, nil
-	}
-
-	// 合并结果 - 不再需要类型转换
-	records = append(records, recentRecords...)
-	records = append(records, longTermRecords...)
-
-	return records, nil
+	result, err := QueryGPURecords(context.Background(), db, GPUQuery{Client: uuid, Start: start, End: end, MaxPoints: maxPoints})
+	observability.ObserveQuery(len(result), time.Since(started), err != nil)
+	return result, err
 }
 
 func GetLatestRecord(uuid string) (Record []models.Record, err error) {
@@ -96,65 +68,17 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 }
 
 func GetRecordsByClientAndTimeProjected(uuid string, start, end time.Time, loadType string) ([]models.Record, error) {
+	return GetRecordsByClientAndTimeBudgeted(uuid, start, end, loadType, 0)
+}
+
+func GetRecordsByClientAndTimeBudgeted(uuid string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
 	started := time.Now()
-	queryFailed := false
 	db := dbcore.GetDBInstance()
-	var records []models.Record
-	defer func() { observability.ObserveQuery(len(records), time.Since(started), queryFailed) }()
-	projection, err := RecordProjection(loadType)
-	if err != nil {
-		queryFailed = true
-		return nil, err
-	}
-
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recentRecords []models.Record
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		err := db.Select(projection).Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).Order("time ASC").Find(&recentRecords).Error
-		if err != nil {
-			queryFailed = true
-			log.Printf("Error fetching recent records for client %s between %s and %s: %v", uuid, recentStart, end, err)
-			return nil, err
-		}
-	}
-
-	var long_term []models.Record
-	err = db.Table("records_long_term").Select(projection).Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).Order("time ASC").Find(&long_term).Error
-	if err != nil {
-		queryFailed = true
-		log.Printf("Error fetching long-term records for client %s between %s and %s: %v", uuid, start, end, err)
-		return recentRecords, nil
-	}
-
-	if len(long_term) == 0 {
-		// 没有查到long_term，返回全部recentRecords
-		records = append(records, recentRecords...)
-		return records, nil
-	}
-
-	// 查到了long_term，recentRecords按15分钟分组，每组只保留一条（取最新一条）
-	grouped := make(map[string]models.Record)
-	for _, rec := range recentRecords {
-		key := rec.Time.ToTime().Truncate(15 * time.Minute).Format(time.RFC3339)
-		if old, ok := grouped[key]; !ok || rec.Time.ToTime().After(old.Time.ToTime()) {
-			grouped[key] = rec
-		}
-	}
-	var groupedList []models.Record
-	for _, rec := range grouped {
-		groupedList = append(groupedList, rec)
-	}
-	sort.Slice(groupedList, func(i, j int) bool {
-		return groupedList[i].Time.ToTime().Before(groupedList[j].Time.ToTime())
+	result, err := QueryRecords(context.Background(), db, RecordQuery{
+		Client: uuid, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
 	})
-	records = append(records, groupedList...)
-	records = append(records, long_term...)
-	return records, nil
+	observability.ObserveQuery(len(result), time.Since(started), err != nil)
+	return result, err
 }
 
 func GetAllRecords() ([]models.Record, error) {

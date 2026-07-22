@@ -299,3 +299,19 @@ version 3 migration 增加 hourly 表、复合唯一/时间索引和 `record_rol
 这一次分配就是固定大小的 2,000 点结果数组；算法工作内存不随额外辅助结构增长。
 
 验证覆盖：公共/Admin 精确窗口边界、默认/legacy unlimited/最大点数、节点上限、反向时间、所有投影白名单与注入输入、0/1/2 点预算、首尾/尖峰/排序、CPU API 真实投影与超限响应、GPU 多设备总预算和 100k 点 benchmark。仓库 `go test ./...`、Records/Public 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-402 多级表无重叠查询规划器
+
+原来的 REST 和 JSON-RPC 各自查询 recent/long-term 表：long-term 查询覆盖完整窗口，recent 又覆盖最近窗口，随后依赖“如果 long-term 非空就把 recent 临时按 15 分钟分组”的条件逻辑。GPU 查询甚至在 long-term 失败时返回 recent + nil error。现在所有 Record/GPU 历史读取统一经过同一个规划器，所有 segment 使用严格半开区间 `[start,end)`；相邻 segment 的 `previous.end == next.start`，任何时间点只能属于一个物理表。
+
+规划器结合 K-401 的 MaxPoints 与 K-303 tier：分钟预算选择 `1h(超出15m保留) → 15m(稳定历史) → 1m(最近稳定边界后)`；15 分钟预算把最近 raw 在内存中按 15 分钟聚合；小时预算直接使用 hourly 到完整小时边界，再只读取仍在 raw 保留内的最近尾部并按小时聚合。临时聚合继续使用兼容分位数，但会把请求指标的峰值覆盖回结果；CPU、GPU utilization/temperature 等尖峰不会在 coarse recent tail 中丢失。
+
+所有 segment 错误立即带 table/range 上下文向上传播，不再把数据库故障伪装成部分成功。最终结果按 `(time,client[,device])` 排序并防御性去重。JSON-RPC 的单节点/全节点 load 和公开 REST/GPU 已删除各自的拼接实现并接入统一执行器；字段投影仍贯穿每个物理表。
+
+固定一年/4,000 点规划（选择 hourly + recent raw tail）的纯规划成本：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `PlanRecordQuery` | 94.66～114.4 | 192 | 1 |
+
+验证覆盖：精确 4/5 小时切分、overlap 表中故意放置的冲突值、分钟/15m/1h 预算选择、长窗口 hourly、空表、跨节点排序与防御去重、缺表错误传播、America/New_York DST 回拨的 49 小时连续覆盖，以及 `EXPLAIN QUERY PLAN` 使用 hourly 复合索引。仓库 `go test ./...`、Records/Public 专项 `go test -race`、`go vet ./...` 全部通过。
