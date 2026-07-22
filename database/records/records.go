@@ -92,11 +92,20 @@ func DeleteRecordBefore(before time.Time) error {
 }
 
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
+	return GetRecordsByClientAndTimeProjected(uuid, start, end, "all")
+}
+
+func GetRecordsByClientAndTimeProjected(uuid string, start, end time.Time, loadType string) ([]models.Record, error) {
 	started := time.Now()
 	queryFailed := false
 	db := dbcore.GetDBInstance()
 	var records []models.Record
 	defer func() { observability.ObserveQuery(len(records), time.Since(started), queryFailed) }()
+	projection, err := RecordProjection(loadType)
+	if err != nil {
+		queryFailed = true
+		return nil, err
+	}
 
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
 
@@ -106,7 +115,7 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 		if recentStart.Before(fourHoursAgo) {
 			recentStart = fourHoursAgo
 		}
-		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).Order("time ASC").Find(&recentRecords).Error
+		err := db.Select(projection).Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).Order("time ASC").Find(&recentRecords).Error
 		if err != nil {
 			queryFailed = true
 			log.Printf("Error fetching recent records for client %s between %s and %s: %v", uuid, recentStart, end, err)
@@ -115,7 +124,7 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 	}
 
 	var long_term []models.Record
-	err := db.Table("records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).Order("time ASC").Find(&long_term).Error
+	err = db.Table("records_long_term").Select(projection).Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).Order("time ASC").Find(&long_term).Error
 	if err != nil {
 		queryFailed = true
 		log.Printf("Error fetching long-term records for client %s between %s and %s: %v", uuid, start, end, err)

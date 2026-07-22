@@ -281,3 +281,21 @@ version 3 migration 增加 hourly 表、复合唯一/时间索引和 `record_rol
 1h 层将一年查询耗时降低约 74–76%（约 3.9–4.1×），分配字节降低约 73%，分配次数降低约 71%，同时保留 summary 中的总量/reset/峰值语义。
 
 验证覆盖：raw/1m/15m/1h 预算选择、完整/partial hour、15m→1h 一致性、跨 bucket counter reset、峰值、GPU 多设备、迟到 overlap 重建、watermark 落后时禁止删除、watermark 推进后安全过期、version 3 旧库迁移和一年范围 benchmark。仓库 `go test ./...`、Records/迁移专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-401 查询预算、字段投影与峰值保真降采样
+
+新增一个供公开 REST、JSON-RPC 和后续管理历史接口共用的预算层。匿名调用默认/最大总点数为 4,000/20,000，最大窗口 366 天、最大节点数 10,000；现有 Admin 会话为 20,000/100,000、10 年、100,000 节点。时间反转、零/负预算、窗口/节点/点数越界均在查询前返回明确错误。旧 JSON-RPC 的 `maxCount=-1` 不再代表真正无界，而是映射到当前权限的硬上限。
+
+公共 load、Ping、Traffic 和 JSON-RPC load/Ping 已接入同一预算。Traffic 的共享 series 与可选 per-node series 在执行节点循环前计算响应点数；超限直接拒绝。单节点 load 接口支持 `max_count`，默认即有界；GPU 设备共享同一总预算，并在每个 device series 内独立采样，避免一个设备挤掉其他设备。
+
+`load_type` 不再先 `SELECT *` 后才过滤 JSON。固定 allowlist 将 CPU 映射为 `client,time,cpu`、RAM 映射为 `client,time,ram,ram_total`、network 映射为四个计数/速率列等；用户输入永远不拼入 SQL。真实 API 集成测试确认 CPU 请求执行 `SELECT client,time,cpu`，响应不含 RAM，同时 SQL 注入形态的 `load_type` 全部在数据库之前被拒绝。
+
+原等距抽样替换为 Largest-Triangle-Three-Buckets。首点/尾点固定保留，面积按所请求指标计算；RAM/swap/disk 使用利用率，network 使用吞吐，GPU 设备以 utilization 计算。1,001 点中唯一 CPU=100 尖峰压到 50 点后仍保留且严格有序。10 万点压到 2,000 点的固定 benchmark：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| LTTB 100k → 2k | 1,666,304～2,297,885 | 1,128,038～1,128,039 | 1 |
+
+这一次分配就是固定大小的 2,000 点结果数组；算法工作内存不随额外辅助结构增长。
+
+验证覆盖：公共/Admin 精确窗口边界、默认/legacy unlimited/最大点数、节点上限、反向时间、所有投影白名单与注入输入、0/1/2 点预算、首尾/尖峰/排序、CPU API 真实投影与超限响应、GPU 多设备总预算和 100k 点 benchmark。仓库 `go test ./...`、Records/Public 专项 `go test -race`、`go vet ./...` 全部通过。

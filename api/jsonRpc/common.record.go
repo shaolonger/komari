@@ -72,25 +72,43 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	// Hidden filtering for non-admin
 	isAdmin := meta.Permission == "admin"
 	hidden := map[string]bool{}
-	if !isAdmin {
+	nodeCount := 1
+	if !isAdmin || params.UUID == "" {
 		cinfo, err := clients.GetAllClientBasicInfo()
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
 		}
+		nodeCount = 0
 		for _, c := range cinfo {
-			if c.Hidden {
+			if !isAdmin && c.Hidden {
 				hidden[c.UUID] = true
+				continue
 			}
+			nodeCount++
 		}
-		if params.UUID != "" && hidden[params.UUID] {
+		if !isAdmin && params.UUID != "" && hidden[params.UUID] {
 			return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
 		}
+		if params.UUID != "" {
+			nodeCount = 1
+		}
+	}
+	permission := recordsdb.QueryPermissionPublic
+	if isAdmin {
+		permission = recordsdb.QueryPermissionAdmin
+	}
+	maxCount, err := recordsdb.ValidateQueryBudget(startTime, endTime, nodeCount, params.MaxCount, permission)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
+	if params.Type == "load" && !recordsdb.ValidLoadType(params.LoadType) {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid load_type", params.LoadType)
 	}
 
 	switch params.Type {
 	case "load":
 		// fetch load records
-		recs, err := getLoadRecordsCombined(params.UUID, startTime, endTime)
+		recs, err := getLoadRecordsCombined(params.UUID, startTime, endTime, params.LoadType)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
 		}
@@ -106,29 +124,20 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			recs = filtered
 		}
 
-		// resolve maxCount default for load
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-
 		// optional load_type filtering -> group by client
 		if params.LoadType != "" && params.LoadType != "all" {
-			items := filterRecordsByLoadType(recs, params.LoadType)
-			grouped := make(map[string][]flatRecord)
-			for _, it := range items {
-				grouped[it.Client] = append(grouped[it.Client], it)
+			groupedModels := make(map[string][]models.Record)
+			for _, record := range recs {
+				groupedModels[record.Client] = append(groupedModels[record.Client], record)
 			}
-			// sort and count
 			total := 0
 			groupsMeta := make([]struct {
 				name   string
 				length int
-			}, 0, len(grouped))
-			for name := range grouped {
-				arr := grouped[name]
+			}, 0, len(groupedModels))
+			for name, arr := range groupedModels {
 				sort.Slice(arr, func(i, j int) bool { return arr[i].Time.ToTime().Before(arr[j].Time.ToTime()) })
-				grouped[name] = arr
+				groupedModels[name] = arr
 				l := len(arr)
 				total += l
 				groupsMeta = append(groupsMeta, struct {
@@ -136,14 +145,17 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 					length int
 				}{name: name, length: l})
 			}
-			// downsample across all clients proportionally
-			if maxCount != -1 && total > maxCount {
+			if total > maxCount {
 				targets := allocateTargets(groupsMeta, maxCount)
 				total = 0
 				for name, k := range targets {
-					grouped[name] = downsampleFlatRecords(grouped[name], k)
-					total += len(grouped[name])
+					groupedModels[name] = recordsdb.DownsampleRecords(groupedModels[name], k, params.LoadType)
+					total += len(groupedModels[name])
 				}
+			}
+			grouped := make(map[string][]flatRecord, len(groupedModels))
+			for name, records := range groupedModels {
+				grouped[name] = filterRecordsByLoadType(records, params.LoadType)
 			}
 			return struct {
 				Count    int                     `json:"count"`
@@ -174,11 +186,11 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				length int
 			}{name: name, length: l})
 		}
-		if maxCount != -1 && total > maxCount {
+		if total > maxCount {
 			targets := allocateTargets(groupsMeta, maxCount)
 			total = 0
 			for name, k := range targets {
-				grouped[name] = downsampleModelRecords(grouped[name], k)
+				grouped[name] = recordsdb.DownsampleRecords(grouped[name], k, "all")
 				total += len(grouped[name])
 			}
 		}
@@ -401,12 +413,8 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			toList = append(toList, info)
 		}
 		response.Tasks = toList
-		// apply maxCount for ping
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-		if maxCount != -1 && len(response.Records) > maxCount {
+		// apply the permission-aware total point budget for ping
+		if len(response.Records) > maxCount {
 			// group records by TaskId for proportional downsampling
 			taskGroups := make(map[uint][]RecordsResp)
 			for _, r := range response.Records {
@@ -505,10 +513,14 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 // getLoadRecordsCombined fetches records for a client or all clients within a time range,
 // combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record, error) {
+func getLoadRecordsCombined(uuid string, start, end time.Time, loadType string) ([]models.Record, error) {
+	projection, err := recordsdb.RecordProjection(loadType)
+	if err != nil {
+		return nil, err
+	}
 	// prefer the existing function when uuid provided
 	if uuid != "" {
-		return recordsdb.GetRecordsByClientAndTime(uuid, start, end)
+		return recordsdb.GetRecordsByClientAndTimeProjected(uuid, start, end, loadType)
 	}
 	db := dbcore.GetDBInstance()
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
@@ -519,11 +531,15 @@ func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record,
 		if recentStart.Before(fourHoursAgo) {
 			recentStart = fourHoursAgo
 		}
-		_ = db.Table("records").Where("time >= ? AND time <= ?", recentStart, end).Order("time ASC").Find(&recent).Error
+		if err := db.Table("records").Select(projection).Where("time >= ? AND time <= ?", recentStart, end).Order("time ASC").Find(&recent).Error; err != nil {
+			return nil, err
+		}
 	}
 
 	var longTerm []models.Record
-	_ = db.Table("records_long_term").Where("time >= ? AND time <= ?", start, end).Order("time ASC").Find(&longTerm).Error
+	if err := db.Table("records_long_term").Select(projection).Where("time >= ? AND time <= ?", start, end).Order("time ASC").Find(&longTerm).Error; err != nil {
+		return nil, err
+	}
 
 	// if no long term, return all recent
 	if len(longTerm) == 0 {
@@ -659,56 +675,6 @@ func allocateTargets(groups []struct {
 		}
 	}
 	return result
-}
-
-func downsampleModelRecords(in []models.Record, k int) []models.Record {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []models.Record{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]models.Record, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
-}
-
-func downsampleFlatRecords(in []flatRecord, k int) []flatRecord {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []flatRecord{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]flatRecord, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
 }
 
 // flatRecord is a projection used when load_type is specified.

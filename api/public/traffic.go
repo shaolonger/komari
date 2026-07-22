@@ -76,9 +76,39 @@ func GetTrafficRange(c *gin.Context) {
 		return
 	}
 
-	visibleClients := filterTrafficClients(clientList, requestedTrafficUUIDs(c), trafficIsLoggedIn(c))
+	isLogin := trafficIsLoggedIn(c)
+	visibleClients := filterTrafficClients(clientList, requestedTrafficUUIDs(c), isLogin)
 	bucketSize, groupBy := trafficBucketSize(c.Query("group_by"), start, end)
 	includeNodeSeries := parseBoolQuery(c.Query("include_node_series"))
+	requestedPoints := 0
+	if rawMax := strings.TrimSpace(c.Query("max_count")); rawMax != "" {
+		requestedPoints, err = strconv.Atoi(rawMax)
+		if err != nil {
+			api.RespondError(c, 400, "Invalid max_count parameter")
+			return
+		}
+	}
+	permission := recordsdb.QueryPermissionPublic
+	if isLogin {
+		permission = recordsdb.QueryPermissionAdmin
+	}
+	maxPoints, err := recordsdb.ValidateQueryBudget(start, end, len(visibleClients), requestedPoints, permission)
+	if err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
+	}
+	seriesPoints := 0
+	if bucketSize > 0 {
+		seriesPoints = int((end.Sub(start) + bucketSize - 1) / bucketSize)
+	}
+	responsePoints := seriesPoints
+	if includeNodeSeries {
+		responsePoints += seriesPoints * len(visibleClients)
+	}
+	if responsePoints > maxPoints {
+		api.RespondError(c, 400, recordsdb.ErrQueryPointBudget.Error())
+		return
+	}
 
 	response := trafficRangeResponse{
 		From:              start.In(loc).Format(time.RFC3339),

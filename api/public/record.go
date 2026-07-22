@@ -1,6 +1,7 @@
 package public
 
 import (
+	"math"
 	"strconv"
 	"time"
 
@@ -51,28 +52,41 @@ func GetRecordsByUUID(c *gin.Context) {
 	}
 
 	hoursInt, err := strconv.Atoi(hours)
-	if err != nil {
+	if err != nil || hoursInt <= 0 {
 		api.RespondError(c, 400, "Invalid hours parameter")
 		return
 	}
 
-	// 验证 load_type 参数
-	validLoadTypes := map[string]bool{
-		"cpu": true, "ram": true, "swap": true,
-		"load": true, "temp": true, "disk": true, "network": true,
-		"process": true, "connections": true, "all": true, "": true,
-	}
-
-	if !validLoadTypes[loadType] {
+	if !records.ValidLoadType(loadType) {
 		api.RespondError(c, 400, "Invalid load_type parameter")
 		return
 	}
+	requestedPoints := 0
+	if rawMax := c.Query("max_count"); rawMax != "" {
+		requestedPoints, err = strconv.Atoi(rawMax)
+		if err != nil {
+			api.RespondError(c, 400, "Invalid max_count parameter")
+			return
+		}
+	}
+	endTime := time.Now()
+	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)
+	permission := records.QueryPermissionPublic
+	if isLogin {
+		permission = records.QueryPermissionAdmin
+	}
+	maxPoints, err := records.ValidateQueryBudget(startTime, endTime, 1, requestedPoints, permission)
+	if err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
+	}
 
-	clientRecords, err := records.GetRecordsByClientAndTime(uuid, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
+	clientRecords, err := records.GetRecordsByClientAndTimeProjected(uuid, startTime, endTime, loadType)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
 	}
+	clientRecords = records.DownsampleRecords(clientRecords, maxPoints, loadType)
 
 	// 准备基本响应
 	response := gin.H{
@@ -92,8 +106,9 @@ func GetRecordsByUUID(c *gin.Context) {
 
 	// 自动检测是否有GPU数据并附加到响应中
 	if loadType == "" || loadType == "all" || loadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTime(uuid, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
+		gpuRecords, err := records.GetGPURecordsByClientAndTime(uuid, startTime, endTime)
 		if err == nil && len(gpuRecords) > 0 {
+			gpuRecords = records.DownsampleGPURecords(gpuRecords, maxPoints)
 			// 按设备索引分组数据，构建简化的设备结构
 			gpuDevices := make(map[string]interface{})
 
@@ -224,7 +239,7 @@ func GetPingRecords(c *gin.Context) {
 		Records   []RecordsResp     `json:"records"`
 		Tasks     []gin.H           `json:"tasks,omitempty"`
 	}
-	var records []models.PingRecord
+	var pingRecords []models.PingRecord
 	hiddenMap := map[string]bool{}
 	response := &Resp{
 		Count:   0,
@@ -254,12 +269,30 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	hoursInt, err := strconv.Atoi(hours)
-	if err != nil {
-		hoursInt = 4
+	if err != nil || hoursInt <= 0 {
+		api.RespondError(c, 400, "Invalid hours parameter")
+		return
 	}
 
 	endTime := time.Now()
 	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)
+	requestedPoints := 0
+	if rawMax := c.Query("max_count"); rawMax != "" {
+		requestedPoints, err = strconv.Atoi(rawMax)
+		if err != nil {
+			api.RespondError(c, 400, "Invalid max_count parameter")
+			return
+		}
+	}
+	permission := records.QueryPermissionPublic
+	if isLogin {
+		permission = records.QueryPermissionAdmin
+	}
+	maxPoints, err := records.ValidateQueryBudget(startTime, endTime, 1, requestedPoints, permission)
+	if err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
+	}
 
 	// 解析 task_id，支持同时传入 uuid 和 task_id
 	taskId := -1
@@ -272,7 +305,7 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	// 查询记录，现在支持 uuid + task_id 组合查询
-	records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
+	pingRecords, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
 		return
@@ -286,7 +319,7 @@ func GetPingRecords(c *gin.Context) {
 		max   int
 	})
 
-	for _, r := range records {
+	for _, r := range pingRecords {
 		if r.Client != "" && !isLogin {
 			if hiddenMap[r.Client] {
 				continue // 跳过隐藏的节点
@@ -385,7 +418,7 @@ func GetPingRecords(c *gin.Context) {
 			sumLatency := 0
 			validCount := 0
 
-			for _, r := range records {
+			for _, r := range pingRecords {
 				// 根据查询模式过滤记录
 				if r.TaskId != t.Id {
 					continue
@@ -441,6 +474,18 @@ func GetPingRecords(c *gin.Context) {
 		response.Tasks = tasksList
 	}
 
+	if len(response.Records) > maxPoints {
+		sampled := make([]RecordsResp, 0, maxPoints)
+		if maxPoints == 1 {
+			sampled = append(sampled, response.Records[len(response.Records)-1])
+		} else {
+			for index := 0; index < maxPoints; index++ {
+				position := int(math.Round(float64(index) * float64(len(response.Records)-1) / float64(maxPoints-1)))
+				sampled = append(sampled, response.Records[position])
+			}
+		}
+		response.Records = sampled
+	}
 	response.Count = len(response.Records) // 计算最后结果保持计数一致
 	api.RespondSuccess(c, response)
 }
