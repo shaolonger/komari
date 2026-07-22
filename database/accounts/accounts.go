@@ -3,6 +3,7 @@ package accounts
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 const constantSalt = "06Wm4Jv1Hkxx"
@@ -69,13 +71,20 @@ func ForceResetPassword(username, passwd string) (err error) {
 	if err != nil {
 		return err
 	}
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashedPassword)
-	if result.Error != nil {
-		return result.Error
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := tx.Select("uuid").Where("username = ?", username).First(&user).Error; err != nil {
+			return fmt.Errorf("无法找到用户名: %w", err)
+		}
+		if err := tx.Model(&models.User{}).Where("uuid = ?", user.UUID).Update("passwd", hashedPassword).Error; err != nil {
+			return err
+		}
+		return tx.Where("uuid = ?", user.UUID).Delete(&models.Session{}).Error
+	})
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("无法找到用户名")
-	}
+	clearSessionCredentials()
 	return nil
 }
 
@@ -108,10 +117,24 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 
 func DeleteAccountByUsername(username string) (err error) {
 	db := dbcore.GetDBInstance()
-	err = db.Where("username = ?", username).Delete(&models.User{}).Error
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		result := tx.Select("uuid").Where("username = ?", username).First(&user)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if result.Error != nil {
+			return result.Error
+		}
+		if err := tx.Where("uuid = ?", user.UUID).Delete(&models.Session{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("uuid = ?", user.UUID).Delete(&models.User{}).Error
+	})
 	if err != nil {
 		return err
 	}
+	clearSessionCredentials()
 	return nil
 }
 
@@ -194,12 +217,6 @@ func UnbindExternalAccount(uuid string) error {
 
 func UpdateUser(uuid string, name, password, sso_type *string) error {
 	db := dbcore.GetDBInstance()
-	// Check if user exists
-	var existingUser models.User
-	result := db.Where("uuid = ?", uuid).First(&existingUser)
-	if result.Error != nil {
-		return fmt.Errorf("user not found: %s", uuid)
-	}
 	updates := make(map[string]interface{})
 	if name != nil {
 		updates["username"] = *name
@@ -215,12 +232,24 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["sso_type"] = *sso_type
 	}
 	updates["updated_at"] = time.Now()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var existingUser models.User
+		if err := tx.Select("uuid").Where("uuid = ?", uuid).First(&existingUser).Error; err != nil {
+			return fmt.Errorf("user not found: %s", uuid)
+		}
+		if err := tx.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error; err != nil {
+			return err
+		}
+		if password != nil {
+			return tx.Where("uuid = ?", uuid).Delete(&models.Session{}).Error
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 	if password != nil {
-		DeleteAllSessions()
+		clearSessionCredentials()
 	}
 	return nil
 }

@@ -35,6 +35,9 @@ type Registry struct {
 	wsConnections   atomic.Int64
 	wsReconnects    atomic.Uint64
 	wsSlowConsumers atomic.Uint64
+	credentialHits  atomic.Uint64
+	credentialMiss  atomic.Uint64
+	credentialEvict atomic.Uint64
 }
 
 var durationBounds = [...]time.Duration{
@@ -131,6 +134,10 @@ func WSDisconnected() { defaultRegistry.wsConnections.Add(-1) }
 func WSReconnected()  { defaultRegistry.wsReconnects.Add(1) }
 func WSSlowConsumer() { defaultRegistry.wsSlowConsumers.Add(1) }
 
+func CredentialCacheHit()          { defaultRegistry.credentialHits.Add(1) }
+func CredentialCacheMiss()         { defaultRegistry.credentialMiss.Add(1) }
+func CredentialCacheInvalidation() { defaultRegistry.credentialEvict.Add(1) }
+
 // WritePrometheus writes a stable Prometheus text exposition. Metric names and
 // labels are fixed at compile time, preventing credential/high-cardinality leaks.
 func WritePrometheus(w io.Writer) error { return defaultRegistry.writePrometheus(w) }
@@ -162,6 +169,9 @@ func (r *Registry) writePrometheus(w io.Writer) error {
 		{"komari_websocket_connections", "Current authenticated Agent WebSocket connections.", "gauge", max(r.wsConnections.Load(), 0)},
 		{"komari_websocket_reconnects_total", "Agent WebSocket replacements.", "counter", r.wsReconnects.Load()},
 		{"komari_websocket_slow_consumers_total", "WebSocket slow-consumer disconnects.", "counter", r.wsSlowConsumers.Load()},
+		{"komari_credential_cache_hits_total", "Credential cache hits without credential labels.", "counter", r.credentialHits.Load()},
+		{"komari_credential_cache_misses_total", "Credential cache misses without credential labels.", "counter", r.credentialMiss.Load()},
+		{"komari_credential_cache_invalidations_total", "Credential cache invalidations without credential labels.", "counter", r.credentialEvict.Load()},
 		{"komari_runtime_heap_bytes", "Current Go heap allocation.", "gauge", mem.HeapAlloc},
 		{"komari_runtime_goroutines", "Current Go goroutine count.", "gauge", runtime.NumGoroutine()},
 	}

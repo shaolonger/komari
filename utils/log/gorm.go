@@ -41,6 +41,12 @@ func (l *GormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	return &newlogger
 }
 
+// ParamsFilter keeps diagnostic SQL useful while preventing credentials,
+// passwords, IP addresses and user content from being interpolated into logs.
+func (l *GormLogger) ParamsFilter(_ context.Context, sql string, _ ...interface{}) (string, []interface{}) {
+	return sql, nil
+}
+
 func (l *GormLogger) Info(ctx context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= gormlogger.Info {
 		slog.InfoContext(ctx, fmt.Sprintf(msg, data...))

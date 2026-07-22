@@ -70,3 +70,36 @@ func TestIdentityMiddlewareRequiresHeaderClientToken(t *testing.T) {
 		t.Fatalf("query-auth status = %d, want %d", queryRecorder.Code, http.StatusUnauthorized)
 	}
 }
+
+func TestCredentialMatchesUsesFixedDigestComparison(t *testing.T) {
+	tests := []struct {
+		name     string
+		provided string
+		expected string
+		want     bool
+	}{
+		{name: "equal", provided: "0123456789abcdef", expected: "0123456789abcdef", want: true},
+		{name: "different same length", provided: "0123456789abcdee", expected: "0123456789abcdef"},
+		{name: "short", provided: "x", expected: "0123456789abcdef"},
+		{name: "long", provided: "0123456789abcdef-extra", expected: "0123456789abcdef"},
+		{name: "empty", provided: "", expected: "0123456789abcdef"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := credentialMatches(tt.provided, tt.expected); got != tt.want {
+				t.Fatalf("credentialMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func BenchmarkCredentialMatches(b *testing.B) {
+	for _, input := range []string{"x", "0123456789abcdee", "0123456789abcdef-extra"} {
+		b.Run(input, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				credentialMatches(input, "0123456789abcdef")
+			}
+		})
+	}
+}

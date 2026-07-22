@@ -15,6 +15,9 @@ func TestMetricsAreBoundedAndSanitized(t *testing.T) {
 	ObserveSQLite(time.Millisecond, true)
 	ObserveCompression(200, 3*time.Millisecond, false)
 	ObserveQuery(10, time.Millisecond, false)
+	CredentialCacheHit()
+	CredentialCacheMiss()
+	CredentialCacheInvalidation()
 	WSConnected()
 	defer WSDisconnected()
 	var out bytes.Buffer
@@ -22,7 +25,7 @@ func TestMetricsAreBoundedAndSanitized(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"komari_reports_accepted_total 1", "komari_batch_rows_total 100", `le="+Inf"`} {
+	for _, want := range []string{"komari_reports_accepted_total 1", "komari_batch_rows_total 100", "komari_credential_cache_hits_total 1", `le="+Inf"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("metrics missing %q", want)
 		}

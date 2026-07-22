@@ -86,9 +86,23 @@ func writeClientTokenLifecycle(clientUUID, token string, issuedAt, expiresAt, re
 		"token_revoked_at": revokedAt,
 		"updated_at":       time.Now(),
 	}
-	if err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error; err != nil {
+	var oldToken string
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUUID).Scan(&oldToken).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	}); err != nil {
 		return ClientTokenStatus{}, err
 	}
+	invalidateClientCredential(oldToken, token)
 	return GetClientTokenStatusByUUID(clientUUID)
 }
 
@@ -103,10 +117,17 @@ func DeleteClientConfig(clientUuid string) error {
 }
 func DeleteClient(clientUuid string) error {
 	db := dbcore.GetDBInstance()
-	err := db.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
+	var oldToken string
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUuid).Scan(&oldToken).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
+	})
 	if err != nil {
 		return err
 	}
+	invalidateClientCredential(oldToken)
 	return nil
 }
 
@@ -295,6 +316,7 @@ func CreateClient() (clientUUID, token string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	invalidateClientCredential(token)
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		log.Println("Failed to apply default-on ping tasks to new client:", err)
 	}
@@ -321,6 +343,7 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	invalidateClientCredential(token)
 	if err := tasks.AddDefaultOnClientUUID(clientUUID); err != nil {
 		log.Println("Failed to apply default-on ping tasks to new client:", err)
 	}
@@ -510,9 +533,27 @@ func SaveClient(updates map[string]interface{}) error {
 
 	updates["updated_at"] = time.Now()
 
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
+	newToken, tokenChanged := updates["token"].(string)
+	if _, exists := updates["token"]; exists && !tokenChanged {
+		return fmt.Errorf("token must be a string")
+	}
+	var oldToken string
+	var err error
+	if tokenChanged {
+		err = db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUUID).Scan(&oldToken).Error; err != nil {
+				return err
+			}
+			return tx.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
+		})
+	} else {
+		err = db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
+	}
 	if err != nil {
 		return err
+	}
+	if tokenChanged {
+		invalidateClientCredential(oldToken, newToken)
 	}
 	return nil
 }

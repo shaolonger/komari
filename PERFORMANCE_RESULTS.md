@@ -179,3 +179,25 @@ v2 帧缩小约 55.3%，完整服务端解码/转换约快 19～22×，分配次
 - fuzz seed 保证任意输入不 panic；
 - uint64→int64/int 溢出、GPU fallback 和 malformed frame 回归；
 - WebSocket read limit 在第一次读取前设置，不影响现有控制消息鉴权。
+
+## K-202 API Key、客户端 Token 与 Session 安全缓存
+
+新增总容量严格受限的 64-shard credential cache。Client Token 与 Session 只以 SHA-256 固定长度摘要作为 map key；缓存值只包含 UUID、版本、凭据过期时间和客户端吊销时间，不保存第二份明文凭据。每类缓存容量上限 16,384，positive TTL 为 5 分钟，negative TTL 为 10 秒；随机凭据喷射只会触发分片内近似淘汰，内存不会随输入基数无限增长。
+
+数据库 miss 前记录全局单调 invalidation generation，查询完成后只在 generation 未变化时发布结果。Token 轮换、重发、吊销、客户端删除/创建以及 Session 创建、删除、批量删除、过期清理、账户删除和密码修改都在数据库事务成功后先推进 generation、再失效摘要项。因此，与轮换并发的旧查询不能在失效后把旧权限重新写回缓存；数据库失败也不会提前失效当前有效权限。
+
+API Key 继续从 K-201 的不可变配置 snapshot 获取，不增加另一份缓存；验证改为分别 SHA-256 后对固定 32-byte digest 使用常量时间比较。短、等长和超长错误输入走相同固定长度 compare。认证缓存命中/未命中/失效指标只有固定无 label 原子计数，不含凭据、UUID 或 IP。
+
+安全审查同时发现原 GORM debug logger 会把 SQL 参数插值到日志。logger 现实现 GORM `ParamsFilter`，所有 SQL 诊断只显示占位符，仍保留语句结构、耗时、行数和错误分类，但 Token、Session、密码、IP 与用户输入不会作为 SQL 实参进入日志。回归测试通过真实 GORM/SQLite 查询验证明文凭据不出现在输出中。
+
+Apple M4、macOS arm64、Go 1.26.4，`-benchtime=200ms -count=3`：
+
+| 热路径 | 修改前 ns/op | 修改后 ns/op | 修改前 B/op | 修改后 B/op | 修改前 allocs/op | 修改后 allocs/op | 修改前 SQL/op | 修改后 SQL/op |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Client Token → UUID | 6,468～6,553 | 117.7～118.2 | 5,779 | 0 | 81 | 0 | 1 | 0 |
+| Session → UUID | 6,428～6,476 | 116.8～117.5 | 5,155 | 0 | 86 | 0 | 1 | 0 |
+| API Key fixed-digest compare | — | 89.9～91.3 | — | 0 | — | 0 | 0 | 0 |
+
+Client Token 和 Session 稳态认证均约快 54～56×，完全移除缓存命中时的 SQLite 访问、heap allocation 和明文凭据副本分配。API Key 的短、等长、超长错误输入 benchmark 均处于同一约 90ns 区间。
+
+验证覆盖：摘要键结构扫描、严格容量上限、TTL/negative entry、stale generation 拒绝回填、10 万随机凭据、有/无命中、Token 过期/轮换/吊销/客户端删除、Session 过期自动删除/主动删除/密码变更、32 goroutine 并发失效、API Key 输入长度行为、GORM 实际日志脱敏和固定低基数指标。最终仓库 `go test ./...`、相关包 `go test -race` 和 `go vet ./...` 全部通过。

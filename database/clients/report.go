@@ -35,13 +35,35 @@ func SaveReport(uuid string, data map[string]interface{}) (err error) {
 }
 
 func GetClientUUIDByToken(token string) (clientUUID string, err error) {
+	if token == "" {
+		return "", gorm.ErrRecordNotFound
+	}
+	now := time.Now()
+	if entry, ok := cachedClientCredential(token, now); ok {
+		if !entry.Found {
+			return "", gorm.ErrRecordNotFound
+		}
+		if !entry.Value.RevokedAt.IsZero() {
+			return "", ErrClientTokenRevoked
+		}
+		if !entry.CredentialExpiresAt.IsZero() && !now.Before(entry.CredentialExpiresAt) {
+			return "", ErrClientTokenExpired
+		}
+		return entry.Value.UUID, nil
+	}
+	generation := clientCredentialGeneration()
+
 	db := dbcore.GetDBInstance()
 	var client models.Client
-	err = db.Where("token = ?", token).First(&client).Error
+	err = db.Select("uuid", "token_expires_at", "token_revoked_at", "updated_at").Where("token = ?", token).First(&client).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			cacheMissingClientCredential(token, now, generation)
+		}
 		return "", err
 	}
-	if err := validateClientTokenState(client, time.Now()); err != nil {
+	cacheClientCredential(token, client, now, generation)
+	if err := validateClientTokenState(client, now); err != nil {
 		return "", err
 	}
 	return client.UUID, nil

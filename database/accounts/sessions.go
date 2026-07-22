@@ -13,7 +13,10 @@ import (
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
+
+var ErrSessionExpired = errors.New("session expired")
 
 // GetAllSessions 获取所有会话
 func GetAllSessions() (sessions []models.Session, err error) {
@@ -39,7 +42,7 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		LoginMethod:  login_method,
 		LatestOnline: models.FromTime(time.Now()),
 	}
-	go func() {
+	notifyLogin := func() {
 		LoginNotification, _ := config.GetAs[bool](config.LoginNotificationKey, false)
 		if LoginNotification {
 			var ipinfo *geoip.GeoInfo
@@ -58,41 +61,61 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 				Emoji:   "🔑",
 			})
 		}
-	}()
+	}
 
 	err := db.Create(&sessionRecord).Error
 	if err != nil {
 		return "", err
 	}
+	invalidateSessionCredential(session)
+	go notifyLogin()
 	return session, nil
 }
 
 // GetSession 根据会话 ID 获取 UUID
 func GetSession(session string) (uuid string, err error) {
+	if session == "" {
+		return "", gorm.ErrRecordNotFound
+	}
+	now := time.Now()
+	if entry, ok := cachedSessionCredential(session, now); ok {
+		if !entry.Found {
+			return "", gorm.ErrRecordNotFound
+		}
+		if !entry.CredentialExpiresAt.IsZero() && !now.Before(entry.CredentialExpiresAt) {
+			_ = DeleteSession(session)
+			return "", ErrSessionExpired
+		}
+		return entry.Value.UUID, nil
+	}
+	generation := sessionCredentialGeneration()
+
 	db := dbcore.GetDBInstance()
 	var sessionRecord models.Session
-	err = db.Where("session = ?", session).First(&sessionRecord).Error
+	err = db.Select("uuid", "expires", "created_at").Where("session = ?", session).First(&sessionRecord).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			cacheMissingSessionCredential(session, now, generation)
+		}
 		return "", err
 	}
 
-	if time.Now().After(sessionRecord.Expires.ToTime()) {
+	cacheSessionCredential(session, sessionRecord, now, generation)
+	if !now.Before(sessionRecord.Expires.ToTime()) {
 		// 会话已过期，删除它
 		_ = DeleteSession(session)
-		return "", errors.New("session expired")
+		return "", ErrSessionExpired
 	}
 
 	return sessionRecord.UUID, nil
 }
 
 func GetUserBySession(session string) (models.User, error) {
-	db := dbcore.GetDBInstance()
-	var sessionRecord models.Session
-	err := db.Where("session = ?", session).First(&sessionRecord).Error
+	uuid, err := GetSession(session)
 	if err != nil {
 		return models.User{}, err
 	}
-	return GetUserByUUID(sessionRecord.UUID)
+	return GetUserByUUID(uuid)
 }
 
 // DeleteSession 删除指定会话
@@ -102,6 +125,7 @@ func DeleteSession(session string) (err error) {
 	if result.Error != nil {
 		return result.Error
 	}
+	invalidateSessionCredential(session)
 	return nil
 }
 
@@ -111,6 +135,20 @@ func DeleteAllSessions() error {
 	if result.Error != nil {
 		return result.Error
 	}
+	clearSessionCredentials()
+	return nil
+}
+
+func DeleteSessionsByUUID(uuid string) error {
+	db := dbcore.GetDBInstance()
+	result := db.Where("uuid = ?", uuid).Delete(&models.Session{})
+	if result.Error != nil {
+		return result.Error
+	}
+	// The cache deliberately has no plaintext secondary index. Clearing this
+	// bounded cache makes account-level revocation immediate without retaining
+	// session identifiers or building a high-cardinality UUID index.
+	clearSessionCredentials()
 	return nil
 }
 
@@ -143,5 +181,6 @@ func RemoveExpiredSessions() error {
 	if result.Error != nil {
 		return result.Error
 	}
+	clearSessionCredentials()
 	return nil
 }

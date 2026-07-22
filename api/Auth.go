@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"net/http"
 	"strings"
@@ -223,5 +225,15 @@ func isApiKeyValid(apiKey string) bool {
 	if apiKeyConfig == "" || len(apiKeyConfig) < 12 {
 		return false
 	}
-	return apiKey == "Bearer "+apiKeyConfig
+	provided, ok := strings.CutPrefix(apiKey, "Bearer ")
+	if !ok || provided == "" {
+		return false
+	}
+	return credentialMatches(provided, apiKeyConfig)
+}
+
+func credentialMatches(provided, expected string) bool {
+	providedDigest := sha256.Sum256([]byte(provided))
+	expectedDigest := sha256.Sum256([]byte(expected))
+	return subtle.ConstantTimeCompare(providedDigest[:], expectedDigest[:]) == 1
 }
