@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/protocol/telemetryv2"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
 	"github.com/patrickmn/go-cache"
@@ -158,6 +159,7 @@ func WebSocketReport(c *gin.Context) {
 		CheckOrigin: func(r *http.Request) bool {
 			return true // 被控
 		},
+		Subprotocols: []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol},
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
 	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -165,20 +167,18 @@ func WebSocketReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
+	unsafeConn.SetReadLimit(telemetryv2.MaxFrameSize)
+	wireProtocol, err := negotiatedTelemetryProtocol(unsafeConn.Subprotocol())
+	if err != nil {
+		_ = unsafeConn.Close()
+		return
+	}
 	conn := ws.NewSafeConn(unsafeConn)
 	defer conn.Close()
 
-	_, message, err := conn.ReadMessage()
+	messageType, message, err := conn.ReadMessage()
 	if err != nil {
 		log.Println("Error reading message:", err)
-		return
-	}
-
-	// 第一次数据拿token
-	data := map[string]interface{}{}
-	err = json.Unmarshal(message, &data)
-	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
 		return
 	}
 	// it should ok,token was verfied in the middleware
@@ -216,24 +216,47 @@ func WebSocketReport(c *gin.Context) {
 	}()
 
 	// 首先处理第一次ws conn收到的消息
-	processMessage(conn, message, uuid)
+	processMessage(conn, messageType, message, uuid, wireProtocol)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(readWait))
 
-		_, message, err := conn.ReadMessage()
+		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("Client %s connection error: %v", uuid, err)
 			}
 			break // 任何读错误（包括超时）都意味着连接已断开，退出循环
 		}
-		processMessage(conn, message, uuid)
+		processMessage(conn, messageType, message, uuid, wireProtocol)
 	}
 }
 
 // 将消息处理逻辑提取到一个函数中，方便复用
-func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
+func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid string, wireProtocol telemetryProtocol) {
+	if messageType == websocket.BinaryMessage {
+		if wireProtocol != telemetryProtocolV2 {
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Binary telemetry requires protocol v2"})
+			return
+		}
+		report, err := decodeTelemetryV2Report(message)
+		if err != nil {
+			log.Printf("Rejected invalid telemetry v2 frame for client %s: %v", uuid, err)
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Invalid telemetry frame"})
+			return
+		}
+		report.UpdatedAt = time.Now()
+		if err := SaveClientReport(uuid, report); err != nil {
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
+			return
+		}
+		ws.SetLatestReport(uuid, &report)
+		return
+	}
+	if messageType != websocket.TextMessage {
+		_ = conn.WriteJSON(gin.H{"status": "error", "error": "Unsupported WebSocket message type"})
+		return
+	}
 	type MessageType struct {
 		Type string `json:"type"`
 	}

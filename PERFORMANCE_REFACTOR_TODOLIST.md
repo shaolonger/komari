@@ -2,6 +2,7 @@
 
 状态：执行中  
 设计文档：[`PERFORMANCE_REFACTOR_PLAN.md`](PERFORMANCE_REFACTOR_PLAN.md)
+性能结果：[`PERFORMANCE_RESULTS.md`](PERFORMANCE_RESULTS.md)
 
 ## 执行规则
 
@@ -54,7 +55,7 @@
   - 失败批次有限重试且不可静默丢失。
   - 测试：写入失败、重试、关闭 drain、并发查询、SQLite busy、race、benchmark。
 
-- [ ] **K-104 Agent 协议 v2 与 v1 兼容协商（服务端部分）**
+- [x] **K-104 Agent 协议 v2 与 v1 兼容协商（服务端部分）**
   - 增加长度受限的二进制遥测协议。
   - 保留 JSON v1，握手明确版本和能力。
   - 未识别版本 fail closed，不影响控制能力鉴权。
@@ -187,4 +188,3 @@
   - 完成 SQLite 旧库升级/回滚和 v1/v2 Agent 兼容矩阵。
   - 检查全部 Todo、提交、工作树和发布资产。
   - 推送分支，创建新 SemVer Release，等待 GitHub Actions 成功并验证资产。
-
