@@ -8,9 +8,13 @@ import (
 )
 
 func ForwardTerminal(id string) {
-	session, exists := TerminalSessions[id]
+	session, exists := getTerminalSession(id)
 
-	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
+	if !exists || session == nil {
+		return
+	}
+	browser, agent := session.connections()
+	if agent == nil || browser == nil {
 		return
 	}
 	auditlog.Log(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
@@ -19,21 +23,21 @@ func ForwardTerminal(id string) {
 
 	go func() {
 		for {
-			messageType, data, err := session.Browser.ReadMessage()
+			messageType, data, err := browser.ReadMessage()
 			if err != nil {
 				errChan <- err
 				return
 			}
 
 			if messageType == websocket.TextMessage {
-				if session.Agent != nil && string(data[0:1]) == "{" {
-					err = session.Agent.WriteMessage(websocket.TextMessage, data)
-				} else if session.Agent != nil {
-					err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
+				if len(data) > 0 && data[0] == '{' {
+					err = agent.WriteMessage(websocket.TextMessage, data)
+				} else {
+					err = agent.WriteMessage(websocket.BinaryMessage, data)
 				}
-			} else if session.Agent != nil {
+			} else {
 				// 二进制消息，原样传递
-				err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
+				err = agent.WriteMessage(websocket.BinaryMessage, data)
 			}
 
 			if err != nil {
@@ -45,17 +49,15 @@ func ForwardTerminal(id string) {
 
 	go func() {
 		for {
-			_, data, err := session.Agent.ReadMessage()
+			_, data, err := agent.ReadMessage()
 			if err != nil {
 				errChan <- err
 				return
 			}
-			if session.Browser != nil {
-				err = session.Browser.WriteMessage(websocket.BinaryMessage, data)
-				if err != nil {
-					errChan <- err
-					return
-				}
+			err = browser.WriteMessage(websocket.BinaryMessage, data)
+			if err != nil {
+				errChan <- err
+				return
 			}
 		}
 	}()
@@ -63,15 +65,8 @@ func ForwardTerminal(id string) {
 	// 等待错误或主动关闭
 	<-errChan
 	// 关闭连接
-	if session.Agent != nil {
-		session.Agent.Close()
-	}
-	if session.Browser != nil {
-		session.Browser.Close()
-	}
+	session.close()
 	disconnect_time := time.Now()
 	auditlog.Log(session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
-	TerminalSessionsMutex.Lock()
-	delete(TerminalSessions, id)
-	TerminalSessionsMutex.Unlock()
+	removeTerminalSession(id, session)
 }

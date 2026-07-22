@@ -138,7 +138,7 @@
   - Ping/通知按 next-run 调度，避免同秒风暴。
   - 测试：reload 退出、取消、抖动稳定性、队列上限、race、goroutine 泄漏检测。
 
-- [ ] **K-502 WebSocket 生命周期、deadline 和慢消费者隔离**
+- [x] **K-502 WebSocket 生命周期、deadline 和慢消费者隔离**
   - read limit、pong、write deadline、连接关闭状态统一。
   - 每连接有界发送队列，慢客户端不阻塞其他连接。
   - 测试：慢读、半开连接、超大消息、重连替换、并发关闭、race。

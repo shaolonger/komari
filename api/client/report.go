@@ -187,13 +187,17 @@ func WebSocketReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	unsafeConn.SetReadLimit(telemetryv2.MaxFrameSize)
 	wireProtocol, err := negotiatedTelemetryProtocol(unsafeConn.Subprotocol())
 	if err != nil {
 		_ = unsafeConn.Close()
 		return
 	}
-	conn := ws.NewSafeConn(unsafeConn)
+	conn := ws.NewSafeConnWithConfig(unsafeConn, ws.ConnConfig{
+		ReadLimit:     telemetryv2.MaxFrameSize,
+		PongWait:      readWait,
+		PingPeriod:    readWait / 2,
+		QueueCapacity: 128,
+	})
 	defer conn.Close()
 
 	messageType, message, err := conn.ReadMessage()
@@ -202,12 +206,12 @@ func WebSocketReport(c *gin.Context) {
 		return
 	}
 	// 接受新连接，并处理旧连接
-	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
+	if oldConn, exists := ws.GetConnectedClient(uuid); exists {
 		observability.WSReconnected()
 		log.Printf("Client %s is reconnecting. Closing the old connection.", uuid)
 
 		// 强制关闭旧连接。这将导致旧连接的 ReadMessage() 循环出错退出。
-		go oldConn.Close()
+		_ = oldConn.Close()
 	}
 	ws.SetConnectedClients(uuid, conn)
 	observability.WSConnected()
@@ -223,8 +227,6 @@ func WebSocketReport(c *gin.Context) {
 	processMessage(conn, messageType, message, uuid, wireProtocol)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(readWait))
-
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {

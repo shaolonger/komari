@@ -30,11 +30,12 @@ func GetClients(c *gin.Context) {
 		},
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
+	conn := ws.NewSafeConnWithConfig(unsafeConn, ws.ConnConfig{ReadLimit: 4 << 10, QueueCapacity: 8})
 	defer conn.Close()
 
 	// 初始化用户信息

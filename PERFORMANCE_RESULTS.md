@@ -390,3 +390,13 @@ Apple M4/macOS arm64，10,000 个 task key 的稳定 phase 计算：
 10,000 个 next-run 只需约 0.46～0.57ms、零 heap allocation。1,000 个固定 key 在 60 秒 interval 内占据超过 990 个不同微秒 phase；worker 压力测试在 40 个 5ms 周期任务、4 槽队列下实测并发从未超过配置的 3。
 
 验证覆盖：phase 确定性/范围/分布、重复 key/worker/queue 上限拒绝、满队列背压、最大并发、context 取消、panic 隔离、连续 50 次 Ping reload、连续 50 次 Load reload 的所有旧 generation 退出、Stop 幂等、expire 长 timer 取消，以及相关 `go test -race`。仓库 `go test ./...` 与 `go vet ./...` 全部通过。
+
+## K-502 WebSocket 生命周期、Deadline 与慢消费者隔离
+
+所有长期 WebSocket 链路现在共享同一个资源受限连接实现：Agent 上报为 1 MiB read limit、11 秒 pong/read deadline、5.5 秒 server ping、128 项发送队列；Dashboard 请求限制为 4 KiB/8 项队列；JSON-RPC 为 1 MiB/32 项；Terminal 双向帧为 256 KiB/128 项。默认连接使用 1 MiB read limit、60 秒 pong deadline、25 秒 ping 和 10 秒 write deadline。每次读都会刷新 idle deadline，pong handler 也刷新 deadline；半开 TCP 在 heartbeat 写失败或 pong/read 超时后退出，不再无限占用连接和 goroutine。
+
+每个连接只拥有一个 writer goroutine，所有 data frame 和 heartbeat 都由它串行写入 Gorilla WebSocket。调用方只把已经复制/编码的不可变 payload 放入有界 channel，不再共享写锁等待网络。队列满时立即、无阻塞地标记 `komari_websocket_slow_consumers_total`，关闭底层 transport 并返回 `ErrSlowConsumer`；慢客户端不能占用其他连接的 writer，也不会为每条 JSON-RPC response 创建 goroutine。显式正常关闭最多等待 250ms 发送 Close frame；队列溢出或底层写超时直接关闭 transport，避免 Close control frame 与已卡住 writer 争锁后再次阻塞。只有“发送最后一条提示后马上关闭”的 Terminal 离线/超时路径使用有 write deadline 的同步 flush。
+
+Agent 重连改用 O(1) 单连接 lookup 并同步关闭旧连接；旧 handler 的 defer 继续通过指针条件删除，绝不会删除新连接。`Close` 由 `sync.Once` 统一状态机保证幂等，并发发送在关闭后得到稳定错误。Terminal 的 Browser/Agent 指针增加 session 级 RWMutex、原子 attach 和幂等双端关闭；session map 读取/条件删除全部受锁，修复 close handler、30 秒 timer 和双向 forward 并发访问造成的数据竞争，同时修复空 Text frame 的切片越界。
+
+确定性验证覆盖：writer 被人为永久阻塞时 1 项队列饱和，第三次发送在 100ms 预算内立即断开；server ping 失败模拟半开连接；read limit、初始/read-pong deadline、write deadline；100 个并发 Close 只触发一次底层 Close；关闭后发送；旧连接 cleanup 不删除重连替代连接。已有真实 WebSocket 集成测试继续验证超过 telemetry v2 最大帧立即断开。仓库 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 全部通过。

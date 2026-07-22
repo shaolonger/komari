@@ -73,11 +73,11 @@ func OnRpcRequest(c *gin.Context) {
 			}
 			return ws.CheckOrigin(r)
 		})
-		conn := ws.NewSafeConn(_conn)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 			return
 		}
+		conn := ws.NewSafeConnWithConfig(_conn, ws.ConnConfig{ReadLimit: 1 << 20, QueueCapacity: 32})
 		permissionGroup := detectPermissionGroup(c)
 		meta := buildContextMeta(c, permissionGroup)
 		defer conn.Close()
@@ -233,16 +233,16 @@ func dispatchByPermissionWithMeta(conn *ws.SafeConn, permissionGroup string, met
 	ctx := rpc.NewContextWithMeta(context.TODO(), meta)
 	switch fc[0] {
 	case "guest", "", "rpc", "common":
-		go conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
+		_ = conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
 	case "client":
 		if permissionGroup == "client" || permissionGroup == "admin" {
-			go conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
+			_ = conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
 		} else {
 			conn.WriteJSON(rpc.ErrorResponse(req.ID, 401, "Unauthorized", nil))
 		}
 	case "admin":
 		if permissionGroup == "admin" {
-			go conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
+			_ = conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
 		} else {
 			conn.WriteJSON(rpc.ErrorResponse(req.ID, 401, "Unauthorized", nil))
 		}
