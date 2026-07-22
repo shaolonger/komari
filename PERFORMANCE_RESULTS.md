@@ -315,3 +315,19 @@ version 3 migration 增加 hourly 表、复合唯一/时间索引和 `record_rol
 | `PlanRecordQuery` | 94.66～114.4 | 192 | 1 |
 
 验证覆盖：精确 4/5 小时切分、overlap 表中故意放置的冲突值、分钟/15m/1h 预算选择、长窗口 hourly、空表、跨节点排序与防御去重、缺表错误传播、America/New_York DST 回拨的 49 小时连续覆盖，以及 `EXPLAIN QUERY PLAN` 使用 hourly 复合索引。仓库 `go test ./...`、Records/Public 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-403 流量接口集合查询与流式聚合
+
+公开流量接口删除了“先取可见节点、再为每个节点各执行一次完整 Record 查询”的 N+1 路径。新的集合查询复用 K-402 的严格半开区间规划，把所有 tier segment 合并为一条 `UNION ALL`，每段只投影 `client,time,net_in,net_out,net_total_up,net_total_down` 六个必要字段，并由 SQLite 按 `(client,time)` 输出。最多 256 个节点时使用参数化 `IN` 下推过滤；更大舰队为规避不同 SQLite 构建的 bind-variable 上限，执行一次全舰队窄列扫描并以授权 UUID 摘要集合做进程内过滤。非 nil 空授权集合直接返回且不触碰数据库，避免“无可见节点”误解释成“所有节点”。
+
+聚合器逐行消费结果，任何时刻只保留当前一个节点的前一采样和统计状态；节点切换时立即完成结果，不物化完整 `[]Record`，也不同时保留 10,000 个中间 accumulator。计数器 delta、reset、无累计计数时的速率估算、覆盖率、峰值和 bucket 分摊与原 `SummarizeTrafficRecords` 使用同一逻辑。SQL 时间参数通过 `LocalTime` Valuer 归一化后再绑定，修复任意 offset 时间窗口与 SQLite timezone-less TEXT 表示直接比较时可能得到空结果的问题。请求 context 贯穿 `QueryContext` 和 row scan，取消会立即返回；K-401 的 per-node series 总点数预算仍在查询前执行。
+
+10,000 节点、每节点两个采样、关闭 per-node series，Apple M4/macOS arm64、单次冷基准三次结果：
+
+| 操作 | ns/op | B/op | allocs/op | SQL/op |
+|---|---:|---:|---:|---:|
+| 集合窄列扫描 + 流式聚合 | 28,508,292～29,618,958 | 15,152,272～15,152,464 | 309,646～309,650 | 1 |
+
+耗时约 28.5～29.6ms（约 350k 节点/秒），SQL 次数恒为 1，而旧接口为每个可见节点一条查询，即 10,000 节点至少 10,000 条历史 SQL。剩余 allocation 主要来自 SQLite driver 对 20,000 个 TEXT/整数列值的 materialization 以及最终 10,000 节点响应 map，不再包含完整 Record 模型和无关指标字段。
+
+验证覆盖：counter reset、采样缺口、累计计数缺失时速率回退、America/New_York offset 窗口、节点授权过滤、超过 SQL bind 阈值后的 Go 侧过滤、空授权集合零查询、context 取消、与旧聚合器逐字段对照、SQL 次数和 10k 节点 benchmark。仓库 `go test ./...`、Records/Public 专项 `go test -race`、`go vet ./...` 全部通过。

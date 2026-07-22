@@ -9,6 +9,7 @@ import (
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 )
@@ -118,16 +119,21 @@ func GetTrafficRange(c *gin.Context) {
 		BucketSizeSeconds: int64(bucketSize.Seconds()),
 		Series:            makeTrafficSeries(start, end, bucketSize, loc),
 	}
+	clientIDs := make([]string, 0, len(visibleClients))
+	for _, client := range visibleClients {
+		clientIDs = append(clientIDs, client.UUID)
+	}
+	trafficResult, err := recordsdb.StreamTrafficStats(c.Request.Context(), dbcore.GetDBInstance(), clientIDs, start, end, bucketSize, includeNodeSeries)
+	if err != nil {
+		api.RespondError(c, 500, "Failed to fetch traffic records: "+err.Error())
+		return
+	}
 
 	for _, client := range visibleClients {
-		// Include one hour before the range so the first in-range sample can be
-		// compared with a nearby baseline counter.
-		nodeRecords, err := recordsdb.GetRecordsByClientAndTime(client.UUID, start.Add(-time.Hour), end)
-		if err != nil {
-			api.RespondError(c, 500, "Failed to fetch traffic records: "+err.Error())
-			return
+		stats, ok := trafficResult.ByClient[client.UUID]
+		if !ok {
+			stats = recordsdb.EmptyTrafficStats(start, end, bucketSize, includeNodeSeries)
 		}
-		stats := recordsdb.SummarizeTrafficRecords(nodeRecords, start, end, bucketSize)
 		nodeSummary := trafficNodeSummary{
 			UUID:        client.UUID,
 			Name:        client.Name,
