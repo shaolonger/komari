@@ -400,3 +400,20 @@ Apple M4/macOS arm64，10,000 个 task key 的稳定 phase 计算：
 Agent 重连改用 O(1) 单连接 lookup 并同步关闭旧连接；旧 handler 的 defer 继续通过指针条件删除，绝不会删除新连接。`Close` 由 `sync.Once` 统一状态机保证幂等，并发发送在关闭后得到稳定错误。Terminal 的 Browser/Agent 指针增加 session 级 RWMutex、原子 attach 和幂等双端关闭；session map 读取/条件删除全部受锁，修复 close handler、30 秒 timer 和双向 forward 并发访问造成的数据竞争，同时修复空 Text frame 的切片越界。
 
 确定性验证覆盖：writer 被人为永久阻塞时 1 项队列饱和，第三次发送在 100ms 预算内立即断开；server ping 失败模拟半开连接；read limit、初始/read-pong deadline、write deadline；100 个并发 Close 只触发一次底层 Close；关闭后发送；旧连接 cleanup 不删除重连替代连接。已有真实 WebSocket 集成测试继续验证超过 telemetry v2 最大帧立即断开。仓库 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 全部通过。
+
+## K-503 Dashboard Snapshot/Delta/Sequence 与快照所有权
+
+Dashboard 状态现由单一 RWMutex 下的不可变 store 管理。写入 `common.Report` 时立即复制值、GPU 指针及 device slice；所有公开读取再次深拷贝，因此调用方清空 UUID、修正展示值或修改 GPU 数组都不可能污染随后请求、通知或其他用户的结果。旧 `/api/clients` 客户端继续发送 `get`/`get <uuid>` 并收到完全兼容的全量结构，但实现已经从安全快照读取，修复了旧 handler 的 `report.UUID = ""` 直接修改全局报告这一共享所有权错误。
+
+新客户端发送 `{"type":"subscribe","since":0}` 后收到带单调 `sequence` 的 `snapshot`，随后只在状态变化时收到合并后的 `delta`。delta 分开表达 `data`、`removed`、`online`、`offline`，并携带 `from_sequence`/`sequence`；`uuid` 可限制单节点。客户端带最后 sequence 重连时，在日志保留范围内直接续传 delta；sequence 超前或落后于日志则自动返回 `resync:true` 的当前 snapshot，也可显式发送 `{"type":"resync"}`。每条连接固定一个 read pump，报告更新使用 close-and-swap 通知 channel，状态读取与 wait channel 在同一把锁内捕获，不会在“读完状态、开始等待”之间丢 wakeup。
+
+变更日志只记录 `(sequence, uuid, kind)`，不重复保留大 Report；容量固定 16,384，使用 O(1) circular overwrite，内存上限与运行时间无关。同一节点在客户端调度延迟期间的多次上报被合并为最终状态。按连续 sequence 直接计算 ring offset，正常单 delta 不扫描完整日志。snapshot/delta 都先应用登录权限、hidden 节点与单节点过滤，再清除 report 内 UUID；匿名用户不会在报告、上下线或删除事件中看到 hidden UUID。
+
+Apple M4/macOS arm64，store 已包含 10,000 个节点：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 10k 深拷贝 snapshot | 1,295,989～1,390,314 | 4,276,935～4,276,945 | 30,034 |
+| 10k 舰队中的单节点写入 + delta | 308.2～312.1 | 656 | 4 |
+
+单节点增量约 0.31µs，CPU 相比每次重建 10k snapshot 下降约 4,200 倍，单次分配字节下降约 6,500 倍；完整 snapshot 仍保留严格所有权，且只用于首次订阅或 sequence 恢复。验证覆盖输入/输出深拷贝、嵌套 GPU slice、snapshot/delta 顺序、通知无丢失、删除/离线、journal overflow 自动恢复、匿名/admin/单节点权限过滤和 10k benchmark。仓库 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 全部通过。

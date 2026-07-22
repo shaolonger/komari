@@ -143,7 +143,7 @@
   - 每连接有界发送队列，慢客户端不阻塞其他连接。
   - 测试：慢读、半开连接、超大消息、重连替换、并发关闭、race。
 
-- [ ] **K-503 Dashboard snapshot/delta/sequence 与快照所有权**
+- [x] **K-503 Dashboard snapshot/delta/sequence 与快照所有权**
   - 修复内部报告被调用方修改。
   - 初始 snapshot 后仅发送 delta。
   - 丢 sequence 可请求重新同步。
