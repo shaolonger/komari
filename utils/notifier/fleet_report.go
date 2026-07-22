@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -8,10 +9,12 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"gorm.io/gorm"
 )
 
 type FleetReportData struct {
@@ -98,6 +101,12 @@ type fleetNodeMetrics struct {
 	warningAnomaly    bool
 }
 
+type fleetReportInputs struct {
+	recordsByClient map[string][]models.Record
+	pingByClient    map[string][]models.PingRecord
+	SQLQueries      int
+}
+
 func buildFleetOperationsReport(cadence trafficReportCadence, now time.Time, loc *time.Location, topN int) (FleetReportData, string, []models.Client, error) {
 	start, end := trafficReportWindow(cadence, now, loc)
 	allClients, err := clients.GetAllClientBasicInfo()
@@ -105,24 +114,43 @@ func buildFleetOperationsReport(cadence trafficReportCadence, now time.Time, loc
 		return FleetReportData{}, "", nil, err
 	}
 
-	recordsByClient := make(map[string][]models.Record, len(allClients))
-	pingByClient := make(map[string][]models.PingRecord, len(allClients))
-	for _, client := range allClients {
-		recs, err := recordsdb.GetRecordsByClientAndTime(client.UUID, start, end)
-		if err != nil {
-			return FleetReportData{}, "", nil, err
-		}
-		recordsByClient[client.UUID] = recs
-
-		pingRecords, err := tasks.GetPingRecords(client.UUID, -1, start, end)
-		if err != nil {
-			return FleetReportData{}, "", nil, err
-		}
-		pingByClient[client.UUID] = pingRecords
+	inputs, err := queryFleetReportInputs(context.Background(), dbcore.GetDBInstance(), allClients, start, end)
+	if err != nil {
+		return FleetReportData{}, "", nil, err
 	}
 
-	data := buildFleetReportData(allClients, recordsByClient, pingByClient, cadence, start, end, now, loc, topN)
+	data := buildFleetReportData(allClients, inputs.recordsByClient, inputs.pingByClient, cadence, start, end, now, loc, topN)
 	return data, buildFleetReportText(data), allClients, nil
+}
+
+func queryFleetReportInputs(ctx context.Context, db *gorm.DB, allClients []models.Client, start, end time.Time) (fleetReportInputs, error) {
+	inputs := fleetReportInputs{
+		recordsByClient: make(map[string][]models.Record, len(allClients)),
+		pingByClient:    make(map[string][]models.PingRecord, len(allClients)),
+	}
+	clientIDs := make([]string, 0, len(allClients))
+	for _, client := range allClients {
+		if client.UUID != "" {
+			clientIDs = append(clientIDs, client.UUID)
+		}
+	}
+	recordResult, err := recordsdb.QueryRecordsForClients(ctx, db, clientIDs, start, end, "all")
+	if err != nil {
+		return inputs, err
+	}
+	inputs.SQLQueries += recordResult.SQLQueries
+	for _, record := range recordResult.Records {
+		inputs.recordsByClient[record.Client] = append(inputs.recordsByClient[record.Client], record)
+	}
+	pingResult, err := tasks.QueryPingRecordsForClients(ctx, db, clientIDs, -1, start, end)
+	if err != nil {
+		return inputs, err
+	}
+	inputs.SQLQueries += pingResult.SQLQueries
+	for _, record := range pingResult.Records {
+		inputs.pingByClient[record.Client] = append(inputs.pingByClient[record.Client], record)
+	}
+	return inputs, nil
 }
 
 func buildFleetReportEvent(data FleetReportData, message string, allClients []models.Client, generatedAt time.Time, loc *time.Location) models.EventMessage {

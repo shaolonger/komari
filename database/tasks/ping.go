@@ -14,6 +14,13 @@ import (
 
 var ErrPingTaskNotAssigned = errors.New("ping task is not assigned to this client")
 
+const maxPingSQLClientFilter = 256
+
+type PingSetQueryResult struct {
+	Records    []models.PingRecord
+	SQLQueries int
+}
+
 // AddPingTask 创建延迟监测任务。defaultOn 表示新加入的服务器是否自动开启此监测。
 func AddPingTask(clients []string, defaultOn bool, name string, target, task_type string, interval int) (uint, error) {
 	db := dbcore.GetDBInstance()
@@ -284,4 +291,56 @@ func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.Pin
 		return nil, err
 	}
 	return records, nil
+}
+
+// QueryPingRecordsForClients performs one narrow, orphan-safe query for a set
+// of authorized clients. nil means all clients; a non-nil empty slice means no
+// clients. Large sets are filtered after one scan to avoid SQLite bind limits.
+func QueryPingRecordsForClients(ctx context.Context, db *gorm.DB, clientIDs []string, taskID int, start, end time.Time) (PingSetQueryResult, error) {
+	result := PingSetQueryResult{}
+	if db == nil {
+		return result, errors.New("ping database is required")
+	}
+	if ctx == nil {
+		return result, errors.New("ping query context is required")
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return result, errors.New("invalid ping query range")
+	}
+	if clientIDs != nil && len(clientIDs) == 0 {
+		result.Records = []models.PingRecord{}
+		return result, nil
+	}
+	query := db.WithContext(ctx).Model(&models.PingRecord{}).
+		Select("ping_records.client,ping_records.task_id,ping_records.time,ping_records.value").
+		Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_records.task_id").
+		Where("ping_records.time >= ? AND ping_records.time <= ?", models.FromTime(start), models.FromTime(end))
+	filterInSQL := len(clientIDs) > 0 && len(clientIDs) <= maxPingSQLClientFilter
+	if filterInSQL {
+		query = query.Where("ping_records.client IN ?", clientIDs)
+	}
+	if taskID >= 0 {
+		query = query.Where("ping_records.task_id = ?", uint(taskID))
+	}
+	result.SQLQueries = 1
+	if err := query.Order("ping_records.client ASC,ping_records.task_id ASC,ping_records.time DESC").Find(&result.Records).Error; err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if !filterInSQL && len(clientIDs) > 0 {
+		allowed := make(map[string]struct{}, len(clientIDs))
+		for _, clientID := range clientIDs {
+			allowed[clientID] = struct{}{}
+		}
+		filtered := result.Records[:0]
+		for _, record := range result.Records {
+			if _, ok := allowed[record.Client]; ok {
+				filtered = append(filtered, record)
+			}
+		}
+		result.Records = filtered
+	}
+	return result, nil
 }

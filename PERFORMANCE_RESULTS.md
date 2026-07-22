@@ -331,3 +331,24 @@ version 3 migration 增加 hourly 表、复合唯一/时间索引和 `record_rol
 耗时约 28.5～29.6ms（约 350k 节点/秒），SQL 次数恒为 1，而旧接口为每个可见节点一条查询，即 10,000 节点至少 10,000 条历史 SQL。剩余 allocation 主要来自 SQLite driver 对 20,000 个 TEXT/整数列值的 materialization 以及最终 10,000 节点响应 map，不再包含完整 Record 模型和无关指标字段。
 
 验证覆盖：counter reset、采样缺口、累计计数缺失时速率回退、America/New_York offset 窗口、节点授权过滤、超过 SQL bind 阈值后的 Go 侧过滤、空授权集合零查询、context 取消、与旧聚合器逐字段对照、SQL 次数和 10k 节点 benchmark。仓库 `go test ./...`、Records/Public 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-404 舰队报告、负载/流量通知与 Ping 统计集合化
+
+新增通用的授权节点集合查询：K-402 规划出的多个物理 tier 被拼成一条参数化 `UNION ALL`，字段仍由 K-401 固定 allowlist 决定，并按 `(client,time)` 排序返回。nil client set 明确表示内部全量查询，非 nil 空集合表示无授权节点且执行 0 SQL。最多 256 个节点时把 `IN` 下推 SQLite；更大集合只扫描窄时间窗口并在进程内再次按授权集合过滤，从而在不同 SQLite bind-variable 配置上仍保持一次查询且不泄漏非请求节点。Ping 提供对应的窄列集合查询，只读取 `client,task_id,time,value`，继续通过 `INNER JOIN ping_tasks` 隐藏旧库孤儿记录。
+
+四条业务链路完成集合化：
+
+- 舰队报告先用一次 Record 集合查询和一次 Ping 集合查询构建两个 per-client map，再复用原有纯统计逻辑；完整报告连同一次 client metadata 读取恒为 3 条 SQL，替代原 `1 + 2N`。
+- 相同 interval 的负载通知不再为每个 task、每个 client 重读历史；一个调度 tick 只读取一次 client metadata、一次该 interval 的 Record 集合。RAM/swap/disk 百分比从预取 metadata map 计算，删除了每条 Record 内的 Client 查询；已执行任务的 `last_notified` 也合并为一次集合 UPDATE。
+- 日/周/月流量通知先按 cadence 分组，每个 cadence 使用 K-403 一次性统计全部到期节点，成功投递节点再用一次集合 UPDATE 标记。无论节点数多少，一个 tick 最多为 notification/client 读取各 1 次，加 3 次流量读取和 3 次写回。
+- Dashboard JSON-RPC 先读取一次 Ping task，再把所有节点缓存 miss 合并为一条 Ping 查询。task assignment 预编译为 `client → task IDs` 集合，消除原 records × tasks 内层线性查找；每节点缓存键和 1 分钟 TTL 兼容不变。
+
+1,000 节点 × 10 个同 interval CPU 任务，共 10,000 次 task/client 判定，Apple M4/macOS arm64、单次冷基准三次结果：
+
+| 操作 | ns/op | B/op | allocs/op | SQL/op |
+|---|---:|---:|---:|---:|
+| client 集合读取 + Record 集合读取 + 10k 判定 | 15,662,250～18,915,917 | 28,872,840～28,883,768 | 107,585～107,663 | 2 |
+
+端到端约 15.7～18.9ms；旧实现仅 Record 查询就需要 10,000 条 SQL，百分比指标还会按每条 Record 再查询一次 Client，新实现稳定为 2 条读取 SQL。该基准保留完整 Client 模型是为了通知模板兼容，主要 allocation 来自 1,000 个完整节点模型和 GORM/SQLite materialization，不再随 task × client 乘积产生数据库往返。
+
+验证覆盖：集合结果与逐节点旧查询/旧纯统计逐字段对照、CPU/RAM 阈值、ratio/cooldown、无数据节点、隐藏节点在全局运维报告与显式通知中的正确保留、授权集合过滤、超 bind 阈值过滤、空授权集合零查询、孤儿 Ping 排除、Dashboard Ping avg/p50/p99/tail/loss/latest 兼容、缓存命中零查询、取消、SQL 次数和 10k assignment benchmark。仓库 `go test ./...`、Records/Tasks/Notifier/JSON-RPC 专项 `go test -race`、`go vet ./...` 全部通过。

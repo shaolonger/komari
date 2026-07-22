@@ -165,3 +165,36 @@ func TestSavePingRecordUsesValidatedWriter(t *testing.T) {
 		t.Fatalf("unassigned ping result error = %v", err)
 	}
 }
+
+func TestQueryPingRecordsForClientsUsesOneNarrowAuthorizedQuery(t *testing.T) {
+	db := resetPingTaskData(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	taskA := createPingTask(t, db, "ping-set-a")
+	taskB := createPingTask(t, db, "ping-set-b")
+	rows := []models.PingRecord{
+		{Client: "ping-set-a", TaskId: taskA.Id, Time: models.FromTime(now.Add(-2 * time.Minute)), Value: 10},
+		{Client: "ping-set-a", TaskId: taskA.Id, Time: models.FromTime(now.Add(-time.Minute)), Value: 20},
+		{Client: "ping-set-b", TaskId: taskB.Id, Time: models.FromTime(now.Add(-time.Minute)), Value: 999},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := QueryPingRecordsForClients(context.Background(), db, []string{"ping-set-a"}, -1, now.Add(-time.Hour), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SQLQueries != 1 || len(result.Records) != 2 {
+		t.Fatalf("records=%+v queries=%d, want 2/1", result.Records, result.SQLQueries)
+	}
+	for _, record := range result.Records {
+		if record.Client != "ping-set-a" || record.TaskId != taskA.Id {
+			t.Fatalf("unauthorized or wrong-task record leaked: %+v", record)
+		}
+	}
+
+	empty, err := QueryPingRecordsForClients(context.Background(), db, []string{}, -1, now.Add(-time.Hour), now)
+	if err != nil || empty.SQLQueries != 0 || len(empty.Records) != 0 {
+		t.Fatalf("empty authorized query=%+v err=%v", empty, err)
+	}
+}

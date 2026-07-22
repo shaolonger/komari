@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -72,19 +73,49 @@ func CheckTrafficReportOnce(now time.Time) {
 		clientsByUUID[client.UUID] = client
 	}
 
+	type pendingReport struct {
+		client models.Client
+	}
+	pendingByCadence := make(map[trafficReportCadence][]pendingReport, len(trafficReportCadenceOrder))
 	for _, notification := range notifications {
 		client, ok := clientsByUUID[notification.Client]
 		if !ok {
 			continue
 		}
 		for _, cadence := range dueTrafficReportCadences(notification, localNow) {
-			if err := sendTrafficReport(client, cadence, localNow, loc); err != nil {
-				slog.Error("failed to send traffic report", "client", client.UUID, "cadence", cadence, "error", err)
+			pendingByCadence[cadence] = append(pendingByCadence[cadence], pendingReport{client: client})
+		}
+	}
+
+	for _, cadence := range trafficReportCadenceOrder {
+		pending := pendingByCadence[cadence]
+		if len(pending) == 0 {
+			continue
+		}
+		start, end := trafficReportWindow(cadence, localNow, loc)
+		clientIDs := make([]string, 0, len(pending))
+		for _, report := range pending {
+			clientIDs = append(clientIDs, report.client.UUID)
+		}
+		statsResult, err := recordsdb.StreamTrafficStats(context.Background(), dbcore.GetDBInstance(), clientIDs, start, end, 0, false)
+		if err != nil {
+			slog.Error("failed to query traffic reports", "cadence", cadence, "error", err)
+			continue
+		}
+		sentClients := make([]string, 0, len(pending))
+		for _, report := range pending {
+			stats, ok := statsResult.ByClient[report.client.UUID]
+			if !ok {
+				stats = recordsdb.EmptyTrafficStats(start, end, 0, false)
+			}
+			if err := sendTrafficReportWithStats(report.client, cadence, localNow, loc, start, end, stats); err != nil {
+				slog.Error("failed to send traffic report", "client", report.client.UUID, "cadence", cadence, "error", err)
 				continue
 			}
-			if err := markTrafficReportNotified(notification.Client, cadence, localNow); err != nil {
-				slog.Error("failed to mark traffic report notification", "client", client.UUID, "cadence", cadence, "error", err)
-			}
+			sentClients = append(sentClients, report.client.UUID)
+		}
+		if err := markTrafficReportsNotified(sentClients, cadence, localNow); err != nil {
+			slog.Error("failed to mark traffic report notifications", "cadence", cadence, "error", err)
 		}
 	}
 }
@@ -170,11 +201,18 @@ func sameLocalDay(left, right time.Time) bool {
 
 func sendTrafficReport(client models.Client, cadence trafficReportCadence, now time.Time, loc *time.Location) error {
 	start, end := trafficReportWindow(cadence, now, loc)
-	recs, err := recordsdb.GetRecordsByClientAndTime(client.UUID, start, end)
+	result, err := recordsdb.StreamTrafficStats(context.Background(), dbcore.GetDBInstance(), []string{client.UUID}, start, end, 0, false)
 	if err != nil {
 		return err
 	}
-	stats := recordsdb.SummarizeTrafficRecords(recs, start, end, 0)
+	stats, ok := result.ByClient[client.UUID]
+	if !ok {
+		stats = recordsdb.EmptyTrafficStats(start, end, 0, false)
+	}
+	return sendTrafficReportWithStats(client, cadence, now, loc, start, end, stats)
+}
+
+func sendTrafficReportWithStats(client models.Client, cadence trafficReportCadence, now time.Time, loc *time.Location, start, end time.Time, stats recordsdb.TrafficStats) error {
 	message := buildTrafficReportMessage(client, cadence, start, end, stats, loc)
 	return messageSender.SendEvent(models.EventMessage{
 		Event:    messageevent.TrafficReport,
@@ -220,6 +258,13 @@ func startOfLocalMonth(t time.Time, loc *time.Location) time.Time {
 }
 
 func markTrafficReportNotified(client string, cadence trafficReportCadence, notifiedAt time.Time) error {
+	return markTrafficReportsNotified([]string{client}, cadence, notifiedAt)
+}
+
+func markTrafficReportsNotified(clientIDs []string, cadence trafficReportCadence, notifiedAt time.Time) error {
+	if len(clientIDs) == 0 {
+		return nil
+	}
 	column := ""
 	switch cadence {
 	case trafficReportDaily:
@@ -233,7 +278,7 @@ func markTrafficReportNotified(client string, cadence trafficReportCadence, noti
 	}
 	return dbcore.GetDBInstance().
 		Model(&models.TrafficReportNotification{}).
-		Where("client = ?", client).
+		Where("client IN ?", clientIDs).
 		Update(column, models.FromTime(notifiedAt)).Error
 }
 

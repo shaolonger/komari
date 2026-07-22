@@ -1,17 +1,18 @@
 package notifier
 
 import (
+	"context"
 	"log"
 	"reflect"
 	"sync"
 	"time"
 
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
 
 // LoadNotificationService 管理定时器和任务
@@ -56,9 +57,7 @@ func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotifica
 			for {
 				select {
 				case <-ticker.C:
-					for _, task := range tasks {
-						go executeLoadNotificationTask(task)
-					}
+					go executeLoadNotificationTasks(tasks)
 				case <-m.stopChan:
 					return
 				}
@@ -71,51 +70,51 @@ func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotifica
 
 // executeLoadNotificationTask 执行单个LoadNotificationTask
 func executeLoadNotificationTask(task models.LoadNotification) {
-	// 检查是否在冷却期内
-	if shouldSkipNotification(task) {
+	executeLoadNotificationTasks([]models.LoadNotification{task})
+}
+
+func executeLoadNotificationTasks(loadTasks []models.LoadNotification) {
+	now := time.Now()
+	results, _, err := evaluateLoadNotificationTasks(context.Background(), dbcore.GetDBInstance(), loadTasks, now)
+	if err != nil {
+		log.Printf("Failed to evaluate load notification tasks: %v", err)
 		return
 	}
-
-	now := time.Now()
-	windowStart := now.Add(-time.Duration(task.Interval) * time.Minute)
-	overloadClients := make([]string, 0)
-	for _, clientUUID := range task.Clients {
-		// 获取客户端在时间窗口内的记录
-		records, err := getRecordsForClient(clientUUID, windowStart, now)
-		if err != nil {
+	dueTaskIDs := make([]uint, 0, len(results))
+	for _, task := range loadTasks {
+		clientsForTask, ok := results[task.Id]
+		if !ok {
 			continue
 		}
-
-		// 检查指标是否达到阈值
-		if checkMetricThreshold(records, task) {
-			overloadClients = append(overloadClients, clientUUID)
-		}
-
+		dueTaskIDs = append(dueTaskIDs, task.Id)
+		sendLoadNotificationClients(clientsForTask, task)
 	}
-	sendLoadNotification(overloadClients, task)
-	updateLastNotified(task.Id, now)
+	updateLastNotifiedTasks(dueTaskIDs, now)
 }
 
 // shouldSkipNotification 检查是否应该跳过通知（冷却期检查）
 func shouldSkipNotification(task models.LoadNotification) bool {
+	return shouldSkipNotificationAt(task, time.Now())
+}
+
+func shouldSkipNotificationAt(task models.LoadNotification, now time.Time) bool {
 	if task.LastNotified.ToTime().IsZero() {
 		return false
 	}
 
 	// 计算冷却期（使用 interval 作为冷却期）
 	cooldownPeriod := time.Duration(task.Interval) * time.Minute
-	timeSinceLastNotified := time.Since(task.LastNotified.ToTime())
+	timeSinceLastNotified := now.Sub(task.LastNotified.ToTime())
 
 	return timeSinceLastNotified < cooldownPeriod
 }
 
-// getRecordsForClient 获取指定客户端在时间窗口内的记录
-func getRecordsForClient(clientUUID string, start, end time.Time) ([]models.Record, error) {
-	return records.GetRecordsByClientAndTime(clientUUID, start, end)
-}
-
 // checkMetricThreshold 检查指标是否达到阈值
 func checkMetricThreshold(records []models.Record, task models.LoadNotification) bool {
+	return checkMetricThresholdWithClients(records, task, nil)
+}
+
+func checkMetricThresholdWithClients(records []models.Record, task models.LoadNotification, clientByUUID map[string]models.Client) bool {
 	if len(records) == 0 {
 		return false
 	}
@@ -129,7 +128,11 @@ func checkMetricThreshold(records []models.Record, task models.LoadNotification)
 	exceededCount := 0
 
 	for _, record := range records {
-		metricValue := getMetricValue(record, task.Metric)
+		client := clientByUUID[record.Client]
+		if clientByUUID == nil {
+			client = models.Client{UUID: record.Client, MemTotal: record.RamTotal, SwapTotal: record.SwapTotal, DiskTotal: record.DiskTotal}
+		}
+		metricValue := getMetricValueForClient(record, task.Metric, client)
 		if metricValue >= task.Threshold {
 			exceededCount++
 		}
@@ -140,6 +143,12 @@ func checkMetricThreshold(records []models.Record, task models.LoadNotification)
 
 // getMetricValue 根据指标名称获取记录中的对应值
 func getMetricValue(record models.Record, metric string) float32 {
+	return getMetricValueForClient(record, metric, models.Client{
+		UUID: record.Client, MemTotal: record.RamTotal, SwapTotal: record.SwapTotal, DiskTotal: record.DiskTotal,
+	})
+}
+
+func getMetricValueForClient(record models.Record, metric string, client models.Client) float32 {
 	switch metric {
 	case "cpu":
 		return record.Cpu
@@ -150,22 +159,12 @@ func getMetricValue(record models.Record, metric string) float32 {
 	case "net_out", "netout":
 		return bytesPerSecondToMbps(record.NetOut)
 	case "ram":
-		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
-		if err != nil {
-			log.Printf("Failed to get client info for %s: %v", record.Client, err)
-			return 0
-		}
-		if record.RamTotal > 0 {
+		if record.RamTotal > 0 && client.MemTotal > 0 {
 			return float32(record.Ram) / float32(client.MemTotal) * 100
 		}
 		return 0
 	case "swap":
-		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
-		if err != nil {
-			log.Printf("Failed to get client info for %s: %v", record.Client, err)
-			return 0
-		}
-		if record.SwapTotal > 0 {
+		if record.SwapTotal > 0 && client.SwapTotal > 0 {
 			return float32(record.Swap) / float32(client.SwapTotal) * 100
 		}
 		return 0
@@ -174,12 +173,7 @@ func getMetricValue(record models.Record, metric string) float32 {
 	case "temp":
 		return record.Temp
 	case "disk":
-		client, err := clients.GetClientByUUID(record.Client) // 确保客户端信息已加载
-		if err != nil {
-			log.Printf("Failed to get client info for %s: %v", record.Client, err)
-			return 0
-		}
-		if record.DiskTotal > 0 {
+		if record.DiskTotal > 0 && client.DiskTotal > 0 {
 			return float32(record.Disk) / float32(client.DiskTotal) * 100
 		}
 		return 0
@@ -201,6 +195,67 @@ func getMetricValue(record models.Record, metric string) float32 {
 	}
 }
 
+// evaluateLoadNotificationTasks groups tasks by interval, scans each interval
+// once, and reuses a single client metadata query for percentage metrics.
+func evaluateLoadNotificationTasks(ctx context.Context, db *gorm.DB, loadTasks []models.LoadNotification, now time.Time) (map[uint][]models.Client, int, error) {
+	results := make(map[uint][]models.Client)
+	dueByInterval := make(map[int][]models.LoadNotification)
+	for _, task := range loadTasks {
+		if task.Interval <= 0 || shouldSkipNotificationAt(task, now) {
+			continue
+		}
+		dueByInterval[task.Interval] = append(dueByInterval[task.Interval], task)
+		results[task.Id] = []models.Client{}
+	}
+	if len(dueByInterval) == 0 {
+		return results, 0, nil
+	}
+	var allClients []models.Client
+	if err := db.WithContext(ctx).Find(&allClients).Error; err != nil {
+		return nil, 1, err
+	}
+	queries := 1
+	clientByUUID := make(map[string]models.Client, len(allClients))
+	for _, client := range allClients {
+		clientByUUID[client.UUID] = client
+	}
+	for interval, intervalTasks := range dueByInterval {
+		clientSet := make(map[string]struct{})
+		for _, task := range intervalTasks {
+			for _, clientID := range task.Clients {
+				if _, ok := clientByUUID[clientID]; ok {
+					clientSet[clientID] = struct{}{}
+				}
+			}
+		}
+		clientIDs := make([]string, 0, len(clientSet))
+		for clientID := range clientSet {
+			clientIDs = append(clientIDs, clientID)
+		}
+		queryResult, err := records.QueryRecordsForClients(ctx, db, clientIDs, now.Add(-time.Duration(interval)*time.Minute), now, "all")
+		queries += queryResult.SQLQueries
+		if err != nil {
+			return nil, queries, err
+		}
+		recordsByClient := make(map[string][]models.Record, len(clientIDs))
+		for _, record := range queryResult.Records {
+			recordsByClient[record.Client] = append(recordsByClient[record.Client], record)
+		}
+		for _, task := range intervalTasks {
+			for _, clientID := range task.Clients {
+				client, ok := clientByUUID[clientID]
+				if !ok {
+					continue
+				}
+				if checkMetricThresholdWithClients(recordsByClient[clientID], task, clientByUUID) {
+					results[task.Id] = append(results[task.Id], client)
+				}
+			}
+		}
+	}
+	return results, queries, nil
+}
+
 func bytesPerSecondToMbps(bytesPerSecond int64) float32 {
 	if bytesPerSecond <= 0 {
 		return 0
@@ -211,21 +266,14 @@ func bytesPerSecondToMbps(bytesPerSecond int64) float32 {
 }
 
 // sendLoadNotification 发送负载通知
-func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
-	ex_clients := []models.Client{}
-	for _, clientUUID := range clientUUIDs {
-		cl, err := clients.GetClientByUUID(clientUUID)
-		if err == nil {
-			ex_clients = append(ex_clients, cl)
-		}
-	}
-	if len(ex_clients) == 0 {
+func sendLoadNotificationClients(matchedClients []models.Client, task models.LoadNotification) {
+	if len(matchedClients) == 0 {
 		return
 	}
 	go func() {
 		messageSender.SendEvent(models.EventMessage{
 			Event:   messageevent.Alert,
-			Clients: ex_clients,
+			Clients: matchedClients,
 			Time:    time.Now(),
 			Emoji:   "⚠️",
 			Message: task.Name,
@@ -235,9 +283,16 @@ func sendLoadNotification(clientUUIDs []string, task models.LoadNotification) {
 
 // updateLastNotified 更新最后通知时间
 func updateLastNotified(taskId uint, notifyTime time.Time) {
+	updateLastNotifiedTasks([]uint{taskId}, notifyTime)
+}
+
+func updateLastNotifiedTasks(taskIDs []uint, notifyTime time.Time) {
+	if len(taskIDs) == 0 {
+		return
+	}
 	db := dbcore.GetDBInstance()
-	if err := db.Model(&models.LoadNotification{}).Where("id = ?", taskId).Update("last_notified", notifyTime).Error; err != nil {
-		log.Printf("Failed to update last_notified for task %d: %v", taskId, err)
+	if err := db.Model(&models.LoadNotification{}).Where("id IN ?", taskIDs).Update("last_notified", notifyTime).Error; err != nil {
+		log.Printf("Failed to update last_notified for tasks %v: %v", taskIDs, err)
 	}
 }
 

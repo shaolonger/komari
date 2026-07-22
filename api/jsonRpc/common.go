@@ -21,6 +21,7 @@ import (
 	"github.com/komari-monitor/komari/ws"
 
 	cache "github.com/patrickmn/go-cache"
+	"gorm.io/gorm"
 )
 
 // pingstats:<uuid>
@@ -41,41 +42,91 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 	if uuid == "" {
 		return map[string]pingStat{}
 	}
-	key := fmt.Sprintf("pingstats:%s", uuid)
-	if v, ok := pingStatsCache.Get(key); ok {
-		if m, ok2 := v.(map[string]pingStat); ok2 {
-			return m
+	stats := getPingStatsForNodes([]string{uuid}, pingTasks)[uuid]
+	if stats == nil {
+		return map[string]pingStat{}
+	}
+	return stats
+}
+
+// getPingStatsForNodes resolves all cache misses with one Ping query instead
+// of issuing one query for every dashboard node.
+func getPingStatsForNodes(uuids []string, pingTasks []models.PingTask) map[string]map[string]pingStat {
+	results, _ := getPingStatsForNodesAt(context.Background(), dbcore.GetDBInstance(), uuids, pingTasks, time.Now())
+	return results
+}
+
+func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pingTasks []models.PingTask, end time.Time) (map[string]map[string]pingStat, int) {
+	results := make(map[string]map[string]pingStat, len(uuids))
+	assignedByClient := make(map[string][]models.PingTask, len(uuids))
+	queryClients := make([]string, 0, len(uuids))
+	seen := make(map[string]struct{}, len(uuids))
+	for _, uuid := range uuids {
+		if uuid == "" {
+			continue
 		}
-	}
-	// 筛选属于该节点的任务
-	assigned := make([]models.PingTask, 0, 4)
-	for _, t := range pingTasks {
-		if t.AppliesToClient(uuid) {
-			assigned = append(assigned, t)
+		if _, ok := seen[uuid]; ok {
+			continue
 		}
-	}
-	if len(assigned) == 0 {
-		empty := map[string]pingStat{}
-		pingStatsCache.Set(key, empty, cache.DefaultExpiration)
-		return empty
-	}
-	end := time.Now()
-	start := end.Add(-1 * time.Hour)
-	recs, err := tasks.GetPingRecords(uuid, -1, start, end)
-	if err != nil || len(recs) == 0 {
-		empty := map[string]pingStat{}
-		pingStatsCache.Set(key, empty, cache.DefaultExpiration)
-		return empty
-	}
-	grouped := make(map[uint][]models.PingRecord)
-	for _, r := range recs {
-		for _, t := range assigned {
-			if r.TaskId == t.Id {
-				grouped[r.TaskId] = append(grouped[r.TaskId], r)
-				break
+		seen[uuid] = struct{}{}
+		key := fmt.Sprintf("pingstats:%s", uuid)
+		if value, ok := pingStatsCache.Get(key); ok {
+			if cached, valid := value.(map[string]pingStat); valid {
+				results[uuid] = cached
+				continue
 			}
 		}
+		for _, task := range pingTasks {
+			if task.AppliesToClient(uuid) {
+				assignedByClient[uuid] = append(assignedByClient[uuid], task)
+			}
+		}
+		if len(assignedByClient[uuid]) == 0 {
+			empty := map[string]pingStat{}
+			results[uuid] = empty
+			pingStatsCache.Set(key, empty, cache.DefaultExpiration)
+			continue
+		}
+		queryClients = append(queryClients, uuid)
 	}
+	if len(queryClients) == 0 {
+		return results, 0
+	}
+	queryResult, err := tasks.QueryPingRecordsForClients(ctx, db, queryClients, -1, end.Add(-time.Hour), end)
+	if err != nil {
+		for _, uuid := range queryClients {
+			empty := map[string]pingStat{}
+			results[uuid] = empty
+			pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), empty, cache.DefaultExpiration)
+		}
+		return results, queryResult.SQLQueries
+	}
+	grouped := make(map[string]map[uint][]models.PingRecord, len(queryClients))
+	assignedIDs := make(map[string]map[uint]struct{}, len(queryClients))
+	for _, uuid := range queryClients {
+		assignedIDs[uuid] = make(map[uint]struct{}, len(assignedByClient[uuid]))
+		for _, task := range assignedByClient[uuid] {
+			assignedIDs[uuid][task.Id] = struct{}{}
+		}
+	}
+	for _, record := range queryResult.Records {
+		if _, ok := assignedIDs[record.Client][record.TaskId]; !ok {
+			continue
+		}
+		if grouped[record.Client] == nil {
+			grouped[record.Client] = make(map[uint][]models.PingRecord)
+		}
+		grouped[record.Client][record.TaskId] = append(grouped[record.Client][record.TaskId], record)
+	}
+	for _, uuid := range queryClients {
+		stats := summarizeNodePingStats(assignedByClient[uuid], grouped[uuid])
+		results[uuid] = stats
+		pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), stats, cache.DefaultExpiration)
+	}
+	return results, queryResult.SQLQueries
+}
+
+func summarizeNodePingStats(assigned []models.PingTask, grouped map[uint][]models.PingRecord) map[string]pingStat {
 	result := make(map[string]pingStat, len(grouped))
 	for _, t := range assigned {
 		records := grouped[t.Id]
@@ -160,7 +211,6 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 			Max:    maxLat,
 		}
 	}
-	pingStatsCache.Set(key, result, cache.DefaultExpiration)
 	return result
 }
 
@@ -349,12 +399,17 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 
 	// 预取所有 ping 任务
 	pingTasks, _ := tasks.GetAllPingTasks()
+	pingClientIDs := make([]string, 0, len(latest))
+	for uuid := range latest {
+		pingClientIDs = append(pingClientIDs, uuid)
+	}
+	pingStatsByClient := getPingStatsForNodes(pingClientIDs, pingTasks)
 
 	appendOne := func(uuid string, rep *common.Report) {
 		if rep == nil {
 			return
 		}
-		stats := getPingStatsForNode(uuid, pingTasks)
+		stats := pingStatsByClient[uuid]
 		rl := recordLike{
 			Client:         uuid,
 			Time:           models.FromTime(rep.UpdatedAt),

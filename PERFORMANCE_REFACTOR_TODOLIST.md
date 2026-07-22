@@ -120,7 +120,7 @@
   - 限制 include_node_series 预算。
   - 测试：counter reset、缺口、时区、节点过滤、SQL 次数、10k 节点 benchmark。
 
-- [ ] **K-404 舰队报告、负载/流量通知和 Ping 统计集合化**
+- [x] **K-404 舰队报告、负载/流量通知和 Ping 统计集合化**
   - 消灭 `2N+1` 查询和 task × records 重复扫描。
   - 使用一次/常数次查询完成分组统计。
   - 测试：结果与旧实现对照、空节点、隐藏节点、SQL 次数、benchmark。
