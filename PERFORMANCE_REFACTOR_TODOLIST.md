@@ -29,7 +29,7 @@
   - 输出 allocations/op、bytes/op、p50/p95/p99、SQL 次数和峰值内存。
   - 测试：benchmark smoke、回放器小规模集成、`go test -race`。
 
-- [ ] **K-002 增加受控运行时性能指标和诊断入口**
+- [x] **K-002 增加受控运行时性能指标和诊断入口**
   - 增加接收、队列、批次、SQLite、压缩、查询和 WS 指标。
   - pprof/trace 默认关闭或仅绑定 loopback/受保护管理面。
   - 禁止敏感高基数标签。

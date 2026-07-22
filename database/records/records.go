@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/observability"
 )
 
 func RecordOne(rec models.Record) error {
@@ -39,8 +40,11 @@ func DeleteAll() error {
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据
 func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.GPURecord, error) {
+	started := time.Now()
+	queryFailed := false
 	db := dbcore.GetDBInstance()
 	var records []models.GPURecord
+	defer func() { observability.ObserveQuery(len(records), time.Since(started), queryFailed) }()
 
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
 
@@ -53,6 +57,7 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).
 			Order("time ASC, device_index ASC").Find(&recentRecords).Error
 		if err != nil {
+			queryFailed = true
 			log.Printf("Error fetching recent GPU records for client %s between %s and %s: %v", uuid, recentStart, end, err)
 			return nil, err
 		}
@@ -62,6 +67,7 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 	err := db.Table("gpu_records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).
 		Order("time ASC, device_index ASC").Find(&longTermRecords).Error
 	if err != nil {
+		queryFailed = true
 		log.Printf("Error fetching long-term GPU records for client %s between %s and %s: %v", uuid, start, end, err)
 		return recentRecords, nil
 	}
@@ -88,8 +94,11 @@ func DeleteRecordBefore(before time.Time) error {
 }
 
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
+	started := time.Now()
+	queryFailed := false
 	db := dbcore.GetDBInstance()
 	var records []models.Record
+	defer func() { observability.ObserveQuery(len(records), time.Since(started), queryFailed) }()
 
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
 
@@ -101,6 +110,7 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 		}
 		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).Order("time ASC").Find(&recentRecords).Error
 		if err != nil {
+			queryFailed = true
 			log.Printf("Error fetching recent records for client %s between %s and %s: %v", uuid, recentStart, end, err)
 			return nil, err
 		}
@@ -109,6 +119,7 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 	var long_term []models.Record
 	err := db.Table("records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).Order("time ASC").Find(&long_term).Error
 	if err != nil {
+		queryFailed = true
 		log.Printf("Error fetching long-term records for client %s between %s and %s: %v", uuid, start, end, err)
 		return recentRecords, nil
 	}
@@ -158,9 +169,11 @@ func GetAllRecords() ([]models.Record, error) {
 }
 
 // 压缩数据库
-func CompactRecord() error {
+func CompactRecord() (err error) {
+	started := time.Now()
+	defer func() { observability.ObserveCompression(0, time.Since(started), err != nil) }()
 	db := dbcore.GetDBInstance()
-	err := migrateOldRecords(db)
+	err = migrateOldRecords(db)
 	if err != nil {
 		log.Printf("Error migrating old records: %v", err)
 		return err

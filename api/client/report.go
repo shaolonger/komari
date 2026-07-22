@@ -18,6 +18,7 @@ import (
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/observability"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
@@ -98,7 +99,12 @@ func postPresenceExpired(uuid string, connID int64, gen uint64) {
 }
 
 func UploadReport(c *gin.Context) {
+	started := time.Now()
+	accepted := false
+	bodySize := 0
+	defer func() { observability.ObserveReport(bodySize, time.Since(started), accepted) }()
 	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodySize = len(bodyBytes)
 	if err != nil {
 		log.Println("Failed to read request body:", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
@@ -138,6 +144,7 @@ func UploadReport(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%v", err)})
 		return
 	}
+	accepted = true
 	// Update report with method and token
 
 	ws.SetLatestReport(uuid, &report)
@@ -202,15 +209,18 @@ func WebSocketReport(c *gin.Context) {
 
 	// 接受新连接，并处理旧连接
 	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
+		observability.WSReconnected()
 		log.Printf("Client %s is reconnecting. Closing the old connection.", uuid)
 
 		// 强制关闭旧连接。这将导致旧连接的 ReadMessage() 循环出错退出。
 		go oldConn.Close()
 	}
 	ws.SetConnectedClients(uuid, conn)
+	observability.WSConnected()
 	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
+		observability.WSDisconnected()
 		ws.DeleteClientConditionally(uuid, conn)
 		notifier.OfflineNotification(uuid, conn.ID)
 	}()
@@ -234,6 +244,9 @@ func WebSocketReport(c *gin.Context) {
 
 // 将消息处理逻辑提取到一个函数中，方便复用
 func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid string, wireProtocol telemetryProtocol) {
+	started := time.Now()
+	accepted := false
+	defer func() { observability.ObserveReport(len(message), time.Since(started), accepted) }()
 	if messageType == websocket.BinaryMessage {
 		if wireProtocol != telemetryProtocolV2 {
 			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Binary telemetry requires protocol v2"})
@@ -251,6 +264,7 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 			return
 		}
 		ws.SetLatestReport(uuid, &report)
+		accepted = true
 		return
 	}
 	if messageType != websocket.TextMessage {
@@ -282,6 +296,7 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 			return
 		}
 		ws.SetLatestReport(uuid, &report)
+		accepted = true
 	case "ping_result":
 		var reqBody struct {
 			PingTaskID uint      `json:"task_id"`
@@ -305,6 +320,8 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 			// orphaned history row; the agent will receive the next schedule from
 			// the refreshed task list.
 			log.Printf("Discarded ping result for client %s, task %d: %v", uuid, reqBody.PingTaskID, err)
+		} else {
+			accepted = true
 		}
 	default:
 		log.Printf("Unknown message type: %s", msgType.Type)

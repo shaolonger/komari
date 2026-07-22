@@ -61,6 +61,7 @@ func init() {
 	// 从环境变量获取监听地址
 	listenAddr := GetEnv("KOMARI_LISTEN", "0.0.0.0:25774")
 	ServerCmd.PersistentFlags().StringVarP(&flags.Listen, "listen", "l", listenAddr, "监听地址 [env: KOMARI_LISTEN]")
+	ServerCmd.PersistentFlags().BoolVar(&flags.Diagnostics, "diagnostics", GetEnv("KOMARI_DIAGNOSTICS", "false") == "true", "启用受管理员认证保护的 pprof/trace [env: KOMARI_DIAGNOSTICS]")
 	RootCmd.AddCommand(ServerCmd)
 }
 
@@ -216,6 +217,7 @@ func RunServer() {
 	// #region 管理员
 	adminAuthrized := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
 	{
+		admin.RegisterDiagnostics(adminAuthrized, flags.Diagnostics)
 		adminAuthrized.GET("/download/backup", admin.DownloadBackup)
 		adminAuthrized.POST("/upload/backup", admin.UploadBackup)
 		// test

@@ -6,7 +6,7 @@
 
 已增加六类基准：JSON/v2 报告解码、60/600 样本分钟聚合、256 行批写、2,000 行历史压缩、10 万行表上的范围查询，以及 10,000 点流量汇总。数据库基准使用 GORM logger 对真实执行的 SQL statement 计数，并与 `ns/op`、`B/op`、`allocs/op` 一起输出。
 
-基线环境：Apple M4、macOS arm64、Go 1.26.5；固定输入和命令如下：
+基线环境：Apple M4、macOS arm64、Go 1.26.4；固定输入和命令如下：
 
 ```sh
 go test ./api/client -run '^$' -bench 'BenchmarkDecode' -benchtime=100000x -benchmem -count=3
@@ -50,6 +50,22 @@ go run ./tools/replay \
 HTTP percentile 表示完整请求/响应延迟；WS percentile 表示有 write deadline 的消息发送延迟，因为当前报告协议不返回逐消息 ACK。工具只把凭据写入 `Authorization: Bearer` Header，连接错误使用脱敏文本，不回显 Token。
 
 验收通过：HTTP/WS `httptest` 集成、配置边界和取消测试；专项 `-race`；仓库 `go test ./...`、`go vet ./...`；CLI 编译；所有 benchmark smoke。
+
+## K-002 受控运行时指标与诊断入口
+
+增加了固定 schema、仅使用原子计数器的低基数指标注册表，覆盖报告接收/拒绝/字节/耗时、flush 队列、批次/行数/重试、SQLite 操作/错误/耗时、压缩、历史查询、Agent WebSocket 连接/重连/慢消费者，以及 Go heap/goroutine。接收、GORM Trace、历史查询、压缩和 WebSocket 生命周期已接入；后续单写器和慢消费者实现直接使用同一固定 API。
+
+指标 API 不接受调用方提供的 label 或名称，因此无法把 UUID、IP、URL、Token、Session、API Key 或脚本内容变成高基数/敏感标签。`GET /api/admin/metrics` 只在现有 Admin role 中间件之后可用，返回 `no-store` 的 Prometheus text。
+
+pprof、CPU profile 和 runtime trace 默认不注册。只有显式设置 `--diagnostics` 或 `KOMARI_DIAGNOSTICS=true` 后，才在同一个 Admin role 边界下注册 `/api/admin/debug/pprof/*`；未认证请求仍返回 401，关闭状态即使 Admin 请求也返回 404。没有新增独立公网诊断监听端口。
+
+指标热路径并行 benchmark（1,000,000 次固定样本，Apple M4）：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `ObserveReport`（3 个原子计数 + 固定桶） | 69.7～153.8 | 0 | 0 |
+
+验证包括：未认证 metrics/pprof 全部拒绝、诊断默认关闭、Admin metrics 可读且禁止缓存、输出敏感词/高基数字段扫描、16 个 goroutine 并发写入和采集；首次 race 运行发现并修复了复制原子桶的问题。最终专项 `go test -race`、仓库 `go test ./...` 和 `go vet ./...` 全部通过。
 
 ## K-104 Agent 协议 v2 与 v1 兼容协商
 
