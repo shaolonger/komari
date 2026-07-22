@@ -129,6 +129,23 @@ SQLite `BUSY`/`LOCKED` 使用 10ms 起始的指数退避，默认最多重试 4 
 
 验证覆盖：300+300+Ping 原子提交、跨 chunk、注入两次 BUSY 后成功、永久 schema 失败整批回滚、满队列 context 背压、6 批 shutdown drain、关闭后拒绝、真实 `BEGIN IMMEDIATE` 锁释放恢复、32 个并发批次下 WAL 查询，以及任务归属验证后的 Ping writer。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
 
+## K-201 不可变配置快照与主动发布
+
+配置初始化/旧 schema 迁移完成后，一次性读取 `configs` 并通过 `atomic.Pointer` 发布不可变 snapshot。`Get`、`GetAs`、`GetMany`、`GetManyAs` 和 `GetAll` 的命中路径不再执行 SQL；标量直接读取，map/slice/struct 在交给调用方前深拷贝，Set 输入和 subscriber event 也由 snapshot 取得独立所有权，调用方不能反向修改全局配置。
+
+所有 Set/SetMany/SetManyAs 和首次默认值写入由同一写锁排序，并在数据库 transaction/UPSERT 成功后复制旧 map、应用变更、一次原子替换 snapshot，随后发布事件。数据库失败时既不替换 snapshot，也不发布事件。并发首次默认值使用 `ON CONFLICT DO NOTHING` 和锁内二次检查，较晚的默认值不会覆盖已经存在的配置。SetManyAs 同时修复了把 `json:"name,omitempty"` 整串误用作 key 的问题。
+
+`GetAs[int]` 固定 10,000 次 benchmark：
+
+| 实现 | ns/op | B/op | allocs/op | SQL/op |
+|---|---:|---:|---:|---:|
+| 原逐次 GORM + JSON | 7,575～8,993 | 3,874 | 64 | 1 |
+| atomic snapshot | 13.45～28.33 | 8 | 1 | 0 |
+
+热读约快 267～669×，分配字节减少约 99.8%，并完全移除认证/中间件热路径的 SQLite 读锁竞争。
+
+验证覆盖：5 种读取 API 各 1,000 次 SQL 计数为零、默认值只持久化/发布一次、订阅 old/new、注入事务失败不发布、输入/event/返回 map 不可变、JSON tag option、4 writers + 16 readers 并发和最终 DB/snapshot 一致性。专项 race、仓库 `go test ./...`、`go vet ./...` 全部通过。
+
 ## K-104 Agent 协议 v2 与 v1 兼容协商
 
 服务端 WebSocket 现在按标准 subprotocol 显式协商：优先 `komari.telemetry.v2`，其次 `komari.telemetry.v1`；旧 Agent 或代理未携带/转发 subprotocol 时默认 JSON v1。只有成功协商 v2 的连接可发送二进制帧；v2 连接仍接受 Agent 在编码失败时发送的 JSON v1 text fallback。未知协议和 legacy 连接上的 binary frame fail closed，且 Token/控制能力仍由原认证链决定。

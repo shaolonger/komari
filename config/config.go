@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -22,15 +23,70 @@ func (ConfigItem) TableName() string {
 }
 
 var (
-	db    *gorm.DB
-	SetDb = func(gdb *gorm.DB) {
+	db      *gorm.DB
+	writeMu sync.Mutex
+	current atomic.Pointer[configSnapshot]
+	SetDb   = func(gdb *gorm.DB) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		db = gdb
 		migrateInPlace()
+		snapshot, err := loadSnapshot(gdb)
+		if err != nil {
+			panic("load config snapshot: " + err.Error())
+		}
+		current.Store(snapshot)
 	}
 )
 
 func Ready() bool {
-	return db != nil
+	return db != nil && current.Load() != nil
+}
+
+type configSnapshot struct {
+	raw    map[string]string
+	values map[string]any
+}
+
+func loadSnapshot(gdb *gorm.DB) (*configSnapshot, error) {
+	var items []ConfigItem
+	if err := gdb.Find(&items).Error; err != nil {
+		return nil, err
+	}
+	snapshot := &configSnapshot{raw: make(map[string]string, len(items)), values: make(map[string]any, len(items))}
+	for _, item := range items {
+		snapshot.raw[item.Key] = item.Value
+		var value any
+		if err := json.Unmarshal([]byte(item.Value), &value); err == nil {
+			snapshot.values[item.Key] = value
+		}
+	}
+	return snapshot, nil
+}
+
+func emptySnapshot() *configSnapshot {
+	return &configSnapshot{raw: map[string]string{}, values: map[string]any{}}
+}
+
+func snapshotNow() *configSnapshot {
+	if snapshot := current.Load(); snapshot != nil {
+		return snapshot
+	}
+	return emptySnapshot()
+}
+
+func cloneSnapshot(source *configSnapshot, additional int) *configSnapshot {
+	next := &configSnapshot{
+		raw:    make(map[string]string, len(source.raw)+additional),
+		values: make(map[string]any, len(source.values)+additional),
+	}
+	for key, value := range source.raw {
+		next.raw[key] = value
+	}
+	for key, value := range source.values {
+		next.values[key] = value
+	}
+	return next
 }
 
 func migrateInPlace() {
@@ -89,59 +145,48 @@ func migrateInPlace() {
 
 // Get 获取原始值 (反序列化为 interface{})
 func Get(key string, defaul ...any) (any, error) {
-	var item ConfigItem
-	err := db.First(&item, "key = ?", key).Error
-	if err != nil {
-		if len(defaul) > 0 {
-			v := defaul[0]
-			err = Set(key, v)
-			return v, err
+	snapshot := snapshotNow()
+	if _, ok := snapshot.raw[key]; ok {
+		value, found := snapshot.values[key]
+		if !found {
+			return nil, fmt.Errorf("invalid JSON for config %q", key)
 		}
-		return nil, err
+		return cloneConfigValue(value), nil
 	}
-
-	var val any
-	if err := json.Unmarshal([]byte(item.Value), &val); err != nil {
-		return nil, err
+	if len(defaul) == 0 {
+		return nil, gorm.ErrRecordNotFound
 	}
-	return val, nil
+	value, err := setDefault(key, defaul[0])
+	return cloneConfigValue(value), err
 }
 
 // GetAs 获取并转换为指定类型 (泛型)，支持数值类型自动转换
 func GetAs[T any](key string, defaul ...any) (T, error) {
 	var t T
-	var item ConfigItem
-
-	err := db.First(&item, "key = ?", key).Error
-	if err != nil {
-		if len(defaul) > 0 {
-			// 尝试直接类型断言
-			if v, ok := defaul[0].(T); ok {
-				err = Set(key, v)
-				return v, err
-			}
-			// 尝试类型转换
-			val := reflect.ValueOf(&t).Elem()
-			if err := convertAndSet(defaul[0], val); err != nil {
-				return t, fmt.Errorf("default value type mismatch: expected %T, got %T", t, defaul[0])
-			}
-			err = Set(key, t)
+	snapshot := snapshotNow()
+	value, found := snapshot.values[key]
+	if !found {
+		if _, exists := snapshot.raw[key]; exists {
+			return t, fmt.Errorf("invalid JSON for config %q", key)
+		}
+		if len(defaul) == 0 {
+			return t, gorm.ErrRecordNotFound
+		}
+		converted := reflect.ValueOf(&t).Elem()
+		if err := convertAndSet(defaul[0], converted); err != nil {
+			return t, fmt.Errorf("default value type mismatch: expected %T, got %T", t, defaul[0])
+		}
+		stored, err := setDefault(key, converted.Interface())
+		if err != nil {
 			return t, err
 		}
-		return t, err
+		value = stored
 	}
-
-	// 先尝试直接反序列化
-	if err = json.Unmarshal([]byte(item.Value), &t); err != nil {
-		// 尝试通用解析后转换
-		var generic any
-		if err := json.Unmarshal([]byte(item.Value), &generic); err != nil {
-			return t, err
-		}
-		val := reflect.ValueOf(&t).Elem()
-		if err := convertAndSet(generic, val); err != nil {
-			return t, err
-		}
+	if cast, ok := value.(T); ok {
+		return cloneTyped(cast), nil
+	}
+	if err := convertAndSet(value, reflect.ValueOf(&t).Elem()); err != nil {
+		return t, err
 	}
 	return t, nil
 }
@@ -150,58 +195,27 @@ func GetAs[T any](key string, defaul ...any) (T, error) {
 // 如果 defaultValue 为 nil，则数据库不存在时不写入
 // 如果 defaultValue 不为 nil，则数据库不存在时写入默认值
 func GetMany(keys map[string]any) (map[string]any, error) {
-	var items []ConfigItem
-	result := make(map[string]any)
-	keyList := make([]string, 0, len(keys))
-	for k := range keys {
-		keyList = append(keyList, k)
-	}
-	if len(keyList) == 0 {
-		return result, nil
-	}
-	if err := db.Where("key IN ?", keyList).Find(&items).Error; err != nil {
-		return nil, err
-	}
-
-	foundKeys := make(map[string]bool)
-	for _, item := range items {
-		var parsed any
-		if err := json.Unmarshal([]byte(item.Value), &parsed); err == nil {
-			result[item.Key] = parsed
-			foundKeys[item.Key] = true
+	result := make(map[string]any, len(keys))
+	snapshot := snapshotNow()
+	missing := make(map[string]any)
+	for key, defaultValue := range keys {
+		if value, ok := snapshot.values[key]; ok {
+			result[key] = cloneConfigValue(value)
+		} else if _, invalid := snapshot.raw[key]; invalid {
+			return nil, fmt.Errorf("invalid JSON for config %q", key)
+		} else if defaultValue != nil {
+			missing[key] = defaultValue
 		}
 	}
-
-	// 收集需要写入数据库的默认值
-	var toInsert []ConfigItem
-	for k, def := range keys {
-		if _, found := foundKeys[k]; !found {
-			if def != nil {
-				result[k] = def
-				// 序列化后加入待写入列表
-				jsonBytes, err := json.Marshal(def)
-				if err != nil {
-					slog.Warn("marshal default value failed", "key", k, "error", err)
-					continue
-				}
-				toInsert = append(toInsert, ConfigItem{
-					Key:   k,
-					Value: string(jsonBytes),
-				})
-			}
+	if len(missing) > 0 {
+		stored, err := setDefaults(missing)
+		if err != nil {
+			return nil, err
+		}
+		for key, value := range stored {
+			result[key] = cloneConfigValue(value)
 		}
 	}
-
-	// 批量写入默认值到数据库
-	if len(toInsert) > 0 {
-		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value"}),
-		}).Create(&toInsert).Error; err != nil {
-			slog.Warn("batch insert default config failed", "error", err)
-		}
-	}
-
 	return result, nil
 }
 
@@ -221,7 +235,6 @@ func GetManyAs[T any]() (*T, error) {
 	}
 
 	fields := make([]fieldInfo, 0)
-	keys := make([]string, 0)
 
 	for i := 0; i < val.NumField(); i++ {
 		field := typ.Field(i)
@@ -246,26 +259,13 @@ func GetManyAs[T any]() (*T, error) {
 			hasDefault: hasDefault,
 			defaultVal: defaultTag,
 		})
-		keys = append(keys, key)
 	}
 
-	if len(keys) == 0 {
+	if len(fields) == 0 {
 		return &t, nil
 	}
-
-	var items []ConfigItem
-	if err := db.Where("key IN ?", keys).Find(&items).Error; err != nil {
-		return nil, err
-	}
-
-	// 建立数据库中存在的 key 映射
-	foundItems := make(map[string]string) // key -> value
-	for _, item := range items {
-		foundItems[item.Key] = item.Value
-	}
-
-	// 需要写入数据库的新配置项
-	var toInsert []ConfigItem
+	snapshot := snapshotNow()
+	defaults := make(map[string]any)
 
 	for _, fi := range fields {
 		fieldVal := val.Field(fi.index)
@@ -273,42 +273,154 @@ func GetManyAs[T any]() (*T, error) {
 			continue
 		}
 
-		if dbValue, found := foundItems[fi.key]; found {
-			// 数据库中存在，使用数据库值
-			if err := unmarshalToField(dbValue, fieldVal); err != nil {
+		if value, found := snapshot.values[fi.key]; found {
+			if err := convertAndSet(value, fieldVal); err != nil {
 				slog.Warn("unmarshal config failed", "key", fi.key, "error", err)
 			}
+		} else if _, invalid := snapshot.raw[fi.key]; invalid {
+			slog.Warn("unmarshal config failed", "key", fi.key, "error", "invalid JSON")
 		} else if fi.hasDefault {
 			// 数据库中不存在，但有 default tag，解析默认值并写入数据库
 			if err := parseDefaultToField(fi.defaultVal, fieldVal); err != nil {
 				slog.Warn("parse default value failed", "key", fi.key, "error", err)
 				continue
 			}
-			// 序列化后写入数据库
-			jsonBytes, err := json.Marshal(fieldVal.Interface())
-			if err != nil {
-				slog.Warn("marshal default value failed", "key", fi.key, "error", err)
+			defaults[fi.key] = fieldVal.Interface()
+		}
+	}
+	if len(defaults) > 0 {
+		stored, err := setDefaults(defaults)
+		if err != nil {
+			return nil, err
+		}
+		for _, fi := range fields {
+			value, ok := stored[fi.key]
+			if !ok {
 				continue
 			}
-			toInsert = append(toInsert, ConfigItem{
-				Key:   fi.key,
-				Value: string(jsonBytes),
-			})
-		}
-		// 没有 default tag 且数据库中不存在，保持零值，不写入数据库
-	}
-
-	// 批量写入默认值到数据库
-	if len(toInsert) > 0 {
-		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value"}),
-		}).Create(&toInsert).Error; err != nil {
-			slog.Warn("batch insert default config failed", "error", err)
+			if err := convertAndSet(value, val.Field(fi.index)); err != nil {
+				return nil, err
+			}
 		}
 	}
-
 	return &t, nil
+}
+
+func setDefault(key string, value any) (any, error) {
+	stored, err := setDefaults(map[string]any{key: value})
+	if err != nil {
+		return nil, err
+	}
+	return stored[key], nil
+}
+
+func setDefaults(defaults map[string]any) (map[string]any, error) {
+	type preparedDefault struct {
+		item  ConfigItem
+		value any
+	}
+	prepared := make(map[string]preparedDefault, len(defaults))
+	for key, value := range defaults {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("marshal default config %s: %w", key, err)
+		}
+		prepared[key] = preparedDefault{item: ConfigItem{Key: key, Value: string(encoded)}, value: cloneStoredValue(value)}
+	}
+
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	snapshot := snapshotNow()
+	result := make(map[string]any, len(defaults))
+	items := make([]ConfigItem, 0, len(defaults))
+	newValues := make(map[string]any)
+	for key, candidate := range prepared {
+		if existing, ok := snapshot.values[key]; ok {
+			result[key] = existing
+			continue
+		}
+		if _, exists := snapshot.raw[key]; exists {
+			return nil, fmt.Errorf("invalid JSON for config %q", key)
+		}
+		items = append(items, candidate.item)
+		newValues[key] = candidate.value
+		result[key] = candidate.value
+	}
+	if len(items) == 0 {
+		return result, nil
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "key"}}, DoNothing: true}).Create(&items).Error
+	}); err != nil {
+		return nil, err
+	}
+	next := cloneSnapshot(snapshot, len(items))
+	for _, item := range items {
+		next.raw[item.Key] = item.Value
+		next.values[item.Key] = newValues[item.Key]
+	}
+	current.Store(next)
+	publishEvent(nil, newValues)
+	return result, nil
+}
+
+func cloneConfigValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	kind := reflect.TypeOf(value).Kind()
+	if kind != reflect.Map && kind != reflect.Slice && kind != reflect.Array && kind != reflect.Pointer && kind != reflect.Struct {
+		return value
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var clone any
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return value
+	}
+	return clone
+}
+
+func cloneStoredValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	typeOf := reflect.TypeOf(value)
+	kind := typeOf.Kind()
+	if kind != reflect.Map && kind != reflect.Slice && kind != reflect.Array && kind != reflect.Pointer && kind != reflect.Struct {
+		return value
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	target := reflect.New(typeOf)
+	if err := json.Unmarshal(encoded, target.Interface()); err != nil {
+		return value
+	}
+	return target.Elem().Interface()
+}
+
+func cloneTyped[T any](value T) T {
+	typeOf := reflect.TypeOf(value)
+	if typeOf == nil {
+		return value
+	}
+	kind := typeOf.Kind()
+	if kind != reflect.Map && kind != reflect.Slice && kind != reflect.Array && kind != reflect.Pointer && kind != reflect.Struct {
+		return value
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var clone T
+	if err := json.Unmarshal(encoded, &clone); err != nil {
+		return value
+	}
+	return clone
 }
 
 // unmarshalToField 将 JSON 字符串反序列化到字段，支持数值类型转换
@@ -432,55 +544,21 @@ func convertAndSet(val any, fieldVal reflect.Value) error {
 }
 
 func GetAll() (map[string]any, error) {
-	var items []ConfigItem
-	result := make(map[string]any)
-	if err := db.Find(&items).Error; err != nil {
-		return nil, err
-	}
-
-	for _, item := range items {
-		var parsed any
-		if err := json.Unmarshal([]byte(item.Value), &parsed); err == nil {
-			result[item.Key] = parsed
-		}
+	snapshot := snapshotNow()
+	result := make(map[string]any, len(snapshot.values))
+	for key, value := range snapshot.values {
+		result[key] = cloneConfigValue(value)
 	}
 	return result, nil
 }
 
 // Set 设置单个配置
 func Set(key string, value any) error {
-	oldVal := map[string]any{}
-	{
-		var oldItem ConfigItem
-		if err := db.First(&oldItem, "key = ?", key).Error; err == nil {
-			var parsed any
-			if err := json.Unmarshal([]byte(oldItem.Value), &parsed); err == nil {
-				oldVal[key] = parsed
-			}
-		}
-	}
-
-	bytes, err := json.Marshal(value)
+	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-
-	item := ConfigItem{
-		Key:   key,
-		Value: string(bytes),
-	}
-
-	err = db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"value"}),
-	}).Create(&item).Error
-	if err != nil {
-		return err
-	}
-
-	newVal := map[string]any{key: value}
-	publishEvent(oldVal, newVal)
-	return nil
+	return applyChanges(map[string]encodedConfigValue{key: {raw: string(encoded), value: value}})
 }
 
 // SetMany 将结构体保存为多个配置项
@@ -491,11 +569,11 @@ func SetManyAs[T any](config T) error {
 	}
 
 	typ := val.Type()
-	var items []ConfigItem
+	changes := make(map[string]encodedConfigValue)
 
 	for i := 0; i < val.NumField(); i++ {
 		fieldType := typ.Field(i)
-		tag := fieldType.Tag.Get("json")
+		tag := strings.Split(fieldType.Tag.Get("json"), ",")[0]
 
 		if tag == "" || tag == "-" {
 			continue
@@ -508,99 +586,62 @@ func SetManyAs[T any](config T) error {
 			return fmt.Errorf("marshal field %s failed: %w", fieldType.Name, err)
 		}
 
-		items = append(items, ConfigItem{
-			Key:   tag,
-			Value: string(bytes),
-		})
+		changes[tag] = encodedConfigValue{raw: string(bytes), value: fieldValue}
 	}
-
-	if len(items) == 0 {
-		return nil
-	}
-
-	keys := make([]string, 0, len(items))
-	newVal := make(map[string]any, len(items))
-	for _, it := range items {
-		keys = append(keys, it.Key)
-		var parsed any
-		if err := json.Unmarshal([]byte(it.Value), &parsed); err == nil {
-			newVal[it.Key] = parsed
-		}
-	}
-
-	oldVal := map[string]any{}
-	if len(keys) > 0 {
-		var oldItems []ConfigItem
-		if err := db.Where("key IN ?", keys).Find(&oldItems).Error; err == nil {
-			for _, oi := range oldItems {
-				var parsed any
-				if err := json.Unmarshal([]byte(oi.Value), &parsed); err == nil {
-					oldVal[oi.Key] = parsed
-				}
-			}
-		}
-	}
-
-	err := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"value"}),
-	}).Create(&items).Error
-	if err != nil {
-		return err
-	}
-
-	publishEvent(oldVal, newVal)
-	return nil
+	return applyChanges(changes)
 }
 
 func SetMany(cst map[string]any) error {
-	var items []ConfigItem
+	changes := make(map[string]encodedConfigValue, len(cst))
 	for k, v := range cst {
-		bytes, err := json.Marshal(v)
+		encoded, err := json.Marshal(v)
 		if err != nil {
 			return fmt.Errorf("marshal key %s failed: %w", k, err)
 		}
-		items = append(items, ConfigItem{
-			Key:   k,
-			Value: string(bytes),
-		})
+		changes[k] = encodedConfigValue{raw: string(encoded), value: v}
 	}
-	if len(items) == 0 {
+	return applyChanges(changes)
+}
+
+type encodedConfigValue struct {
+	raw   string
+	value any
+}
+
+func applyChanges(changes map[string]encodedConfigValue) error {
+	if len(changes) == 0 {
 		return nil
 	}
-
-	keys := make([]string, 0, len(items))
-	newVal := make(map[string]any, len(items))
-	for _, it := range items {
-		keys = append(keys, it.Key)
-		var parsed any
-		if err := json.Unmarshal([]byte(it.Value), &parsed); err == nil {
-			newVal[it.Key] = parsed
+	writeMu.Lock()
+	snapshot := snapshotNow()
+	items := make([]ConfigItem, 0, len(changes))
+	oldValues := make(map[string]any, len(changes))
+	newValues := make(map[string]any, len(changes))
+	for key, change := range changes {
+		items = append(items, ConfigItem{Key: key, Value: change.raw})
+		if old, ok := snapshot.values[key]; ok {
+			oldValues[key] = old
 		}
+		newValues[key] = cloneStoredValue(change.value)
 	}
-
-	oldVal := map[string]any{}
-	if len(keys) > 0 {
-		var oldItems []ConfigItem
-		if err := db.Where("key IN ?", keys).Find(&oldItems).Error; err == nil {
-			for _, oi := range oldItems {
-				var parsed any
-				if err := json.Unmarshal([]byte(oi.Value), &parsed); err == nil {
-					oldVal[oi.Key] = parsed
-				}
-			}
-		}
-	}
-
-	err := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"value"}),
-	}).Create(&items).Error
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value"}),
+		}).Create(&items).Error
+	})
 	if err != nil {
+		writeMu.Unlock()
 		return err
 	}
-
-	publishEvent(oldVal, newVal)
+	next := cloneSnapshot(snapshot, len(changes))
+	for key, change := range changes {
+		next.raw[key] = change.raw
+		next.values[key] = newValues[key]
+	}
+	current.Store(next)
+	writeMu.Unlock()
+	publishEvent(oldValues, newValues)
 	return nil
 }
 
@@ -683,9 +724,21 @@ func Subscribe(subscriber ConfigSubscriber) {
 // publishEvent notifies all subscribers of a config change.
 func publishEvent(oldVal, newVal map[string]any) {
 	subscribersMu.RLock()
-	defer subscribersMu.RUnlock()
-	for _, sub := range subscribers {
-		event := ConfigEvent{Old: oldVal, New: newVal}
+	currentSubscribers := append([]ConfigSubscriber(nil), subscribers...)
+	subscribersMu.RUnlock()
+	for _, sub := range currentSubscribers {
+		event := ConfigEvent{Old: cloneConfigMap(oldVal), New: cloneConfigMap(newVal)}
 		go sub(event)
 	}
+}
+
+func cloneConfigMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(values))
+	for key, value := range values {
+		clone[key] = cloneConfigValue(value)
+	}
+	return clone
 }
