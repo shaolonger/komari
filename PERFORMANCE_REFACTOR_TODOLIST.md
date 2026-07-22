@@ -133,7 +133,7 @@
 
 ## Phase K5：调度、WebSocket、HTTP 与静态资源
 
-- [ ] **K-501 context 化调度器、稳定抖动和有界 worker**
+- [x] **K-501 context 化调度器、稳定抖动和有界 worker**
   - 修复通知 reload goroutine 泄漏。
   - Ping/通知按 next-run 调度，避免同秒风暴。
   - 测试：reload 退出、取消、抖动稳定性、队列上限、race、goroutine 泄漏检测。

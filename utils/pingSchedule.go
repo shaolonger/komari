@@ -2,118 +2,118 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/ws"
 )
 
-// PingTaskManager 管理定时器和任务
+const (
+	pingScheduleWorkers = 16
+	pingScheduleQueue   = 2_048
+)
+
+type pingMessage struct {
+	TaskID  uint   `json:"ping_task_id"`
+	Message string `json:"message"`
+	Type    string `json:"ping_type"`
+	Target  string `json:"ping_target"`
+}
+
+// PingTaskManager owns exactly one scheduler generation. Each (task,client)
+// pair receives a deterministic phase inside the interval, so a large task no
+// longer sends to every client in the same second.
 type PingTaskManager struct {
-	mu         sync.Mutex
-	cancelFunc context.CancelFunc
-	tasks      map[int][]models.PingTask
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
-var manager = &PingTaskManager{
-	tasks: make(map[int][]models.PingTask),
-}
+var manager = &PingTaskManager{}
 
-// Reload 重载时间表
-func (m *PingTaskManager) Reload(pingTasks []models.PingTask) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.cancelFunc != nil {
-		m.cancelFunc()
+func (manager *PingTaskManager) Reload(pingTasks []models.PingTask) error {
+	engine, err := scheduler.New(scheduler.Config{Workers: pingScheduleWorkers, QueueCapacity: pingScheduleQueue})
+	if err != nil {
+		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelFunc = cancel
-
-	m.tasks = make(map[int][]models.PingTask)
-
-	// 按Interval分组任务
-	taskGroups := make(map[int][]models.PingTask)
+	schedules := make([]scheduler.Task, 0)
 	for _, task := range pingTasks {
 		if task.Interval <= 0 {
 			continue
 		}
-		taskGroups[task.Interval] = append(taskGroups[task.Interval], task)
+		message := pingMessage{TaskID: task.Id, Message: "ping", Type: task.Type, Target: task.Target}
+		seenClients := make(map[string]struct{}, len(task.Clients))
+		for _, clientID := range task.Clients {
+			if clientID == "" {
+				continue
+			}
+			if _, exists := seenClients[clientID]; exists {
+				continue
+			}
+			seenClients[clientID] = struct{}{}
+			clientID := clientID
+			schedules = append(schedules, scheduler.Task{
+				Key: fmt.Sprintf("ping:%d:%s", task.Id, clientID), Interval: time.Duration(task.Interval) * time.Second,
+				Run: func(ctx context.Context) {
+					if ctx.Err() != nil {
+						return
+					}
+					connection, ok := ws.GetConnectedClient(clientID)
+					if !ok || connection == nil {
+						return
+					}
+					_ = connection.WriteJSON(message)
+				},
+			})
+		}
 	}
 
-	// 为每个唯一的Interval创建协程
-	for interval, tasks := range taskGroups {
-		m.tasks[interval] = tasks
-		go m.runPreciseLoop(ctx, time.Duration(interval)*time.Second, tasks)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	manager.mu.Lock()
+	previousCancel, previousDone := manager.cancel, manager.done
+	manager.cancel, manager.done = cancel, done
+	manager.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
+	go func() {
+		defer close(done)
+		_ = engine.Run(ctx, schedules)
+	}()
+	// A context-aware old generation normally exits immediately. Do not block a
+	// control-plane edit on an already-running network write; K-502 provides the
+	// per-connection write deadline that bounds that final operation.
+	if previousDone != nil {
+		select {
+		case <-previousDone:
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	return nil
 }
 
-func (m *PingTaskManager) runPreciseLoop(ctx context.Context, interval time.Duration, tasks []models.PingTask) {
-	// Start the first timer.
-	timer := time.NewTimer(interval)
-
-	// This will be the reference point for all future ticks.
-	// By adding the interval to this time, we avoid accumulating execution delays.
-	nextTick := time.Now().Add(interval)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-timer.C:
-			onlineClients := ws.GetConnectedClients()
-			for _, task := range tasks {
-				go executePingTask(ctx, task, onlineClients)
-			}
-
-			nextTick = nextTick.Add(interval)
-			timer.Reset(time.Until(nextTick))
-
-		case <-ctx.Done():
-			return
-		}
+func (manager *PingTaskManager) Stop(ctx context.Context) error {
+	manager.mu.Lock()
+	cancel, done := manager.cancel, manager.done
+	manager.cancel, manager.done = nil, nil
+	manager.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-// executePingTask 执行单个PingTask
-func executePingTask(ctx context.Context, task models.PingTask, onlineClients map[string]*ws.SafeConn) {
-	var message struct {
-		TaskID  uint   `json:"ping_task_id"`
-		Message string `json:"message"`
-		Type    string `json:"ping_type"`
-		Target  string `json:"ping_target"`
-	}
-
-	message.Message = "ping"
-	message.TaskID = task.Id
-	message.Type = task.Type
-	message.Target = task.Target
-
-	for _, clientUUID := range targetPingClientUUIDs(task, onlineClients) {
-		select {
-		case <-ctx.Done():
-			// Context was canceled, stop sending pings.
-			return
-		default:
-			// Context is still active, continue.
-		}
-
-		if conn, exists := onlineClients[clientUUID]; exists && conn != nil {
-			if err := conn.WriteJSON(message); err != nil {
-				continue
-			}
-		}
-	}
-}
-
-// targetPingClientUUIDs 根据任务配置计算本次调度需要下发的在线服务器列表。
-func targetPingClientUUIDs(task models.PingTask, onlineClients map[string]*ws.SafeConn) []string {
-	_ = onlineClients
-	return task.Clients
-}
-
-// ReloadPingSchedule 加载或重载时间表
-func ReloadPingSchedule(pingTasks []models.PingTask) error {
-	return manager.Reload(pingTasks)
-}
+func ReloadPingSchedule(pingTasks []models.PingTask) error { return manager.Reload(pingTasks) }
+func StopPingSchedule(ctx context.Context) error           { return manager.Stop(ctx) }

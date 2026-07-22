@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -11,61 +12,80 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/database/records"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"gorm.io/gorm"
 )
 
 // LoadNotificationService 管理定时器和任务
 type LoadNotificationService struct {
-	mu       sync.Mutex
-	tickers  map[int]*time.Ticker
-	tasks    map[int][]models.LoadNotification
-	stopChan chan struct{}
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
-var LoadNotificationManager = &LoadNotificationService{
-	tickers:  make(map[int]*time.Ticker),
-	tasks:    make(map[int][]models.LoadNotification),
-	stopChan: make(chan struct{}),
-}
+var LoadNotificationManager = &LoadNotificationService{}
 
 // Reload 重载时间表
 func (m *LoadNotificationService) Reload(loadNotifications []models.LoadNotification) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// 停止所有现有定时器
-	for _, ticker := range m.tickers {
-		ticker.Stop()
+	engine, err := scheduler.New(scheduler.Config{Workers: 4, QueueCapacity: 64})
+	if err != nil {
+		return err
 	}
-	m.tickers = make(map[int]*time.Ticker)
-	m.tasks = make(map[int][]models.LoadNotification)
-
-	// 按Interval分组任务
 	taskGroups := make(map[int][]models.LoadNotification)
 	for _, task := range loadNotifications {
+		if task.Interval <= 0 {
+			continue
+		}
 		taskGroups[task.Interval] = append(taskGroups[task.Interval], task)
 	}
-
-	// 为每个唯一的Interval创建定时器
+	schedules := make([]scheduler.Task, 0, len(taskGroups))
 	for interval, tasks := range taskGroups {
-		ticker := time.NewTicker(time.Duration(interval) * time.Minute)
-		m.tickers[interval] = ticker
-		m.tasks[interval] = tasks
-
-		go func(ticker *time.Ticker, tasks []models.LoadNotification) {
-			for {
-				select {
-				case <-ticker.C:
-					go executeLoadNotificationTasks(tasks)
-				case <-m.stopChan:
-					return
-				}
-			}
-		}(ticker, tasks)
+		tasks := append([]models.LoadNotification(nil), tasks...)
+		schedules = append(schedules, scheduler.Task{
+			Key: "load-notification:" + strconv.Itoa(interval), Interval: time.Duration(interval) * time.Minute,
+			Run: func(ctx context.Context) { executeLoadNotificationTasksContext(ctx, tasks, time.Now()) },
+		})
 	}
-
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.mu.Lock()
+	previousCancel, previousDone := m.cancel, m.done
+	m.cancel, m.done = cancel, done
+	m.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
+	go func() {
+		defer close(done)
+		_ = engine.Run(ctx, schedules)
+	}()
+	if previousDone != nil {
+		select {
+		case <-previousDone:
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	return nil
+}
+
+func (m *LoadNotificationService) Stop(ctx context.Context) error {
+	m.mu.Lock()
+	cancel, done := m.cancel, m.done
+	m.cancel, m.done = nil, nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // executeLoadNotificationTask 执行单个LoadNotificationTask
@@ -74,14 +94,20 @@ func executeLoadNotificationTask(task models.LoadNotification) {
 }
 
 func executeLoadNotificationTasks(loadTasks []models.LoadNotification) {
-	now := time.Now()
-	results, _, err := evaluateLoadNotificationTasks(context.Background(), dbcore.GetDBInstance(), loadTasks, now)
+	executeLoadNotificationTasksContext(context.Background(), loadTasks, time.Now())
+}
+
+func executeLoadNotificationTasksContext(ctx context.Context, loadTasks []models.LoadNotification, now time.Time) {
+	results, _, err := evaluateLoadNotificationTasks(ctx, dbcore.GetDBInstance(), loadTasks, now)
 	if err != nil {
 		log.Printf("Failed to evaluate load notification tasks: %v", err)
 		return
 	}
 	dueTaskIDs := make([]uint, 0, len(results))
 	for _, task := range loadTasks {
+		if ctx.Err() != nil {
+			return
+		}
 		clientsForTask, ok := results[task.Id]
 		if !ok {
 			continue
@@ -89,7 +115,7 @@ func executeLoadNotificationTasks(loadTasks []models.LoadNotification) {
 		dueTaskIDs = append(dueTaskIDs, task.Id)
 		sendLoadNotificationClients(clientsForTask, task)
 	}
-	updateLastNotifiedTasks(dueTaskIDs, now)
+	updateLastNotifiedTasksContext(ctx, dueTaskIDs, now)
 }
 
 // shouldSkipNotification 检查是否应该跳过通知（冷却期检查）
@@ -270,15 +296,13 @@ func sendLoadNotificationClients(matchedClients []models.Client, task models.Loa
 	if len(matchedClients) == 0 {
 		return
 	}
-	go func() {
-		messageSender.SendEvent(models.EventMessage{
-			Event:   messageevent.Alert,
-			Clients: matchedClients,
-			Time:    time.Now(),
-			Emoji:   "⚠️",
-			Message: task.Name,
-		})
-	}()
+	_ = messageSender.SendEvent(models.EventMessage{
+		Event:   messageevent.Alert,
+		Clients: matchedClients,
+		Time:    time.Now(),
+		Emoji:   "⚠️",
+		Message: task.Name,
+	})
 }
 
 // updateLastNotified 更新最后通知时间
@@ -287,10 +311,14 @@ func updateLastNotified(taskId uint, notifyTime time.Time) {
 }
 
 func updateLastNotifiedTasks(taskIDs []uint, notifyTime time.Time) {
+	updateLastNotifiedTasksContext(context.Background(), taskIDs, notifyTime)
+}
+
+func updateLastNotifiedTasksContext(ctx context.Context, taskIDs []uint, notifyTime time.Time) {
 	if len(taskIDs) == 0 {
 		return
 	}
-	db := dbcore.GetDBInstance()
+	db := dbcore.GetDBInstance().WithContext(ctx)
 	if err := db.Model(&models.LoadNotification{}).Where("id IN ?", taskIDs).Update("last_notified", notifyTime).Error; err != nil {
 		log.Printf("Failed to update last_notified for tasks %v: %v", taskIDs, err)
 	}
@@ -299,4 +327,8 @@ func updateLastNotifiedTasks(taskIDs []uint, notifyTime time.Time) {
 // ReloadLoadNotificationSchedule 加载或重载时间表
 func ReloadLoadNotificationSchedule(loadNotifications []models.LoadNotification) error {
 	return LoadNotificationManager.Reload(loadNotifications)
+}
+
+func StopLoadNotificationSchedule(ctx context.Context) error {
+	return LoadNotificationManager.Stop(ctx)
 }

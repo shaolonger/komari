@@ -372,3 +372,21 @@ Apple M4/macOS arm64 实测：
 流式路径为有界峰值内存付出约 10～23% 编码 CPU，累计分配字节减少约 48.4%，并消除约 50 MiB 级整包 output buffer；它不会把 100k point 响应放入缓存。缓存命中读取 512 KiB payload 约 60～61ns、零 allocation，随后直接交给 ResponseWriter，完全跳过 SQLite、降采样和重新编码。
 
 验证覆盖：public/admin 隔离、参数隔离、旧 generation 拒绝回填、Client hidden/unhidden 主动失效、新 telemetry durable commit 失效、严格 entry/总内存上限、明文 key 结构扫描、2,000 点流式 JSON 完整性、最大 32 KiB writer chunk、慢客户端 deadline、并发 get/put/invalidate race、100k point stream/marshal 对照和 cache hit benchmark。仓库 `go test ./...`、Cache/Writer/Clients/Records/Tasks/Public/JSON-RPC 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-501 Context 调度器、稳定抖动与有界 Worker
+
+新增通用周期调度引擎：一个 min-heap 保存全部 task 的 next-run，一个 timer 只等待最近任务，不再为每个 interval 创建 ticker/goroutine。task key 经过 FNV-1a 得到 interval 内的稳定 phase；相同配置在 reload/restart 后保持相同相位，不同 key 均匀分散。到期任务进入固定容量 channel；队列满时 dispatcher 形成 context 可取消的背压，不创建补偿 goroutine、不静默丢任务。默认 8 worker/256 queue，构造器硬限制最多 64 worker/65,536 queue；panic 被隔离在对应 worker job，调度循环继续运行。落后多个周期时显式 coalesce 到下一未来时刻，避免恢复后追发风暴。
+
+Ping 调度从“每 interval 一个 goroutine，到点后每 task 再开 goroutine并遍历所有节点”改为 `(ping_task_id,client_uuid)` 独立 schedule。稳定相位把同一个大任务的节点下发均匀铺到整个秒级 interval；连接通过新增 O(1) 单节点只读 lookup 获取，不再为每个 job 复制在线连接 map。执行固定为 16 workers、2,048 queue；重复 client assignment 在建表时去重，取消在写入前检查。
+
+Load notification 按 K-404 的 interval 集合批处理作为一个 schedule，固定 4 workers、64 queue；发送不再另开无界 goroutine，因此慢 provider 最多占用有限 worker。每次 Reload 原子替换 scheduler generation 并取消旧 context；Stop 有 deadline 且幂等。根 maintenance、流量阈值、流量报告、舰队报告和到期续费检查全部接入 server shutdown context；三种每分钟通知使用不同稳定 key，不再在整分钟同一时刻齐发。shutdown 在 HTTP/数据库 drain 前先取消根 context并停止 Ping/Load generation。
+
+Apple M4/macOS arm64，10,000 个 task key 的稳定 phase 计算：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 10k `StableNextRun` | 461,971～565,412 | 0 | 0 |
+
+10,000 个 next-run 只需约 0.46～0.57ms、零 heap allocation。1,000 个固定 key 在 60 秒 interval 内占据超过 990 个不同微秒 phase；worker 压力测试在 40 个 5ms 周期任务、4 槽队列下实测并发从未超过配置的 3。
+
+验证覆盖：phase 确定性/范围/分布、重复 key/worker/queue 上限拒绝、满队列背压、最大并发、context 取消、panic 隔离、连续 50 次 Ping reload、连续 50 次 Load reload 的所有旧 generation 退出、Stop 幂等、expire 长 timer 取消，以及相关 `go test -race`。仓库 `go test ./...` 与 `go vet ./...` 全部通过。

@@ -34,6 +34,7 @@ import (
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/database/telemetrywriter"
+	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
@@ -81,7 +82,8 @@ func RunServer() {
 		log.Fatal(err)
 	}
 	go geoip.InitGeoIp()
-	go DoScheduledWork()
+	scheduledCtx, scheduledCancel := context.WithCancel(context.Background())
+	go DoScheduledWorkContext(scheduledCtx)
 	go messageSender.Initialize()
 	// oidcInit
 	go oauth.Initialize()
@@ -393,6 +395,15 @@ func RunServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
+	scheduledCancel()
+	schedulerStopCtx, schedulerStopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := utils.StopPingSchedule(schedulerStopCtx); err != nil {
+		log.Printf("Ping scheduler shutdown failed: %v", err)
+	}
+	if err := notifier.StopLoadNotificationSchedule(schedulerStopCtx); err != nil {
+		log.Printf("Notification scheduler shutdown failed: %v", err)
+	}
+	schedulerStopCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -458,6 +469,10 @@ func InitDatabase() {
 
 // #region 定时任务
 func DoScheduledWork() {
+	DoScheduledWorkContext(context.Background())
+}
+
+func DoScheduledWorkContext(ctx context.Context) {
 	if err := tasks.MigrateAllClientsExpansion(); err != nil {
 		log.Println("Failed to migrate ping task all_clients expansion:", err)
 	}
@@ -465,15 +480,25 @@ func DoScheduledWork() {
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	defer minute.Stop()
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
 	records.CompactRecord()
-	go notifier.CheckExpireScheduledWork()
-	go notifier.CheckTrafficReportScheduledWork()
-	go notifier.CheckFleetReportScheduledWork()
+	go notifier.CheckExpireScheduledWorkContext(ctx)
+	notificationEngine, _ := scheduler.New(scheduler.Config{Workers: 2, QueueCapacity: 16})
+	go func() {
+		_ = notificationEngine.Run(ctx, []scheduler.Task{
+			{Key: "notification:traffic-threshold", Interval: time.Minute, Run: func(context.Context) { notifier.CheckTraffic() }},
+			{Key: "notification:traffic-report", Interval: time.Minute, Run: func(context.Context) { notifier.CheckTrafficReportOnce(time.Now()) }},
+			{Key: "notification:fleet-report", Interval: time.Minute, Run: func(context.Context) { notifier.CheckFleetReportOnce(time.Now()) }},
+		})
+	}()
 	for {
-		cfg, _ := config.GetManyAs[config.Legacy]()
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
+			cfg, _ := config.GetManyAs[config.Legacy]()
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			records.CompactRecord()
 			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
@@ -481,13 +506,12 @@ func DoScheduledWork() {
 			auditlog.RemoveOldLogs()
 			accounts.RemoveExpiredSessions()
 		case <-minute.C:
+			cfg, _ := config.GetManyAs[config.Legacy]()
 			api.SaveClientReportToDB()
 			if !cfg.RecordEnabled {
 				records.DeleteAll()
 				tasks.DeleteAllPingRecords()
 			}
-			// 每分钟检查一次流量提醒
-			go notifier.CheckTraffic()
 		}
 	}
 
