@@ -39,6 +39,7 @@ func newSQLiteControlFixture(t *testing.T) (contracttest.ControlFixture, *gorm.D
 	now := time.Now()
 	user := models.User{
 		UUID: "control-user", Username: "control", Passwd: "irrelevant",
+		SSOID:     "control-sso",
 		CreatedAt: models.FromTime(now), UpdatedAt: models.FromTime(now),
 	}
 	client := models.Client{

@@ -170,7 +170,7 @@
   - SQLite 适配器通过完整兼容测试。
   - 测试：contract suite、故障注入、取消、并发。
 
-- [ ] **K-602 可选 PostgreSQL 控制面与 ClickHouse 遥测适配器**
+- [x] **K-602 可选 PostgreSQL 控制面与 ClickHouse 遥测适配器**
   - 默认构建仍可只运行 SQLite。
   - 批次幂等、连接池、TLS、迁移和健康检查。
   - 鉴权状态以强一致控制存储为真相源。

@@ -11,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/storage"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type SQLite struct {
@@ -34,6 +35,20 @@ func (store *SQLite) ClientCredential(ctx context.Context, token string) (models
 	err := store.db.WithContext(ctx).
 		Select("uuid", "token_expires_at", "token_revoked_at", "updated_at").
 		Where("token = ?", token).First(&client).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.Client{}, storage.ErrNotFound
+	}
+	return client, err
+}
+
+func (store *SQLite) ClientByUUID(ctx context.Context, uuid string) (models.Client, error) {
+	if uuid == "" {
+		return models.Client{}, storage.ErrNotFound
+	}
+	var client models.Client
+	err := store.db.WithContext(ctx).
+		Select("uuid", "token", "token_issued_at", "token_expires_at", "token_revoked_at", "created_at", "updated_at").
+		Where("uuid = ?", uuid).First(&client).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return models.Client{}, storage.ErrNotFound
 	}
@@ -74,6 +89,87 @@ func (store *SQLite) UserByUUID(ctx context.Context, uuid string) (models.User, 
 	}
 	return user, err
 }
+
+func (store *SQLite) UserByUsername(ctx context.Context, username string) (models.User, error) {
+	if username == "" {
+		return models.User{}, storage.ErrNotFound
+	}
+	var user models.User
+	err := store.db.WithContext(ctx).Where("username = ?", username).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.User{}, storage.ErrNotFound
+	}
+	return user, err
+}
+
+func (store *SQLite) UserBySSO(ctx context.Context, ssoID string) (models.User, error) {
+	if ssoID == "" {
+		return models.User{}, storage.ErrNotFound
+	}
+	var user models.User
+	err := store.db.WithContext(ctx).Where("sso_id = ?", ssoID).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.User{}, storage.ErrNotFound
+	}
+	return user, err
+}
+
+func (store *SQLite) HasUsers(ctx context.Context) (bool, error) {
+	var count int64
+	err := store.db.WithContext(ctx).Model(&models.User{}).Limit(1).Count(&count).Error
+	return count > 0, err
+}
+
+func (store *SQLite) UpsertClientAuth(ctx context.Context, client models.Client) error {
+	return store.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "uuid"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"token", "token_issued_at", "token_expires_at", "token_revoked_at", "updated_at",
+		}),
+	}).Create(&client).Error
+}
+
+func (store *SQLite) DeleteClientAuth(ctx context.Context, uuid string) error {
+	return store.db.WithContext(ctx).Delete(&models.Client{}, "uuid = ?", uuid).Error
+}
+
+func (store *SQLite) UpsertSessionAuth(ctx context.Context, session models.Session) error {
+	return store.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "session"}},
+		DoUpdates: clause.AssignmentColumns([]string{"uuid", "session_digest", "expires", "created_at"}),
+	}).Create(&session).Error
+}
+
+func (store *SQLite) DeleteSessionAuth(ctx context.Context, digest []byte) error {
+	return store.db.WithContext(ctx).Delete(&models.Session{}, "session_digest = ?", digest).Error
+}
+
+func (store *SQLite) DeleteAllSessionsAuth(ctx context.Context) error {
+	return store.db.WithContext(ctx).Where("1 = 1").Delete(&models.Session{}).Error
+}
+
+func (store *SQLite) DeleteSessionsByUserAuth(ctx context.Context, uuid string) error {
+	return store.db.WithContext(ctx).Delete(&models.Session{}, "uuid = ?", uuid).Error
+}
+
+func (store *SQLite) DeleteExpiredSessionsAuth(ctx context.Context, before time.Time) error {
+	return store.db.WithContext(ctx).Delete(&models.Session{}, "expires < ?", before).Error
+}
+
+func (store *SQLite) UpsertUserAuth(ctx context.Context, user models.User) error {
+	return store.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "uuid"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"username", "passwd", "sso_type", "sso_id", "two_factor", "updated_at",
+		}),
+	}).Create(&user).Error
+}
+
+func (store *SQLite) DeleteUserAuth(ctx context.Context, uuid string) error {
+	return store.db.WithContext(ctx).Delete(&models.User{}, "uuid = ?", uuid).Error
+}
+
+func (*SQLite) IsExternalControlStore() bool { return false }
 
 func (store *SQLite) Migrate(ctx context.Context) error {
 	return store.db.WithContext(ctx).AutoMigrate(&models.User{}, &models.Client{}, &models.Session{})

@@ -27,6 +27,7 @@ const (
 var ErrClosed = errors.New("telemetry writer is closed")
 
 type Batch struct {
+	ID          string
 	Records     []models.Record
 	GPURecords  []models.GPURecord
 	PingRecords []models.PingRecord
@@ -115,6 +116,7 @@ func (w *Writer) Submit(ctx context.Context, batch Batch) error {
 		return fmt.Errorf("telemetry batch has %d rows, maximum is %d", batch.Rows(), MaxRowsPerBatch)
 	}
 	owned := Batch{
+		ID:          batch.ID,
 		Records:     append([]models.Record(nil), batch.Records...),
 		GPURecords:  append([]models.GPURecord(nil), batch.GPURecords...),
 		PingRecords: append([]models.PingRecord(nil), batch.PingRecords...),

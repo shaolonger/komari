@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/auditlog"
+	dbClients "github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/geoip"
@@ -318,10 +319,13 @@ func upsertClientFromHost(uuid, secret string, h *proto.Host) error {
 		"version":        c.Version,
 		"updated_at":     time.Now(),
 	}
-	return db.Clauses(clause.OnConflict{
+	if err := db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "uuid"}},
 		DoUpdates: clause.Assignments(updates),
-	}).Create(&c).Error
+	}).Create(&c).Error; err != nil {
+		return err
+	}
+	return dbClients.SyncClientAuth(uuid)
 }
 
 // ingestState maps Nezha State into common.Report then saves a Record

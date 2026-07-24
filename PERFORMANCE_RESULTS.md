@@ -464,3 +464,24 @@ SQLite telemetry adapter 直接组合既有的单连接有界 writer、分层查
 - legacy Session digest 回填及空凭据拒绝。
 
 仓库 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 和 `git diff --check` 全部通过。
+
+## K-602 PostgreSQL 控制面与 ClickHouse 遥测适配器
+
+默认 Lite 构建只链接 SQLite；PostgreSQL/ClickHouse 文件由 `scale` build tag 隔离，Lite 二进制收到规模化配置会明确拒绝启动。scale 构建仍必须通过 `KOMARI_CONTROL_STORE` 与 `KOMARI_TELEMETRY_STORE` 显式启用。PostgreSQL 使用 pgx v5 native pool，固定 `application_name`、1～256 连接硬限制、lifetime jitter、idle/health check 和 advisory-lock version migration。ClickHouse 使用官方 native driver、LZ4、round-robin 多地址、1～256 连接硬限制和幂等 schema migration。
+
+PostgreSQL 成为 User/Client/Session 鉴权真相源。密码、2FA、SSO、Session 创建/删除/过期、Client Token 创建/轮换/吊销/删除先提交 PostgreSQL，再镜像 SQLite；cache miss 只向权威库回源。连接故障不会降级到 SQLite。首次 SQLite bootstrap 必须显式授权、只允许空目标，Session 只迁移 SHA-256 digest。应用级容器测试实际完成：创建账户、密码校验、2FA、创建 Session、重置密码并吊销 Session、创建 Client、轮换 Token、拒绝旧 Token、吊销新 Token。
+
+ClickHouse 批次 ID 显式传入或按持久化字段计算 SHA-256。每张表使用稳定 deduplication token；`ReplacingMergeTree` 按业务身份加 batch ID 长期收敛，查询使用 `FINAL`。同一批重复提交实测只返回一行。DateTime64 查询统一改为 `fromUnixTimestamp64Milli`，修复容器测试发现的非整毫秒时间范围偶发空结果。单节点长窗口自动按 `duration/maxPoints` 在服务端聚合，请求指标使用 max，其余值使用兼容 average/argMax；超过硬预算返回稳定错误。
+
+本机 OrbStack 容器门禁使用 PostgreSQL 17.5 与 ClickHouse 26.5.1：
+
+- 两个 adapter 执行 K-601 同一 contract suite；
+- PostgreSQL `verify-full` 与 ClickHouse CA TLS 1.2+ 真实握手；
+- 8 路 PostgreSQL 并发 migration、ClickHouse 重复 migration；
+- `pg_terminate_backend` 后 pool 恢复；
+- ClickHouse 容器真实 stop 后 health 失败、start 后同一 adapter 连续恢复；
+- 128 goroutine × 20 次 PostgreSQL credential read；
+- 10,000 行 ClickHouse 单批写入并完整读取；
+- 同 batch ID 重复提交、查询硬上限、retention mutation 与关闭行为。
+
+`./scripts/test-scale-storage.sh` 与 `GOFLAGS=-race ./scripts/test-scale-storage.sh` 最终运行通过并自动清理容器、tmpfs、网络和临时证书。默认 Lite 与 `-tags scale` 两种 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 和 `git diff --check` 全部通过。

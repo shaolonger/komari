@@ -34,6 +34,7 @@ func Default() (*Writer, error) {
 func Submit(ctx context.Context, batch Batch) error {
 	if store, ok := storage.Telemetry(); ok {
 		return store.WriteBatch(ctx, storage.TelemetryBatch{
+			ID:          batch.ID,
 			Records:     batch.Records,
 			GPURecords:  batch.GPURecords,
 			PingRecords: batch.PingRecords,

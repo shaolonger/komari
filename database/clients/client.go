@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"errors"
 	"log"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/historycache"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -88,6 +90,24 @@ func writeClientTokenLifecycle(clientUUID, token string, issuedAt, expiresAt, re
 		"updated_at":       time.Now(),
 	}
 	var oldToken string
+	var rollback *models.Client
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		store, _ := storage.Control()
+		original, err := store.ClientByUUID(context.Background(), clientUUID)
+		if err != nil {
+			return ClientTokenStatus{}, err
+		}
+		updated := original
+		updated.Token = token
+		updated.TokenIssuedAt = issuedAt
+		updated.TokenExpiresAt = expiresAt
+		updated.TokenRevokedAt = revokedAt
+		updated.UpdatedAt = models.FromTime(time.Now())
+		if err := writer.UpsertClientAuth(context.Background(), updated); err != nil {
+			return ClientTokenStatus{}, err
+		}
+		rollback = &original
+	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUUID).Scan(&oldToken).Error; err != nil {
 			return err
@@ -101,6 +121,11 @@ func writeClientTokenLifecycle(clientUUID, token string, issuedAt, expiresAt, re
 		}
 		return nil
 	}); err != nil {
+		if rollback != nil {
+			if writer, ok := storage.ExternalControlWriter(); ok {
+				_ = writer.UpsertClientAuth(context.Background(), *rollback)
+			}
+		}
 		return ClientTokenStatus{}, err
 	}
 	invalidateClientCredential(oldToken, token)
@@ -119,6 +144,18 @@ func DeleteClientConfig(clientUuid string) error {
 func DeleteClient(clientUuid string) error {
 	db := dbcore.GetDBInstance()
 	var oldToken string
+	var rollback *models.Client
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		store, _ := storage.Control()
+		existing, err := store.ClientByUUID(context.Background(), clientUuid)
+		if err != nil {
+			return err
+		}
+		if err := writer.DeleteClientAuth(context.Background(), clientUuid); err != nil {
+			return err
+		}
+		rollback = &existing
+	}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUuid).Scan(&oldToken).Error; err != nil {
 			return err
@@ -126,6 +163,11 @@ func DeleteClient(clientUuid string) error {
 		return tx.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
 	})
 	if err != nil {
+		if rollback != nil {
+			if writer, ok := storage.ExternalControlWriter(); ok {
+				_ = writer.UpsertClientAuth(context.Background(), *rollback)
+			}
+		}
 		return err
 	}
 	invalidateClientCredential(oldToken)
@@ -318,6 +360,16 @@ func CreateClient() (clientUUID, token string, err error) {
 		UpdatedAt:     models.FromTime(time.Now()),
 	}
 
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertClientAuth(context.Background(), client); err != nil {
+			return "", "", err
+		}
+		defer func() {
+			if err != nil {
+				_ = writer.DeleteClientAuth(context.Background(), clientUUID)
+			}
+		}()
+	}
 	err = db.Create(&client).Error
 	if err != nil {
 		return "", "", err
@@ -346,6 +398,16 @@ func CreateClientWithName(name string) (clientUUID, token string, err error) {
 		UpdatedAt:     models.FromTime(time.Now()),
 	}
 
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertClientAuth(context.Background(), client); err != nil {
+			return "", "", err
+		}
+		defer func() {
+			if err != nil {
+				_ = writer.DeleteClientAuth(context.Background(), clientUUID)
+			}
+		}()
+	}
 	err = db.Create(&client).Error
 	if err != nil {
 		return "", "", err
@@ -403,6 +465,16 @@ func GetClientTokenByUUID(uuid string) (token string, err error) {
 }
 
 func GetClientTokenStatusByUUID(uuid string) (ClientTokenStatus, error) {
+	if store, ok := storage.Control(); ok {
+		client, err := store.ClientByUUID(context.Background(), uuid)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				err = gorm.ErrRecordNotFound
+			}
+			return ClientTokenStatus{}, err
+		}
+		return buildClientTokenStatus(client), nil
+	}
 	client, err := GetClientByUUID(uuid)
 	if err != nil {
 		return ClientTokenStatus{}, err
@@ -548,12 +620,32 @@ func SaveClient(updates map[string]interface{}) error {
 	var oldToken string
 	var err error
 	if tokenChanged {
+		var rollback *models.Client
+		if writer, ok := storage.ExternalControlWriter(); ok {
+			store, _ := storage.Control()
+			original, lookupErr := store.ClientByUUID(context.Background(), clientUUID)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			updated := original
+			updated.Token = newToken
+			updated.UpdatedAt = models.FromTime(time.Now())
+			if writeErr := writer.UpsertClientAuth(context.Background(), updated); writeErr != nil {
+				return writeErr
+			}
+			rollback = &original
+		}
 		err = db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUUID).Scan(&oldToken).Error; err != nil {
 				return err
 			}
 			return tx.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
 		})
+		if err != nil && rollback != nil {
+			if writer, ok := storage.ExternalControlWriter(); ok {
+				_ = writer.UpsertClientAuth(context.Background(), *rollback)
+			}
+		}
 	} else {
 		err = db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
 	}
@@ -565,4 +657,22 @@ func SaveClient(updates map[string]interface{}) error {
 	}
 	historycache.Invalidate()
 	return nil
+}
+
+// SyncClientAuth mirrors the current SQLite client credential into an external
+// authoritative control store. It is used only by compatibility ingestion
+// paths that still upsert client metadata directly.
+func SyncClientAuth(clientUUID string) error {
+	writer, ok := storage.ExternalControlWriter()
+	if !ok {
+		return nil
+	}
+	var client models.Client
+	if err := dbcore.GetDBInstance().Where("uuid = ?", clientUUID).First(&client).Error; err != nil {
+		return err
+	}
+	if client.Token == "" {
+		return writer.DeleteClientAuth(context.Background(), clientUUID)
+	}
+	return writer.UpsertClientAuth(context.Background(), client)
 }

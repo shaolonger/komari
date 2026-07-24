@@ -28,13 +28,9 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
-	"github.com/komari-monitor/komari/database/controlstore"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
-	"github.com/komari-monitor/komari/database/telemetrywriter"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/public"
@@ -443,8 +439,15 @@ func InitDatabase() {
 	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_FILE=%s]",
 	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_FILE"))
 	// }
-	var count int64 = 0
-	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
+	control, err := storage.RequireControl()
+	if err != nil {
+		panic(err)
+	}
+	hasUsers, err := control.HasUsers(context.Background())
+	if err != nil {
+		panic(fmt.Errorf("check control store users: %w", err))
+	}
+	if !hasUsers {
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
 		if err != nil {
 			panic(err)
@@ -458,37 +461,11 @@ func InitDatabase() {
 			filePath := "./data/init_password.txt"
 			err = os.WriteFile(filePath, []byte(passwd), 0600)
 			if err != nil {
-				_ = dbcore.GetDBInstance().Where("username = ?", user).Delete(&models.User{}).Error
+				_ = accounts.DeleteAccountByUsername(user)
 				log.Fatalf("Failed to persist the initial admin password to %s securely: %v. The default admin account has been rolled back; fix the path permissions or set ADMIN_PASSWORD before restarting.", filePath, err)
 			} else {
 				log.Printf("Default admin account created. Username: %s. Password has been securely written to local file %s to prevent log exposure. Retrieve it and delete the file.\n", user, filePath)
 			}
-		}
-	}
-}
-
-func installStorageAdapters() {
-	db := dbcore.GetDBInstance()
-	if _, ok := storage.Control(); !ok {
-		control, err := controlstore.NewSQLite(db)
-		if err != nil {
-			panic(fmt.Errorf("initialize SQLite control store: %w", err))
-		}
-		if _, err := storage.InstallControl(control); err != nil {
-			panic(fmt.Errorf("install SQLite control store: %w", err))
-		}
-	}
-	if _, ok := storage.Telemetry(); !ok {
-		writerDB, err := dbcore.GetWriterDBInstance()
-		if err != nil {
-			panic(fmt.Errorf("initialize SQLite telemetry writer: %w", err))
-		}
-		telemetry, err := records.NewSQLiteTelemetryStore(db, writerDB, telemetrywriter.Config{})
-		if err != nil {
-			panic(fmt.Errorf("initialize SQLite telemetry store: %w", err))
-		}
-		if _, err := storage.InstallTelemetry(telemetry); err != nil {
-			panic(fmt.Errorf("install SQLite telemetry store: %w", err))
 		}
 	}
 }

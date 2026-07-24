@@ -38,6 +38,7 @@ func NewSQLiteTelemetryStore(readDB *gorm.DB, writeDB *sql.DB, config telemetryw
 
 func (store *SQLiteTelemetryStore) WriteBatch(ctx context.Context, batch storage.TelemetryBatch) error {
 	return store.writer.Submit(ctx, telemetrywriter.Batch{
+		ID:          batch.ID,
 		Records:     batch.Records,
 		GPURecords:  batch.GPURecords,
 		PingRecords: batch.PingRecords,

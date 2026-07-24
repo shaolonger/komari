@@ -1,10 +1,12 @@
 package accounts
 
 import (
+	"context"
 	"image"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -28,14 +30,23 @@ func Generate2Fa() (string, image.Image, error) {
 }
 
 func Enable2Fa(uuid, secret string) error {
+	if err := updateExternalUserAuth(uuid, false, func(user *models.User) {
+		user.TwoFactor = secret
+	}); err != nil {
+		return err
+	}
 	db := dbcore.GetDBInstance()
 	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", secret).Error
 }
 
 func Verify2Fa(uuid, code string) (bool, error) {
-	db := dbcore.GetDBInstance()
 	var user models.User
-	err := db.Where("uuid = ?", uuid).First(&user).Error
+	var err error
+	if store, ok := storage.Control(); ok {
+		user, err = store.UserByUUID(context.Background(), uuid)
+	} else {
+		err = dbcore.GetDBInstance().Where("uuid = ?", uuid).First(&user).Error
+	}
 	if err != nil {
 		return false, err
 	}
@@ -53,6 +64,11 @@ func Verify2Fa(uuid, code string) (bool, error) {
 }
 
 func Disable2Fa(uuid string) error {
+	if err := updateExternalUserAuth(uuid, false, func(user *models.User) {
+		user.TwoFactor = ""
+	}); err != nil {
+		return err
+	}
 	db := dbcore.GetDBInstance()
 	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error
 }

@@ -68,8 +68,16 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 		}
 	}
 
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertSessionAuth(context.Background(), sessionRecord); err != nil {
+			return "", err
+		}
+	}
 	err := db.Create(&sessionRecord).Error
 	if err != nil {
+		if writer, ok := storage.ExternalControlWriter(); ok {
+			_ = writer.DeleteSessionAuth(context.Background(), sessionRecord.SessionDigest)
+		}
 		return "", err
 	}
 	invalidateSessionCredential(session)
@@ -144,6 +152,12 @@ func GetUserBySession(session string) (models.User, error) {
 
 // DeleteSession 删除指定会话
 func DeleteSession(session string) (err error) {
+	digest := credentialcache.Digest(session)
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteSessionAuth(context.Background(), digest[:]); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
 	result := db.Where("session = ?", session).Delete(&models.Session{})
 	if result.Error != nil {
@@ -155,6 +169,11 @@ func DeleteSession(session string) (err error) {
 }
 
 func DeleteAllSessions() error {
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteAllSessionsAuth(context.Background()); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
 	result := db.Where("1 = 1").Delete(&models.Session{})
 	if result.Error != nil {
@@ -166,6 +185,11 @@ func DeleteAllSessions() error {
 }
 
 func DeleteSessionsByUUID(uuid string) error {
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteSessionsByUserAuth(context.Background(), uuid); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
 	result := db.Where("uuid = ?", uuid).Delete(&models.Session{})
 	if result.Error != nil {
@@ -211,8 +235,14 @@ func UpdateLatest(session, useragent, ip string) error {
 }
 
 func RemoveExpiredSessions() error {
+	now := time.Now()
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteExpiredSessionsAuth(context.Background(), now); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
-	result := db.Where("expires < ?", time.Now()).Delete(&models.Session{})
+	result := db.Where("expires < ?", now).Delete(&models.Session{})
 	if result.Error != nil {
 		return result.Error
 	}

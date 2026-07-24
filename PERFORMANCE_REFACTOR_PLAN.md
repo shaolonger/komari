@@ -219,6 +219,14 @@ SQLite 默认适配器复用 K-102 的单 writer、K-402 的分层查询规划�
 
 `internal/storage/contracttest` 是所有后端共享的行为门禁，覆盖批次原子性、范围/聚合语义、保留返回值、健康、取消、并发写与认证真相源。SQLite 还增加缺表故障下整批回滚、断开连接健康失败、真实 raw 保留删除、重复迁移、legacy Session digest 回填和并发认证读取。K-602 的 PostgreSQL/ClickHouse 适配器必须执行同一套契约，不能以方言差异改变领域语义。
 
+### 4.10 可选规模化后端落地（K-602）
+
+规模化模式使用显式环境开关选择 PostgreSQL control store 和 ClickHouse telemetry store；空配置始终安装 K-601 SQLite adapter。PostgreSQL 只保存鉴权强一致所需字段，Session 只保存 digest。User/Client/Session 安全变更先提交外部权威库，再镜像 SQLite 元数据和失效缓存；外部控制库不可用时失败关闭，禁止回退 SQLite 绕过吊销状态。首次 bootstrap 只允许目标 PostgreSQL 为空，且必须显式授权；非空目标绝不被 SQLite 覆盖。
+
+ClickHouse native adapter 使用 LZ4、round-robin 多地址和有界连接池。每批使用显式或内容 SHA-256 idempotency key，短期由 `insert_deduplication_token` 去重，长期由 `ReplacingMergeTree` 的业务键加 batch ID 去重，读取用 `FINAL`。跨 Record/GPU/Ping 表的部分成功通过相同 ID 重试收敛，不宣称不存在的跨表事务。时间参数统一以 Unix 毫秒绑定，避免 DateTime64 纳秒/时区边界漂移；查询有硬上限，单节点长窗口由 ClickHouse 按预算聚合。
+
+两个后端都默认强制 TLS，连接/迁移/健康错误不包含密码；只有显式 `ALLOW_INSECURE` 才能用于隔离本机测试。PostgreSQL 拒绝 plaintext fallback，ClickHouse TLS 最低 1.2并支持 CA/mTLS。完整配置、迁移、上线与回滚步骤见 `SCALE_STORAGE.md`。
+
 ## 5. 性能与资源目标
 
 所有指标在固定硬件和固定回放数据集上验收：
