@@ -41,6 +41,11 @@ if rg -n 'npm install|git clone .*komari-web|go-version:[[:space:]]*"1\\.23"|nod
   echo "mutable or obsolete build command remains in workflows" >&2
   exit 1
 fi
+if rg -n 'cat[[:space:]]+build/versions\\.env[[:space:]]*>>[[:space:]]*"\\$GITHUB_ENV"' \
+  .github/workflows; then
+  echo "workflow exports comments or blank lines to GITHUB_ENV" >&2
+  exit 1
+fi
 
 GOTOOLCHAIN="go${GO_VERSION}" go mod verify
 GOTOOLCHAIN="go${GO_VERSION}" go list -mod=readonly -m all >/dev/null

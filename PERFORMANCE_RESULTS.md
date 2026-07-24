@@ -604,4 +604,6 @@ Apple M4/macOS arm64 的全包 benchmark sweep 使用 `-benchtime=100ms -count=1
 - 前端联网/离线逐文件可复现、PGO 二进制两次逐字节可复现；
 - Windows amd64/arm64/386 与 Linux amd64/arm64/386/riscv64 完整 CGO/Zig release matrix。
 
+首次 GitHub PR 门禁在实际 Runner 文件命令解析阶段发现：workflow 把带注释的整个 `build/versions.env` 追加到 `$GITHUB_ENV`，Runner 会拒绝注释行。全部 7 个版本加载入口已改为只导出语法合法的 `KEY=VALUE` 行；供应链脚本新增反向扫描，禁止重新出现整文件 `cat`。修复后固定 actionlint、YAML parse、完整漏洞扫描和 default unit/vet 再次通过，并由同一 PR SHA 重新执行远端门禁。
+
 Release 资产合同为 7 个二进制和 7 个匹配的 `.sha256`。分支推送、GitHub 手动质量门禁、`v1.3.0` Release 创建、远端 Actions 等待和资产下载校验按用户要求在两个仓库本地 Todo 均完成后执行。
