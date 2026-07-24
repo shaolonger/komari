@@ -215,7 +215,7 @@ func WebSocketReport(c *gin.Context) {
 	}
 	ws.SetConnectedClients(uuid, conn)
 	observability.WSConnected()
-	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
+	log.Printf("Client %s is reconnect success, connID: %d, telemetry protocol: v%d", uuid, conn.ID, wireProtocol)
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
 		observability.WSDisconnected()

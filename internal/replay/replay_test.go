@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -84,12 +85,44 @@ func TestConfigValidation(t *testing.T) {
 		{Mode: ModeHTTP, Endpoint: "ws://localhost", Nodes: 1, ReportsPerNode: 1},
 		{Mode: ModeWS, Endpoint: "http://localhost", Nodes: 1, ReportsPerNode: 1},
 		{Mode: ModeHTTP, Endpoint: "http://localhost", Nodes: 0, ReportsPerNode: 1},
+		{Mode: ModeHTTP, Endpoint: "http://localhost", Nodes: 1, RampUp: -time.Second, ReportsPerNode: 1},
 		{Mode: ModeHTTP, Endpoint: "http://localhost", Nodes: 1},
 	}
 	for _, cfg := range tests {
 		if _, err := Run(context.Background(), cfg); err == nil {
 			t.Fatalf("expected validation failure for %+v", cfg)
 		}
+	}
+}
+
+func TestRunRampsInitialConnections(t *testing.T) {
+	var mu sync.Mutex
+	var calls []time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls = append(calls, time.Now())
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	result, err := Run(context.Background(), Config{
+		Mode: ModeHTTP, Endpoint: server.URL, Nodes: 3, RampUp: 60 * time.Millisecond,
+		ReportsPerNode: 1, RequestTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Succeeded != 3 || result.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 3 {
+		t.Fatalf("received %d calls, want 3", len(calls))
+	}
+	if spread := calls[len(calls)-1].Sub(calls[0]); spread < 40*time.Millisecond {
+		t.Fatalf("connection ramp spread = %s, want at least 40ms", spread)
 	}
 }
 

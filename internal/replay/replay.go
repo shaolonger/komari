@@ -42,6 +42,7 @@ type Config struct {
 	Endpoint       string
 	TokenTemplate  string
 	Nodes          int
+	RampUp         time.Duration
 	Interval       time.Duration
 	Duration       time.Duration
 	ReportsPerNode int
@@ -87,6 +88,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Nodes <= 0 || c.Nodes > maxNodes {
 		return fmt.Errorf("nodes must be between 1 and %d", maxNodes)
+	}
+	if c.RampUp < 0 {
+		return errors.New("ramp-up cannot be negative")
 	}
 	if c.Interval < 0 {
 		return errors.New("interval cannot be negative")
@@ -165,6 +169,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		wg.Add(1)
 		go func(node int) {
 			defer wg.Done()
+			if !waitForRamp(runCtx, cfg.RampUp, node, cfg.Nodes) {
+				return
+			}
 			if cfg.Mode == ModeWS {
 				runWSNode(runCtx, cfg, node, col)
 				return
@@ -182,6 +189,23 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		return result, err
 	}
 	return result, nil
+}
+
+func waitForRamp(ctx context.Context, rampUp time.Duration, node, nodes int) bool {
+	if rampUp <= 0 || node <= 0 || nodes <= 1 {
+		return ctx.Err() == nil
+	}
+	steps := time.Duration(nodes - 1)
+	delay := (rampUp/steps)*time.Duration(node) +
+		time.Duration((int64(rampUp%steps)*int64(node))/int64(steps))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func runHTTPNode(ctx context.Context, cfg Config, node int, col *collector) {

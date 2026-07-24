@@ -527,3 +527,81 @@ PGO profile 由已认证 JSON v1、WebSocket JSON v1 和 Telemetry v2 三条真�
 供应链门禁实际发现并修复了原依赖中的三条可达漏洞：`golang.org/x/net` HTTP/2 frame panic、`go-jose` JWE panic 和 `golang.org/x/text` 非法输入死循环；升级至修复版本后，固定版本 `govulncheck` 报告 0 reachable vulnerability。门禁同时通过 module checksum、readonly module graph、Docker digest、Action SHA、废弃构建命令扫描、Bash syntax、YAML parse 和 `actionlint`。
 
 最终验证：Go 1.25.12 下 default `go test ./...`、scale `go test -tags=scale ./...`、完整 `go test -race ./...`、default/scale `go vet`、PGO profile pprof 校验、前端在线/离线复现、重复二进制哈希、同机性能基线、完整 npm high audit、`govulncheck`、`actionlint` 和 `git diff --check` 全部通过。完整操作和回滚合同见 `BUILD_ENGINEERING.md`。
+
+## K-604 全量压力、安全回归、升级回滚和发布验收
+
+最终验收同时覆盖“结果是否正确”“安全边界是否仍然成立”“旧版本能否迁移/回滚”“高并发下资源是否有上界”和“实际发布输入是否能在所有目标平台构建”，而不是只运行一次短 benchmark。
+
+### 真实旧库升级与回滚
+
+使用未经修改的 `v1.2.13` 二进制创建并运行真实 SQLite 数据库，写入带固定 remark 的客户端、固定 Token 和遥测记录，checkpoint 后保存升级前物理快照。快照 SHA-256 为：
+
+```text
+89117f1303754eeecf3ddbea5a04349335bb99fad64397aef3827338a41c485b
+```
+
+升级前 `PRAGMA user_version=0` 且不存在 `schema_migrations`。当前服务端直接打开同一文件后：
+
+- `/ping` 正常；
+- `PRAGMA integrity_check=ok`；
+- `user_version=3`；
+- migration 记录精确包含 `sqlite_hot_path_indexes`、`incremental_telemetry_compaction`、`hourly_telemetry_rollups`；
+- 客户端身份、remark、Token 和遥测数据完整；
+- 三组热路径组合索引存在。
+
+回滚测试不是让新二进制猜测性降级 schema，而是恢复升级前快照。恢复文件与原快照 SHA-256 完全相同；`v1.2.13` 可直接启动，`integrity_check=ok`、`user_version=0`、无 migration 表，客户端与遥测继续可读。该流程证明升级可原地进行，回滚保持物理可恢复性。
+
+### 新旧 Agent/Server 协议四象限
+
+四种组合均使用真实进程、真实 WebSocket 和数据库写入验证：
+
+| Agent | Server | 实际协议 | 结果 |
+|---|---|---|---|
+| v1.2.8 | v1.2.13 | JSON v1 | 基线连接和上报成功 |
+| v1.2.8 | v1.3.0 | JSON v1 | 新 Server 日志确认 protocol v1 |
+| v1.3.0 | v1.2.13 | JSON v1 | 新 Agent 日志确认安全回退 v1 |
+| v1.3.0 | v1.3.0 | binary v2 | 两端日志确认 protocol v2 |
+
+四个客户端的 basic info 均写入数据库，新服务端数据库 `integrity_check=ok`。当前 Agent 收到 SIGINT 后完成 graceful shutdown；旧 Agent 也能按原语义退出。新增的协议日志只输出版本号，不输出 Token、URL query 或遥测内容。
+
+### 虚拟 Agent 压力与长稳
+
+测试数据库预置 10,000 个真实 Client/Token。所有测试使用鉴权请求和生产解码/聚合路径，并采集成功数、延迟和 Go heap 峰值：
+
+| 场景 | 成功/尝试 | 吞吐或耗时 | p50 / p95 / p99 | 峰值 heap |
+|---|---:|---:|---:|---:|
+| HTTP，10,000 节点各上报一次 | 10,000/10,000 | 1.555s，6,430.30 report/s | 553.95 / 811.78 / 868.11 ms | 174,011,560 B |
+| WebSocket，2,000 同时连接，各 3 次 | 6,000/6,000 | 136.6ms，43,934.7 report/s | 6.291µs / 58.791µs / 14.009ms | 29,012,512 B |
+| WebSocket，10,000 连接，5s ramp | 10,000/10,000 | 5.0195s，1,992.23 report/s | 4.708 / 6.625 / 10.875 µs | 22,005,616 B |
+| 长稳，100 节点、1s 间隔、120 次 | 12,000/12,000 | 125.094s，95.928 report/s | 61.292 / 97.791 / 126.125 µs | 2,654,496 B |
+
+零 ramp、10,000 个 TCP/WebSocket 同时拨号的边界探针在本机只能建立 9,654 个首轮连接、8,411 个立即复测连接；本机 `kern.ipc.somaxconn=128`，且该探针没有真实 Agent 已有的指数退避/full jitter。它不被伪装成通过结果，也不作为生产发布门禁。为使故障恢复模型可重复，回放器新增可选、确定性、均匀分布的 `-ramp-up`；负值被拒绝，零值仍保留硬风暴能力。发布门禁明确采用 2,000 硬风暴与 10,000 抖动恢复两种不同负载模型。
+
+全部压力完成后 `/ping` 继续正常，数据库 `integrity_check=ok`、schema version 3、10,000 个客户端与 10,000 条离线状态记录存在，服务端可优雅停止。
+
+### Benchmark、构建和安全门禁
+
+Apple M4/macOS arm64 的全包 benchmark sweep 使用 `-benchtime=100ms -count=1`，所有 benchmark 成功。代表性结果：
+
+| 热路径 | 结果 |
+|---|---:|
+| credential cache hit | 97～99 ns/op，0 alloc |
+| telemetry v2 decode | 191.2 ns/op，214 B/op，6 alloc |
+| config snapshot read | 13.19 ns/op；DB 对照 7.864 µs/op |
+| composite history index | 5.675 µs/op；legacy 对照 1.3627 ms/op |
+| batch write | 969.5 µs/op，1 条 SQL |
+| 10k 节点 traffic aggregation | 26.42 ms/op |
+| sharded minute accumulator | 12.618 µs/op，7.3 KiB/9 alloc；legacy 26.397 µs、30.8 KiB/112 alloc |
+| 10k dashboard single delta | 323.3 ns/op，658 B/4 alloc |
+
+发布 dry-run 通过：
+
+- default/scale unit、完整 race、default/scale vet；
+- 容器化 PostgreSQL/ClickHouse contract、TLS、迁移、故障恢复和压力集成；
+- 全包 benchmark、10k 回放、长稳和 v1/v2 兼容矩阵；
+- 固定工具版本的 `govulncheck`：0 个可达漏洞；
+- Action SHA、Docker digest、module checksum、readonly graph、Bash/YAML/actionlint；
+- 前端联网/离线逐文件可复现、PGO 二进制两次逐字节可复现；
+- Windows amd64/arm64/386 与 Linux amd64/arm64/386/riscv64 完整 CGO/Zig release matrix。
+
+Release 资产合同为 7 个二进制和 7 个匹配的 `.sha256`。分支推送、GitHub 手动质量门禁、`v1.3.0` Release 创建、远端 Actions 等待和资产下载校验按用户要求在两个仓库本地 Todo 均完成后执行。

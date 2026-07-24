@@ -21,6 +21,7 @@ func main() {
 	flag.StringVar(&cfg.Endpoint, "endpoint", "http://127.0.0.1:25774/api/clients/report", "full report endpoint URL")
 	flag.StringVar(&cfg.TokenTemplate, "token-template", "", "Bearer token; {index} expands to the virtual node number")
 	flag.IntVar(&cfg.Nodes, "nodes", 1, "number of virtual agents")
+	flag.DurationVar(&cfg.RampUp, "ramp-up", 0, "spread initial connections evenly across this duration")
 	flag.DurationVar(&cfg.Interval, "interval", time.Second, "delay between reports per agent")
 	flag.DurationVar(&cfg.Duration, "duration", time.Minute, "run duration")
 	flag.IntVar(&cfg.ReportsPerNode, "reports-per-node", 0, "fixed report count per node (overrides duration)")

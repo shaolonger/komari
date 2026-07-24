@@ -1,6 +1,6 @@
 # Komari 极致性能重构设计
 
-状态：执行中  
+状态：已完成
 基线：`v1.2.13` / `aea0d7e`；实测结果见 [`PERFORMANCE_RESULTS.md`](PERFORMANCE_RESULTS.md#k-001-服务端性能基线与虚拟-agent-回放器)
 配套清单：[`PERFORMANCE_REFACTOR_TODOLIST.md`](PERFORMANCE_REFACTOR_TODOLIST.md)
 

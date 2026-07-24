@@ -1,6 +1,6 @@
 # Komari 极致性能重构 Todo
 
-状态：执行中  
+状态：全部本地重构 Todo 已完成
 设计文档：[`PERFORMANCE_REFACTOR_PLAN.md`](PERFORMANCE_REFACTOR_PLAN.md)
 性能结果：[`PERFORMANCE_RESULTS.md`](PERFORMANCE_RESULTS.md)
 
@@ -183,8 +183,12 @@
   - benchmark 采用受控基线比较。
   - 测试：重复构建哈希/元数据、无网络漂移、PGO on/off smoke、安全供应链门禁。
 
-- [ ] **K-604 全量压力、安全回归、升级回滚和发布验收**
+- [x] **K-604 全量压力、安全回归、升级回滚和发布验收**
   - 完成全部单元、集成、race、vet、benchmark 和虚拟 Agent 压测。
   - 完成 SQLite 旧库升级/回滚和 v1/v2 Agent 兼容矩阵。
   - 检查全部 Todo、提交、工作树和发布资产。
-  - 推送分支，创建新 SemVer Release，等待 GitHub Actions 成功并验证资产。
+  - 完成发布 dry-run、Release Notes 和资产合同；两个仓库的本地 Todo 全部提交后再执行外部发布。
+
+## Todo 后发布执行
+
+按照“先完成两个仓库的全部重构 Todo，再更新 GitHub 并生成 Release”的顺序，分支推送、手动质量门禁、SemVer Release、发布工作流等待和远端资产校验属于 Todo 完成后的外部执行阶段，不制造“发布后修改 Todo 又需要新提交”的循环依赖。目标版本为 `v1.3.0`，发布说明见 [`RELEASE_NOTES_v1.3.0.md`](RELEASE_NOTES_v1.3.0.md)。
