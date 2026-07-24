@@ -33,6 +33,10 @@ fi
 
 mkdir -p "$(dirname "${output}")"
 ldflags="-s -w -buildid= -X github.com/komari-monitor/komari/utils.CurrentVersion=${version} -X github.com/komari-monitor/komari/utils.VersionHash=${version_hash}"
+target_goos="${GOOS:-$(go env GOOS)}"
+if [[ "${target_goos}" == "linux" ]]; then
+  ldflags+=" -extldflags=-Wl,--build-id=none"
+fi
 args=(
   build
   -trimpath

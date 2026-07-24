@@ -608,4 +608,6 @@ Apple M4/macOS arm64 的全包 benchmark sweep 使用 `-benchtime=100ms -count=1
 
 第二轮 PR 门禁验证完整跨平台构建成功，并发现两个基线环境假设：GitHub Ubuntu image 不保证预装 `rg`，且默认分支版本早于本轮 benchmark package surface。供应链扫描已改为 POSIX 环境可用的 `grep`；性能门禁继续优先比较事件 base，但当且仅当 base 缺少 7 个受控 benchmark 时使用完整 SHA 固定的 K-602 bootstrap baseline `16ad7621a36215dd28005c83fc913ae6907cd701`。固定基线的格式、commit 可达性和 benchmark 完整性均 fail closed；quality checkout 显式获取完整历史以验证可达性。本轮合并后，后续 PR 会自然恢复使用事件 base。门禁同时修复了旧 auto-merge workflow 中被 GitHub Runner ShellCheck 实际检出的引号问题。
 
+第三轮 quality 已通过供应链、漏洞、default/scale、race/vet、前端在线/离线复现和 PGO profile 生成，最后发现 Linux CGO 的外部 GNU linker 在 Go `-buildid=` 已清空 Go ID 后仍单独生成 `.note.gnu.build-id`。发布构建现在只对 Linux 增加 `-extldflags=-Wl,--build-id=none`；可复现测试同时用 `go tool buildid` 和重复 SHA 验证，不把内容相关 GNU ID 与 Go ID 混淆，也不影响 Windows/Darwin linker。供应链门禁强制保留该 Linux 参数。
+
 Release 资产合同为 7 个二进制和 7 个匹配的 `.sha256`。分支推送、GitHub 手动质量门禁、`v1.3.0` Release 创建、远端 Actions 等待和资产下载校验按用户要求在两个仓库本地 Todo 均完成后执行。

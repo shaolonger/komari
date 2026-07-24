@@ -78,6 +78,7 @@ VERSION_HASH="$(git rev-parse HEAD)" \
 - `-trimpath`：删除本机绝对源码路径；
 - `-buildvcs=false`：不混入随工作树变化的隐式 VCS 元数据；
 - `-buildid=`：删除 Go 随构建生成的 build ID；
+- Linux CGO 额外使用 `-extldflags=-Wl,--build-id=none`，阻止外部 ELF linker 重新加入 `.note.gnu.build-id`；
 - `-s -w`：发布产物不包含调试符号和本机 DWARF 路径；
 - `VERSION` 和完整 `VERSION_HASH` 是唯一显式版本输入；
 - 默认显式使用仓库内固定的 PGO profile；

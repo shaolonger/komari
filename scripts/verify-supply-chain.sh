@@ -27,6 +27,10 @@ if [[ ! -s build/pgo/default.pgo ]]; then
   echo "release PGO profile is missing" >&2
   exit 1
 fi
+if ! grep -Fq -- '-extldflags=-Wl,--build-id=none' scripts/build-release.sh; then
+  echo "Linux external-linker build ID suppression is missing" >&2
+  exit 1
+fi
 
 unpinned_actions="$(
   awk '/^[[:space:]]*uses:/ { print $2 }' .github/workflows/*.yml |
