@@ -445,3 +445,22 @@ Apple M4/macOS arm64，manifest 已热且资源带 Brotli/Gzip 两种 variant：
 | 主题校验 + manifest asset lookup | 43.45～44.60 | 0 | 0 |
 
 验证覆盖：Brotli/Gzip/identity 协商与 q 值、Gzip 解压内容、variant ETag、304 空响应、immutable、Vary、主题 fallback、identity 覆盖不继承错误 sidecar、文件修改前后显式失效、HTML 仅生成一次、主题/内存硬上限、路径穿越、非法 ID、symlink 逃逸及缓存并发 race。仓库 `go test ./...`、Public/Admin 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-601 遥测/控制存储契约与 SQLite 适配器
+
+新增数据库中立的 `TelemetryStore` 与 `ControlStore`。遥测契约定义原子 batch write、Record/GPU range query、显式 resolution aggregate、多级 retention、health 和 bounded close；控制契约定义 Client Token、Session、User 强一致读取、迁移、health 和 close。接口模型只使用领域结构与 context，不暴露 `*gorm.DB`、SQL 方言、DSN 或连接池。后端注册使用原子发布与可恢复安装，读取没有全局互斥锁。
+
+SQLite telemetry adapter 直接组合既有的单连接有界 writer、分层查询规划器、聚合语义和多级保留；不会另造一套容易漂移的 SQL。生产启动完成 schema migration 后安装 SQLite control/telemetry adapter。分钟遥测、Ping、兼容 `SaveClientReport`、Record/GPU 辅助入口、公开历史范围读取和保留任务都优先通过契约；未安装时保留原 SQLite 路径，仅用于旧测试和维护兼容。shutdown 通过统一 storage lifecycle drain writer。
+
+认证缓存命中路径不变；cache miss 现在向 `ControlStore` 回源。Client Token 的过期/吊销字段、Session expiry 与 User 都来自强一致后端。Session 继续优先以 SHA-256 digest 查询；旧记录只在首次成功认证时用原 token 完成一次兼容查找并回填 digest。跨后端统一 `ErrNotFound` 在旧 API 边界映射为原有 GORM not-found，因此外部错误和安全语义不变。health 响应不含地址、DSN、凭据或 TLS 配置。
+
+可复用的 adapter contract suite 覆盖：
+
+- Record/GPU 原子批写、范围查询与请求指标峰值聚合；
+- retention、health、context 取消和 32 路并发写；
+- Client/Session/User 真相源、not-found、重复迁移、取消和 64 路并发读；
+- SQLite 缺失 GPU 表时 Record+GPU 整批不产生部分提交；
+- 真实 raw 过期删除但保留新数据、关闭连接健康失败；
+- legacy Session digest 回填及空凭据拒绝。
+
+仓库 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 和 `git diff --check` 全部通过。

@@ -164,7 +164,7 @@
 
 ## Phase K6：规模化后端与发布工程
 
-- [ ] **K-601 遥测/控制数据存储接口与 SQLite 适配器**
+- [x] **K-601 遥测/控制数据存储接口与 SQLite 适配器**
   - 领域层不直接依赖 GORM 全局实例。
   - 定义 batch write、range query、aggregate、retention、health 接口。
   - SQLite 适配器通过完整兼容测试。

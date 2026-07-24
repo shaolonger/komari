@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/internal/storage"
 )
 
 var (
@@ -31,6 +32,13 @@ func Default() (*Writer, error) {
 }
 
 func Submit(ctx context.Context, batch Batch) error {
+	if store, ok := storage.Telemetry(); ok {
+		return store.WriteBatch(ctx, storage.TelemetryBatch{
+			Records:     batch.Records,
+			GPURecords:  batch.GPURecords,
+			PingRecords: batch.PingRecords,
+		})
+	}
 	writer, err := Default()
 	if err != nil {
 		return err
@@ -39,6 +47,9 @@ func Submit(ctx context.Context, batch Batch) error {
 }
 
 func CloseDefault(ctx context.Context) error {
+	if store, ok := storage.Telemetry(); ok {
+		return store.Close(ctx)
+	}
 	defaultMu.Lock()
 	writer := defaultWriter
 	defaultWriter = nil

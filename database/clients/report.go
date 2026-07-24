@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +11,8 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
-	"github.com/komari-monitor/komari/internal/historycache"
+	"github.com/komari-monitor/komari/database/telemetrywriter"
+	"github.com/komari-monitor/komari/internal/storage"
 
 	"gorm.io/gorm"
 )
@@ -54,9 +56,16 @@ func GetClientUUIDByToken(token string) (clientUUID string, err error) {
 	}
 	generation := clientCredentialGeneration()
 
-	db := dbcore.GetDBInstance()
 	var client models.Client
-	err = db.Select("uuid", "token_expires_at", "token_revoked_at", "updated_at").Where("token = ?", token).First(&client).Error
+	if store, ok := storage.Control(); ok {
+		client, err = store.ClientCredential(context.Background(), token)
+		if errors.Is(err, storage.ErrNotFound) {
+			err = gorm.ErrRecordNotFound
+		}
+	} else {
+		db := dbcore.GetDBInstance()
+		err = db.Select("uuid", "token_expires_at", "token_revoked_at", "updated_at").Where("token = ?", token).First(&client).Error
+	}
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			cacheMissingClientCredential(token, now, generation)
@@ -178,17 +187,17 @@ func ReportVerify(report common.Report) error {
 
 // SaveClientReport 保存客户端报告到 Record 表
 func SaveClientReport(clientUUID string, report common.Report) (err error) {
-	db := dbcore.GetDBInstance()
-
 	if err := ReportVerify(report); err != nil {
 		return fmt.Errorf("failed to save Record: %v", err)
 	}
 
 	// 保存GPU详细记录到独立表
 	currentTime := time.Now()
+	gpuRecords := make([]models.GPURecord, 0)
 	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
+		gpuRecords = make([]models.GPURecord, 0, len(report.GPU.DetailedInfo))
 		for idx, gpu := range report.GPU.DetailedInfo {
-			gpuRecord := models.GPURecord{
+			gpuRecords = append(gpuRecords, models.GPURecord{
 				Client:      clientUUID,
 				Time:        models.FromTime(currentTime),
 				DeviceIndex: idx,
@@ -197,10 +206,7 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 				MemUsed:     gpu.MemoryUsed,
 				Utilization: float32(gpu.Utilization),
 				Temperature: gpu.Temperature,
-			}
-			if err := db.Create(&gpuRecord).Error; err != nil {
-				return fmt.Errorf("failed to save GPU record: %v", err)
-			}
+			})
 		}
 	}
 
@@ -233,20 +239,11 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 		//Uptime:         report.Uptime,
 	}
 
-	// 使用事务确保 Record 和 ClientsInfo 一致性
-	err = db.Transaction(func(tx *gorm.DB) error {
-		// 保存 Record
-		if err := tx.Create(&Record).Error; err != nil {
-			return fmt.Errorf("failed to save Record: %v", err)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return err
+	if err := telemetrywriter.Submit(context.Background(), telemetrywriter.Batch{
+		Records: []models.Record{Record}, GPURecords: gpuRecords,
+	}); err != nil {
+		return fmt.Errorf("failed to save telemetry batch: %w", err)
 	}
-
-	historycache.Invalidate()
 	return nil
 }
 

@@ -92,7 +92,7 @@ func GetRecordsByUUID(c *gin.Context) {
 		return
 	}
 
-	clientRecords, err := records.QueryRecords(c.Request.Context(), dbcore.GetDBInstance(), records.RecordQuery{
+	clientRecords, err := records.QueryRecordsDefault(c.Request.Context(), records.RecordQuery{
 		Client: uuid, Start: startTime, End: endTime, LoadType: loadType, MaxPoints: maxPoints,
 	})
 	if err != nil {
@@ -114,7 +114,7 @@ func GetRecordsByUUID(c *gin.Context) {
 	// 自动检测是否有GPU数据并附加到响应中
 	if loadType == "" || loadType == "all" || loadType == "gpu" {
 		payload.includeGPU = true
-		gpuRecords, err := records.QueryGPURecords(c.Request.Context(), dbcore.GetDBInstance(), records.GPUQuery{
+		gpuRecords, err := records.QueryGPURecordsDefault(c.Request.Context(), records.GPUQuery{
 			Client: uuid, Start: startTime, End: endTime, MaxPoints: maxPoints,
 		})
 		if err != nil && c.Request.Context().Err() != nil {

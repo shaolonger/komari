@@ -14,9 +14,13 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/internal/observability"
+	"github.com/komari-monitor/komari/internal/storage"
 )
 
 func RecordOne(rec models.Record) error {
+	if store, ok := storage.Telemetry(); ok {
+		return store.WriteBatch(context.Background(), storage.TelemetryBatch{Records: []models.Record{rec}})
+	}
 	db := dbcore.GetDBInstance()
 	if err := db.Create(&rec).Error; err != nil {
 		return err
@@ -26,6 +30,9 @@ func RecordOne(rec models.Record) error {
 }
 
 func RecordGPU(rec models.GPURecord) error {
+	if store, ok := storage.Telemetry(); ok {
+		return store.WriteBatch(context.Background(), storage.TelemetryBatch{GPURecords: []models.GPURecord{rec}})
+	}
 	db := dbcore.GetDBInstance()
 	if err := db.Create(&rec).Error; err != nil {
 		return err
@@ -60,8 +67,7 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 
 func GetGPURecordsByClientAndTimeBudgeted(uuid string, start, end time.Time, maxPoints int) ([]models.GPURecord, error) {
 	started := time.Now()
-	db := dbcore.GetDBInstance()
-	result, err := QueryGPURecords(context.Background(), db, GPUQuery{Client: uuid, Start: start, End: end, MaxPoints: maxPoints})
+	result, err := QueryGPURecordsDefault(context.Background(), GPUQuery{Client: uuid, Start: start, End: end, MaxPoints: maxPoints})
 	observability.ObserveQuery(len(result), time.Since(started), err != nil)
 	return result, err
 }
@@ -73,6 +79,12 @@ func GetLatestRecord(uuid string) (Record []models.Record, err error) {
 }
 
 func DeleteRecordBefore(before time.Time) error {
+	if store, ok := storage.Telemetry(); ok {
+		_, err := store.ApplyRetention(context.Background(), storage.RetentionPolicy{
+			Now: time.Now(), FinalCutoff: before,
+		})
+		return err
+	}
 	db := dbcore.GetDBInstance()
 	defer historycache.Invalidate()
 	if err := ApplyTierRetentionAt(context.Background(), db, time.Now(), before); err != nil {
@@ -92,12 +104,30 @@ func GetRecordsByClientAndTimeProjected(uuid string, start, end time.Time, loadT
 
 func GetRecordsByClientAndTimeBudgeted(uuid string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
 	started := time.Now()
-	db := dbcore.GetDBInstance()
-	result, err := QueryRecords(context.Background(), db, RecordQuery{
+	result, err := QueryRecordsDefault(context.Background(), RecordQuery{
 		Client: uuid, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
 	})
 	observability.ObserveQuery(len(result), time.Since(started), err != nil)
 	return result, err
+}
+
+func QueryRecordsDefault(ctx context.Context, query RecordQuery) ([]models.Record, error) {
+	if store, ok := storage.Telemetry(); ok {
+		return store.QueryRecords(ctx, storage.RecordRange{
+			Client: query.Client, Start: query.Start, End: query.End,
+			LoadType: query.LoadType, MaxPoints: query.MaxPoints,
+		})
+	}
+	return QueryRecords(ctx, dbcore.GetDBInstance(), query)
+}
+
+func QueryGPURecordsDefault(ctx context.Context, query GPUQuery) ([]models.GPURecord, error) {
+	if store, ok := storage.Telemetry(); ok {
+		return store.QueryGPURecords(ctx, storage.GPURange{
+			Client: query.Client, Start: query.Start, End: query.End, MaxPoints: query.MaxPoints,
+		})
+	}
+	return QueryGPURecords(ctx, dbcore.GetDBInstance(), query)
 }
 
 func GetAllRecords() ([]models.Record, error) {

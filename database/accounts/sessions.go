@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/internal/credentialcache"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -93,18 +95,25 @@ func GetSession(session string) (uuid string, err error) {
 	}
 	generation := sessionCredentialGeneration()
 
-	db := dbcore.GetDBInstance()
 	var sessionRecord models.Session
 	digest := credentialcache.Digest(session)
-	err = db.Select("uuid", "expires", "created_at").Where("session_digest = ?", digest[:]).First(&sessionRecord).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// Existing databases gain the digest column through AutoMigrate. Lazily
-		// backfill legacy rows on their first successful authentication so active
-		// sessions migrate without storing plaintext in the activity tracker.
-		err = db.Select("uuid", "expires", "created_at").Where("session = ?", session).First(&sessionRecord).Error
-		if err == nil {
-			if updateErr := db.Model(&models.Session{}).Where("session = ?", session).Update("session_digest", digest[:]).Error; updateErr != nil {
-				return "", updateErr
+	if store, ok := storage.Control(); ok {
+		sessionRecord, err = store.SessionCredential(context.Background(), session, digest[:])
+		if errors.Is(err, storage.ErrNotFound) {
+			err = gorm.ErrRecordNotFound
+		}
+	} else {
+		db := dbcore.GetDBInstance()
+		err = db.Select("uuid", "expires", "created_at").Where("session_digest = ?", digest[:]).First(&sessionRecord).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Existing databases gain the digest column through AutoMigrate. Lazily
+			// backfill legacy rows on their first successful authentication so active
+			// sessions migrate without storing plaintext in the activity tracker.
+			err = db.Select("uuid", "expires", "created_at").Where("session = ?", session).First(&sessionRecord).Error
+			if err == nil {
+				if updateErr := db.Model(&models.Session{}).Where("session = ?", session).Update("session_digest", digest[:]).Error; updateErr != nil {
+					return "", updateErr
+				}
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
@@ -177,6 +179,13 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 }
 
 func GetUserByUUID(uuid string) (user models.User, err error) {
+	if store, ok := storage.Control(); ok {
+		user, err = store.UserByUUID(context.Background(), uuid)
+		if errors.Is(err, storage.ErrNotFound) {
+			err = gorm.ErrRecordNotFound
+		}
+		return user, err
+	}
 	db := dbcore.GetDBInstance()
 	err = db.Where("uuid = ?", uuid).First(&user).Error
 	if err != nil {

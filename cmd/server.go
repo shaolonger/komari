@@ -28,6 +28,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/controlstore"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
@@ -35,6 +36,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/database/telemetrywriter"
 	"github.com/komari-monitor/komari/internal/scheduler"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
@@ -419,8 +421,8 @@ func RunServer() {
 	}
 	activityCancel()
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := telemetrywriter.CloseDefault(drainCtx); err != nil {
-		log.Printf("Telemetry writer drain failed: %v", err)
+	if err := storage.Close(drainCtx); err != nil {
+		log.Printf("Storage drain failed: %v", err)
 	}
 	drainCancel()
 	OnShutdown()
@@ -428,6 +430,7 @@ func RunServer() {
 }
 
 func InitDatabase() {
+	installStorageAdapters()
 	// // 打印数据库类型和连接信息
 	// if flags.DatabaseType == "mysql" {
 	// 	log.Printf("使用 MySQL 数据库连接: %s@%s:%s/%s",
@@ -460,6 +463,32 @@ func InitDatabase() {
 			} else {
 				log.Printf("Default admin account created. Username: %s. Password has been securely written to local file %s to prevent log exposure. Retrieve it and delete the file.\n", user, filePath)
 			}
+		}
+	}
+}
+
+func installStorageAdapters() {
+	db := dbcore.GetDBInstance()
+	if _, ok := storage.Control(); !ok {
+		control, err := controlstore.NewSQLite(db)
+		if err != nil {
+			panic(fmt.Errorf("initialize SQLite control store: %w", err))
+		}
+		if _, err := storage.InstallControl(control); err != nil {
+			panic(fmt.Errorf("install SQLite control store: %w", err))
+		}
+	}
+	if _, ok := storage.Telemetry(); !ok {
+		writerDB, err := dbcore.GetWriterDBInstance()
+		if err != nil {
+			panic(fmt.Errorf("initialize SQLite telemetry writer: %w", err))
+		}
+		telemetry, err := records.NewSQLiteTelemetryStore(db, writerDB, telemetrywriter.Config{})
+		if err != nil {
+			panic(fmt.Errorf("initialize SQLite telemetry store: %w", err))
+		}
+		if _, err := storage.InstallTelemetry(telemetry); err != nil {
+			panic(fmt.Errorf("install SQLite telemetry store: %w", err))
 		}
 	}
 }

@@ -206,6 +206,19 @@ flush 通过有界 channel 发送到 writer。writer 负责：
 - 读取按租户/权限过滤，写入批次有幂等键；
 - 默认构建和默认配置仍只需要 SQLite。
 
+### 4.9 存储契约落地（K-601）
+
+领域层通过两个窄接口访问持久化能力：
+
+- `TelemetryStore`：原子批写 Record/GPURecord/PingRecord、Record/GPU 范围查询、显式粒度聚合、多级保留、无敏感配置的健康检查和有界关闭；
+- `ControlStore`：Client Token 状态、Session 状态、User 身份、迁移与健康检查。它是认证状态的强一致真相源；K-202 的摘要缓存只作为加速层。
+
+SQLite 默认适配器复用 K-102 的单 writer、K-402 的分层查询规划器和 K-303 的安全保留逻辑。生产启动先完成 dbcore 迁移，再原子发布 control/telemetry 两个适配器；历史接口、直接 Record/GPU 写入、分钟批写、Ping 写入及 Token/Session/User 回源都先走契约。未安装适配器时保留原 SQLite 兼容入口，供旧测试、维护工具和渐进迁移使用，但正常 server 生命周期不经过该回退。
+
+接口注册表使用原子指针发布，不持有 DSN、Token、Session 等敏感值。SQLite Session 适配器优先按 SHA-256 digest 查询；只有旧库记录缺少 digest 时才使用原始 Session 做一次兼容查询并立即回填，且不会记录凭据。健康状态只暴露后端类型、ready、检查时间与耗时，不返回主机、连接串或证书信息。
+
+`internal/storage/contracttest` 是所有后端共享的行为门禁，覆盖批次原子性、范围/聚合语义、保留返回值、健康、取消、并发写与认证真相源。SQLite 还增加缺表故障下整批回滚、断开连接健康失败、真实 raw 保留删除、重复迁移、legacy Session digest 回填和并发认证读取。K-602 的 PostgreSQL/ClickHouse 适配器必须执行同一套契约，不能以方言差异改变领域语义。
+
 ## 5. 性能与资源目标
 
 所有指标在固定硬件和固定回放数据集上验收：
