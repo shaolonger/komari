@@ -21,6 +21,8 @@
 
 不在当前仓库直接实现的内容：生产前端 `komari-web` 的组件级和 bundle 级优化。当前 checkout 只有占位页，前端必须在其独立仓库审计。本仓库负责静态资源服务、缓存、压缩和可复现构建。
 
+发布构建的不可变输入、前端 lock 安全修补、PGO profile、同机性能基线和供应链门禁详见 [`BUILD_ENGINEERING.md`](BUILD_ENGINEERING.md)。
+
 ## 2. 不可退让的设计原则
 
 ### 2.1 安全不回退

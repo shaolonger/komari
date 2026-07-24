@@ -485,3 +485,45 @@ ClickHouse 批次 ID 显式传入或按持久化字段计算 SHA-256。每张表
 - 同 batch ID 重复提交、查询硬上限、retention mutation 与关闭行为。
 
 `./scripts/test-scale-storage.sh` 与 `GOFLAGS=-race ./scripts/test-scale-storage.sh` 最终运行通过并自动清理容器、tmpfs、网络和临时证书。默认 Lite 与 `-tags scale` 两种 `go test ./...`、完整 `go test -race ./...`、`go vet ./...` 和 `git diff --check` 全部通过。
+
+## K-603 可复现构建、PGO 与性能 CI 门禁
+
+发布输入现在统一由 `build/versions.env` 管理。Go 从 workflow 的 1.23 与 `go.mod` 的 1.25 漂移收敛为含当前安全修复的 1.25.12；Node 从已 EOL 的 23 切换为 24.18.0 LTS。前端不再 clone 默认分支 HEAD，而是固定完整 commit `9c290e78b99eb837ceabc0a3f3f998c876c87ded`、原始 lockfile SHA-256、有效 lockfile SHA-256 和 commit epoch。Zig 0.14.1 归档、Alpine 3.21 manifest、`govulncheck`、`actionlint` 和全部 GitHub Actions 也分别固定到完整摘要或精确版本。
+
+前端构建先从 Git object archive 得到无未跟踪文件的干净源码，再验证上游 lockfile。审阅过的两个 lock-only 安全补丁将上游 commit 中受通告影响的 Babel、brace-expansion、fast-uri、http-proxy-middleware、js-yaml、React Router 与 Vite 更新到已修复版本，随后验证完整有效 lock SHA-256。`npm ci --ignore-scripts` 禁止 lifecycle script；生产依赖和构建依赖的 high 级 `npm audit` 实测均为 0 vulnerability。
+
+首轮复现测试发现上游 Vite 配置把 `new Date()` 直接写入 `__BUILD_TIME__`，导致相同 commit/lock 的第二次构建仍产生完全不同的 chunk 名。构建器现在只对该精确表达式做 fail-closed 替换，使用固定 commit epoch。一次联网安装和一次 `npm --offline` 安装各自构建 430 个 PWA precache entry，随后按相对路径逐文件 SHA-256 对照完全一致；任何网络解析、当前时间或未锁定文件漂移都会使测试失败。
+
+Go release 入口固定使用 `-mod=readonly -trimpath -buildvcs=false -buildid=`，显式注入版本和完整 commit，并默认加载版本化的 `build/pgo/default.pgo`。同一源码连续两次 PGO + CGO 构建的 SHA-256 都是：
+
+```text
+6571a398b9de19580b67779aec15e95be118898a2eaea8083fa7a758b736bd80
+```
+
+二进制 metadata 完全相同，不含本机绝对路径、隐式 VCS 状态或 Go build ID；PGO on/off 两个二进制均通过 `--help` 启动 smoke。Zig 安装器在隔离 Linux/amd64 容器中实际下载 46.8 MiB 官方归档、验证 SHA-256 并执行得到 `0.14.1`；相同容器的 Linux/386 CGO + musl PGO 交叉 release 编译成功。
+
+PGO profile 由已认证 JSON v1、WebSocket JSON v1 和 Telemetry v2 三条真实解码路径采集。Apple M4、Go 1.25.12、500ms × 5 次、PGO off/on 中位数：
+
+| 热路径 | PGO off ns/op | PGO on ns/op | 变化 | B/op / allocs/op |
+|---|---:|---:|---:|---:|
+| Authenticated JSON v1 | 3,814 | 3,580 | -6.14% | 464 / 12，未变 |
+| WebSocket JSON v1 | 3,986 | 3,673 | -7.85% | 464 / 12，未变 |
+| Telemetry v2 | 184.9 | 164.6 | -10.98% | 214 / 6，未变 |
+
+性能门禁不使用跨机器绝对值，而是在同一 runner 上分别 checkout base/candidate，各运行 5 个样本再比较中位数。当前 K-602 HEAD 对 K-603 candidate 的受控结果：
+
+| 热路径 | base ns/op | candidate ns/op | 变化 | 分配变化 |
+|---|---:|---:|---:|---:|
+| Credential cache get | 107.7 | 107.8 | +0.09% | 0 |
+| 512 KiB history cache hit | 66.74 | 66.77 | +0.04% | 0 |
+| 10k dashboard single delta | 339.1 | 336.5 | -0.77% | 0 |
+| Telemetry v2 decode | 185.3 | 185.3 | 0.00% | 0 |
+| Static manifest lookup | 44.62 | 44.65 | +0.07% | 0 |
+| Sharded minute accumulator | 13,499 | 13,523 | +0.18% | 0 |
+| 10k stable scheduler next-run | 274,227 | 274,287 | +0.02% | 0 |
+
+门禁要求 benchmark 集合双向完整、每个指标至少 5 个样本，`ns/op` 最大回退 20%、`B/op` 2%、`allocs/op` 0%。本次全部通过且所有 allocation 完全不变。比较器由仓库内 `tools/benchguard` 实现并有 parser、缺失样本、耗时和分配回退单测，不在 CI 临时下载浮动 benchmark 工具。
+
+供应链门禁实际发现并修复了原依赖中的三条可达漏洞：`golang.org/x/net` HTTP/2 frame panic、`go-jose` JWE panic 和 `golang.org/x/text` 非法输入死循环；升级至修复版本后，固定版本 `govulncheck` 报告 0 reachable vulnerability。门禁同时通过 module checksum、readonly module graph、Docker digest、Action SHA、废弃构建命令扫描、Bash syntax、YAML parse 和 `actionlint`。
+
+最终验证：Go 1.25.12 下 default `go test ./...`、scale `go test -tags=scale ./...`、完整 `go test -race ./...`、default/scale `go vet`、PGO profile pprof 校验、前端在线/离线复现、重复二进制哈希、同机性能基线、完整 npm high audit、`govulncheck`、`actionlint` 和 `git diff --check` 全部通过。完整操作和回滚合同见 `BUILD_ENGINEERING.md`。

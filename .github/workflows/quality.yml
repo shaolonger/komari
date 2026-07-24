@@ -1,0 +1,69 @@
+name: Reproducibility and Supply Chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Load pinned build versions
+        run: cat build/versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Verify pinned supply chain
+        env:
+          KOMARI_RUN_VULN_CHECK: 1
+        run: ./scripts/verify-supply-chain.sh
+
+      - name: Test default and scale builds
+        run: |
+          go test ./...
+          go test -tags=scale ./...
+          go vet ./...
+          go vet -tags=scale ./...
+
+      - name: Race test
+        run: go test -race ./...
+
+      - name: Verify frontend online/offline reproducibility
+        env:
+          KOMARI_REQUIRE_EXACT_NODE: 1
+        run: ./scripts/test-frontend-reproducible.sh
+
+      - name: Verify PGO and binary reproducibility
+        env:
+          KOMARI_REQUIRE_EXACT_GO: 1
+        run: |
+          ./scripts/generate-pgo.sh "$RUNNER_TEMP/generated.pgo"
+          go tool pprof -top "$RUNNER_TEMP/generated.pgo" >/dev/null
+          ./scripts/test-reproducible-build.sh
+
+  workflow-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Parse workflow YAML
+        run: |
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each { |f| YAML.safe_load(File.read(f), aliases: true) }'

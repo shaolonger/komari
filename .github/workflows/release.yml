@@ -2,8 +2,7 @@ name: Attach Release Binaries
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   release:
     types: [published]
   workflow_dispatch:
@@ -15,11 +14,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 concurrency:
   group: attach-release-binaries-${{ github.event.inputs.tag_name || github.event.release.tag_name || github.ref_name }}
@@ -31,7 +25,6 @@ jobs:
     outputs:
       release_tag: ${{ steps.release-meta.outputs.release_tag }}
       should_build: ${{ steps.asset-check.outputs.should_build }}
-
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag_name || github.event.release.tag_name || github.ref_name }}
 
@@ -42,52 +35,51 @@ jobs:
 
       - name: Wait for release to exist
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           max_attempts=120
           attempt=0
-
           until gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; do
             attempt=$((attempt + 1))
             if [ "${{ github.event_name }}" != "push" ] || [ "$attempt" -ge "$max_attempts" ]; then
-              echo "Release ${RELEASE_TAG} was not found for event ${{ github.event_name }}." >&2
+              echo "Release ${RELEASE_TAG} was not found." >&2
               exit 1
             fi
             sleep 5
           done
 
-      - name: Check whether all release assets already exist
+      - name: Check release assets
         id: asset-check
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mapfile -t existing_assets < <(gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
-          expected_assets=(
-            "komari-linux-386"
-            "komari-linux-amd64"
-            "komari-linux-arm64"
-            "komari-linux-riscv64"
-            "komari-windows-386.exe"
-            "komari-windows-amd64.exe"
-            "komari-windows-arm64.exe"
+          mapfile -t existing_assets < <(
+            gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" \
+              --json assets --jq '.assets[].name'
           )
-
+          expected_binaries=(
+            komari-linux-386
+            komari-linux-amd64
+            komari-linux-arm64
+            komari-linux-riscv64
+            komari-windows-386.exe
+            komari-windows-amd64.exe
+            komari-windows-arm64.exe
+          )
           missing_assets=()
-          for asset in "${expected_assets[@]}"; do
-            if ! printf '%s\n' "${existing_assets[@]}" | grep -Fxq "$asset"; then
-              missing_assets+=("$asset")
-            fi
+          for binary in "${expected_binaries[@]}"; do
+            for asset in "$binary" "${binary}.sha256"; do
+              if ! printf '%s\n' "${existing_assets[@]}" | grep -Fxq "$asset"; then
+                missing_assets+=("$asset")
+              fi
+            done
           done
-
           if [ "${#missing_assets[@]}" -eq 0 ]; then
             echo "should_build=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            printf 'Missing release assets: %s\n' "${missing_assets[*]}"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
-
-          printf 'Missing release assets: %s\n' "${missing_assets[*]}"
-          echo "should_build=true" >> "$GITHUB_OUTPUT"
 
   build-and-attach-binaries:
     needs: prepare-release
@@ -95,114 +87,68 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.release_tag }}
-
     strategy:
       matrix:
         goos: [windows, linux]
         goarch: [amd64, arm64, 386, riscv64]
         include:
-          # Windows
-          - goos: windows
-            goarch: amd64
-            zig_target_triple: x86_64-windows-gnu
-            binary_extension: .exe
-          - goos: windows
-            goarch: arm64
-            zig_target_triple: aarch64-windows-gnu
-            binary_extension: .exe
-          - goos: windows
-            goarch: 386
-            zig_target_triple: x86-windows-gnu
-            binary_extension: .exe
-
-          # Linux
-          - goos: linux
-            goarch: amd64
-            zig_target_triple: x86_64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: arm64
-            zig_target_triple: aarch64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: 386
-            zig_target_triple: x86-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: riscv64
-            zig_target_triple: riscv64-linux-musl
-            binary_extension: ""
-
+          - {goos: windows, goarch: amd64, zig_target_triple: x86_64-windows-gnu, binary_extension: .exe}
+          - {goos: windows, goarch: arm64, zig_target_triple: aarch64-windows-gnu, binary_extension: .exe}
+          - {goos: windows, goarch: 386, zig_target_triple: x86-windows-gnu, binary_extension: .exe}
+          - {goos: linux, goarch: amd64, zig_target_triple: x86_64-linux-musl, binary_extension: ""}
+          - {goos: linux, goarch: arm64, zig_target_triple: aarch64-linux-musl, binary_extension: ""}
+          - {goos: linux, goarch: 386, zig_target_triple: x86-linux-musl, binary_extension: ""}
+          - {goos: linux, goarch: riscv64, zig_target_triple: riscv64-linux-musl, binary_extension: ""}
         exclude:
-          - goos: windows
-            goarch: riscv64
+          - {goos: windows, goarch: riscv64}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "23"
+      - name: Load pinned build versions
+        run: cat build/versions.env >> "$GITHUB_ENV"
 
-      - name: Clone and build frontend
-        run: |
-          git clone https://github.com/komari-monitor/komari-web web
-          cd web
-          npm install
-          npm run build
-          cd ..
-          mkdir -p public/defaultTheme/dist
-          rm -rf public/defaultTheme/dist/*
-          cp -r web/dist/* public/defaultTheme/dist/
-          cp -f web/komari-theme.json public/defaultTheme/
-          if [ -f web/preview.png ]; then cp -f web/preview.png public/defaultTheme/; fi
-          if [ -f web/perview.png ]; then cp -f web/perview.png public/defaultTheme/; fi
-          # Compatibility: ensure both filenames exist if only one is present
-          if [ -f public/defaultTheme/preview.png ] && [ ! -f public/defaultTheme/perview.png ]; then cp -f public/defaultTheme/preview.png public/defaultTheme/perview.png; fi
-          if [ -f public/defaultTheme/perview.png ] && [ ! -f public/defaultTheme/preview.png ]; then cp -f public/defaultTheme/perview.png public/defaultTheme/preview.png; fi
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build pinned frontend
+        run: ./scripts/build-frontend.sh
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.23"
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
-      - name: Install Zig cross-compiler toolchain
+      - name: Install verified Zig toolchain
         run: |
-          sudo apt-get update # Update apt package lists
-          sudo apt-get install -y build-essential curl
-          wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
-          sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.14.1.tar.xz
-          echo "PATH=$PATH:/usr/local/zig-x86_64-linux-0.14.1" >> $GITHUB_ENV
+          ./scripts/install-zig.sh "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
 
-      - name: Build binary
+      - name: Build reproducible PGO binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
           CC: zig cc -target ${{ matrix.zig_target_triple }}
-          GIN_MODE: release
+          VERSION: ${{ env.RELEASE_TAG }}
+          KOMARI_REQUIRE_EXACT_GO: 1
         run: |
-          BINARY_NAME=komari-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.binary_extension }}" != "" ]; then
-            BINARY_NAME=${BINARY_NAME}${{ matrix.binary_extension }}
-          fi
-          VERSION="${RELEASE_TAG}"
+          export VERSION_HASH
           VERSION_HASH="$(git rev-parse HEAD)"
-          go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}" -o $BINARY_NAME
+          BINARY_NAME="komari-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_extension }}"
+          ./scripts/build-release.sh "$BINARY_NAME"
+          sha256sum "$BINARY_NAME" > "${BINARY_NAME}.sha256"
 
-      - name: Upload binary to release
+      - name: Upload binary and checksum
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Define the binary name for upload
-          BINARY_NAME=komari-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          fi
-          # Upload the binary as a release asset using GitHub CLI
-          gh release upload ${RELEASE_TAG} $BINARY_NAME --clobber --repo ${{ github.repository }}
-        shell: bash
+          BINARY_NAME="komari-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_extension }}"
+          gh release upload "${RELEASE_TAG}" "$BINARY_NAME" "${BINARY_NAME}.sha256" \
+            --clobber --repo "${{ github.repository }}"

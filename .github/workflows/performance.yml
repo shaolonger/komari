@@ -1,0 +1,56 @@
+name: Performance Regression Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controlled-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate with history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Load pinned build versions
+        run: cat build/versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Materialize base revision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASELINE_REF="$PR_BASE_SHA"
+          else
+            BASELINE_REF="$PUSH_BASE_SHA"
+          fi
+          if [ -z "$BASELINE_REF" ] ||
+             [ "$BASELINE_REF" = "0000000000000000000000000000000000000000" ] ||
+             ! git cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null; then
+            BASELINE_REF="${{ github.sha }}^"
+          fi
+          git worktree add --detach "$RUNNER_TEMP/komari-baseline" "$BASELINE_REF"
+
+      - name: Compare on the same runner
+        env:
+          KOMARI_BENCH_COUNT: 5
+          KOMARI_BENCHTIME: 500ms
+          KOMARI_BENCH_TIME_LIMIT: 0.20
+          KOMARI_BENCH_MEMORY_LIMIT: 0.02
+          KOMARI_BENCH_ALLOC_LIMIT: 0
+        run: ./scripts/run-performance-gate.sh "$RUNNER_TEMP/komari-baseline"
