@@ -34,6 +34,23 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BASE_SHA: ${{ github.event.before }}
         run: |
+          baseline_supports_gate() {
+            local revision="$1"
+            local benchmark
+            for benchmark in \
+              BenchmarkDecodeTelemetryV2 \
+              BenchmarkShardedMinuteAccumulator \
+              BenchmarkCacheHit512KiB \
+              BenchmarkCacheGet \
+              BenchmarkStableNextRun10000Tasks \
+              BenchmarkManifestAssetLookup \
+              BenchmarkDashboardSingleDelta10000Nodes; do
+              if ! git grep -q "func ${benchmark}" "$revision" -- '*_test.go'; then
+                return 1
+              fi
+            done
+          }
+
           if [ "$EVENT_NAME" = "pull_request" ]; then
             BASELINE_REF="$PR_BASE_SHA"
           else
@@ -44,6 +61,15 @@ jobs:
              ! git cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null; then
             BASELINE_REF="${{ github.sha }}^"
           fi
+          if ! baseline_supports_gate "$BASELINE_REF"; then
+            BASELINE_REF="$(tr -d '[:space:]' < build/performance-baseline.txt)"
+            if ! git cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null ||
+               ! baseline_supports_gate "$BASELINE_REF"; then
+              echo "Pinned performance bootstrap baseline is invalid: ${BASELINE_REF}" >&2
+              exit 1
+            fi
+          fi
+          echo "Performance baseline: ${BASELINE_REF}"
           git worktree add --detach "$RUNNER_TEMP/komari-baseline" "$BASELINE_REF"
 
       - name: Compare on the same runner

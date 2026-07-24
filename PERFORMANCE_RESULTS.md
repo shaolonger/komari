@@ -606,4 +606,6 @@ Apple M4/macOS arm64 的全包 benchmark sweep 使用 `-benchtime=100ms -count=1
 
 首次 GitHub PR 门禁在实际 Runner 文件命令解析阶段发现：workflow 把带注释的整个 `build/versions.env` 追加到 `$GITHUB_ENV`，Runner 会拒绝注释行。全部 7 个版本加载入口已改为只导出语法合法的 `KEY=VALUE` 行；供应链脚本新增反向扫描，禁止重新出现整文件 `cat`。修复后固定 actionlint、YAML parse、完整漏洞扫描和 default unit/vet 再次通过，并由同一 PR SHA 重新执行远端门禁。
 
+第二轮 PR 门禁验证完整跨平台构建成功，并发现两个基线环境假设：GitHub Ubuntu image 不保证预装 `rg`，且默认分支版本早于本轮 benchmark package surface。供应链扫描已改为 POSIX 环境可用的 `grep`；性能门禁继续优先比较事件 base，但当且仅当 base 缺少 7 个受控 benchmark 时使用完整 SHA 固定的 K-602 bootstrap baseline `16ad7621a36215dd28005c83fc913ae6907cd701`。固定基线的格式、commit 可达性和 benchmark 完整性均 fail closed；本轮合并后，后续 PR 会自然恢复使用事件 base。门禁同时修复了旧 auto-merge workflow 中被 GitHub Runner ShellCheck 实际检出的引号问题。
+
 Release 资产合同为 7 个二进制和 7 个匹配的 `.sha256`。分支推送、GitHub 手动质量门禁、`v1.3.0` Release 创建、远端 Actions 等待和资产下载校验按用户要求在两个仓库本地 Todo 均完成后执行。

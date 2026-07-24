@@ -36,14 +36,20 @@ if [[ -n "${unpinned_actions}" ]]; then
   printf 'GitHub Actions are not commit-pinned:\n%s\n' "${unpinned_actions}" >&2
   exit 1
 fi
-if rg -n 'npm install|git clone .*komari-web|go-version:[[:space:]]*"1\\.23"|node-version:[[:space:]]*"23"' \
+if grep -REn 'npm install|git clone .*komari-web|go-version:[[:space:]]*"1\\.23"|node-version:[[:space:]]*"23"' \
   .github/workflows; then
   echo "mutable or obsolete build command remains in workflows" >&2
   exit 1
 fi
-if rg -n 'cat[[:space:]]+build/versions\\.env[[:space:]]*>>[[:space:]]*"\\$GITHUB_ENV"' \
+if grep -REn 'cat[[:space:]]+build/versions\\.env[[:space:]]*>>[[:space:]]*"\\$GITHUB_ENV"' \
   .github/workflows; then
   echo "workflow exports comments or blank lines to GITHUB_ENV" >&2
+  exit 1
+fi
+performance_baseline="$(tr -d '[:space:]' < build/performance-baseline.txt)"
+if [[ ! "${performance_baseline}" =~ ^[0-9a-f]{40}$ ]] ||
+   ! git cat-file -e "${performance_baseline}^{commit}" 2>/dev/null; then
+  echo "performance bootstrap baseline is not a reachable full commit" >&2
   exit 1
 fi
 
