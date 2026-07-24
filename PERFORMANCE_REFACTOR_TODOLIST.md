@@ -155,7 +155,7 @@
   - URL query 和认证材料脱敏。
   - 测试：slowloris、超时、日志采样/脱敏、优雅关闭。
 
-- [ ] **K-505 静态资源 manifest、ETag、immutable 与预压缩**
+- [x] **K-505 静态资源 manifest、ETag、immutable 与预压缩**
   - 主题加载时构建不可变 manifest。
   - 哈希资源长期缓存，HTML generation cache。
   - 支持预压缩 Brotli/Gzip 和条件请求。

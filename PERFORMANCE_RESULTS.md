@@ -427,3 +427,21 @@ Gin access log 改为结构化固定字段，不再把 `RawQuery` 拼入 message
 成功的 Agent report、ping result 和 task result 使用单调 counter 确定性保留首条及每 256 条中的一条，减少约 99.6% 高频 access-log 格式化、锁竞争和日志 I/O；所有 4xx/5xx、Gin errors、普通 API、连接建立/结束与审计事件 100% 保留。采样在 handler 返回后决定，失败永远不会因高频 endpoint 被漏掉。
 
 验证覆盖：真实 TCP 只发送半个 header 时在 40ms 测试 deadline 后由 server 主动释放；生产 timeout/MaxHeaderBytes 精确值；活跃请求在 graceful shutdown 中完整 drain；25 条成功上报按 1/10 策略精确保留 3 条；5 条 401 全部保留；query/Header/panic 三类秘密均不出现在捕获日志。仓库 `go test ./...`、Cmd/Log/Public 专项 `go test -race`、`go vet ./...` 全部通过。
+
+## K-505 静态资源 Manifest、ETag、Immutable 与预压缩
+
+静态服务不再对每个请求执行 `os.Stat`、`os.ReadFile` 和 MIME 推断。默认嵌入主题与本地主题在首次使用、上传或切换时构建不可变 manifest；本地文件在构建时复制到受管理内存，之后的并发请求只读取不可变 map/byte slice。自定义主题 manifest 以浅共享不可变默认资源实现逐文件 fallback，覆盖 identity 时会主动丢弃默认主题的 `.br/.gz` sidecar，避免编码内容与新 identity 不一致。主题上传/切换会先完成 manifest 重建再返回成功，删除会立即失效缓存。
+
+manifest 对单文件硬限制 5 MiB、单主题含生成压缩数据最多 64 MiB；全局最多缓存 8 个主题、128 MiB，自定义主题按构建顺序淘汰且默认 fallback 固定保留。现有上传安全门禁更严格地把 ZIP 解压内容限制在 30 MiB，因此正常主题始终落在 manifest 上限内。构建期间拒绝 symlink、反斜杠、NUL、绝对路径、`..`、非法主题 ID，并在 stat 后再次检查实际读取字节，防止 TOCTOU 扩容；路径安全比旧的纯 lexical `filepath.Rel` 更强。
+
+每个 representation 使用 SHA-256 强 ETag。带 8 位以上构建 hash 的资源返回 `public,max-age=31536000,immutable`，其他静态文件为 5 分钟 revalidate；匹配 `If-None-Match` 直接 304。文本/JS/JSON/XML/SVG 在 manifest 构建时一次性生成不大于 4 MiB、且确实缩小体积的 `gzip.BestCompression`；主题自带 `.br` sidecar 时支持 Brotli。`Accept-Encoding` 完整处理 q 值和 wildcard、优先质量更高的 representation，每种编码拥有独立 ETag，并设置 `Vary: Accept-Encoding` 与 `nosniff`。
+
+动态 index 使用内容 ETag、主题、站点名、描述和 system/admin 模式的摘要作为缓存键，最多保留 64 个已渲染 HTML；命中时不再执行字符串替换或重新哈希。站点名和描述在注入前 HTML escape，自定义 HTML/JS 仍保持禁用。HTML 返回 `no-cache` 强 ETag，主题或配置变化自然切换缓存 generation；Admin 导航注入也复用同一生成缓存。favicon 同样获得强 ETag，旧主题 fallback、SPA 和 `/themes/:id/*path` 路由保持兼容。
+
+Apple M4/macOS arm64，manifest 已热且资源带 Brotli/Gzip 两种 variant：
+
+| 操作 | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| 主题校验 + manifest asset lookup | 43.45～44.60 | 0 | 0 |
+
+验证覆盖：Brotli/Gzip/identity 协商与 q 值、Gzip 解压内容、variant ETag、304 空响应、immutable、Vary、主题 fallback、identity 覆盖不继承错误 sidecar、文件修改前后显式失效、HTML 仅生成一次、主题/内存硬上限、路径穿越、非法 ID、symlink 逃逸及缓存并发 race。仓库 `go test ./...`、Public/Admin 专项 `go test -race`、`go vet ./...` 全部通过。

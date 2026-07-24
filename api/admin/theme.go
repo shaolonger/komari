@@ -81,6 +81,10 @@ func UploadTheme(c *gin.Context) {
 		return
 	}
 
+	if err := public.RebuildThemeManifest(themeInfo.Short); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "主题 manifest 构建失败: "+err.Error())
+		return
+	}
 	api.RespondSuccessMessage(c, "主题上传成功", themeInfo)
 }
 
@@ -152,6 +156,7 @@ func DeleteTheme(c *gin.Context) {
 		return
 	}
 
+	public.InvalidateThemeManifest(req.Short)
 	api.RespondSuccessMessage(c, "主题删除成功", nil)
 }
 
@@ -174,11 +179,14 @@ func SetTheme(c *gin.Context) {
 		}
 	}
 
+	if err := public.RebuildThemeManifest(themeName); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "主题 manifest 构建失败: "+err.Error())
+		return
+	}
 	if err := config.Set("theme", themeName); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
 		return
 	}
-
 	api.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
 }
 
