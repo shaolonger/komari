@@ -87,7 +87,14 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 }
 
 func TestClientNotificationCascadeMigrationPreservesSchemaAndData(t *testing.T) {
-	db, _, _ := openSQLiteForTest(t)
+	db, primary, _ := openSQLiteForTest(t)
+	// Releases before v1.3.0 did not enable foreign-key enforcement on every
+	// SQLite connection, so production databases can legitimately contain
+	// historical notification rows whose client has already been deleted.
+	primary.SetMaxOpenConns(1)
+	if err := db.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
+		t.Fatal(err)
+	}
 	for _, statement := range []string{
 		`CREATE TABLE clients (
 			uuid TEXT PRIMARY KEY,
@@ -130,10 +137,24 @@ func TestClientNotificationCascadeMigrationPreservesSchemaAndData(t *testing.T) 
 			VALUES('node-cascade',true,'offline-preserved')`,
 		`INSERT INTO traffic_report_notifications(client,enable,daily,legacy_note)
 			VALUES('node-cascade',true,true,'traffic-preserved')`,
+		`INSERT INTO offline_notifications(client,enable,legacy_note)
+			VALUES('orphan-offline',true,'orphan-must-be-removed')`,
+		`INSERT INTO traffic_report_notifications(client,enable,daily,legacy_note)
+			VALUES('orphan-traffic',true,true,'orphan-must-be-removed')`,
 	} {
 		if err := db.Exec(statement).Error; err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		t.Fatal(err)
+	}
+	var initialViolations int64
+	if err := db.Raw("SELECT count(*) FROM pragma_foreign_key_check").Scan(&initialViolations).Error; err != nil {
+		t.Fatal(err)
+	}
+	if initialViolations != 2 {
+		t.Fatalf("historical fixture violations=%d, want 2", initialViolations)
 	}
 
 	item := schemaMigrations[len(schemaMigrations)-1]
@@ -188,6 +209,13 @@ func TestClientNotificationCascadeMigrationPreservesSchemaAndData(t *testing.T) 
 		if note != want {
 			t.Fatalf("%s legacy_note=%q, want %q", table, note, want)
 		}
+		var orphanCount int64
+		if err := db.Table(table).Where("client LIKE 'orphan-%'").Count(&orphanCount).Error; err != nil {
+			t.Fatal(err)
+		}
+		if orphanCount != 0 {
+			t.Fatalf("%s retained %d historical orphan rows", table, orphanCount)
+		}
 	}
 
 	if err := db.Exec("DELETE FROM clients WHERE uuid='node-cascade'").Error; err != nil {
@@ -230,6 +258,47 @@ func TestNotificationModelsCreateCascadeForeignKeys(t *testing.T) {
 		if action.OnDelete != "CASCADE" || action.OnUpdate != "CASCADE" {
 			t.Fatalf("%s model foreign-key action = %+v, want CASCADE/CASCADE", table, action)
 		}
+	}
+}
+
+func TestClientNotificationOrphanCleanupRollsBackWithMigrationFailure(t *testing.T) {
+	db, primary, _ := openSQLiteForTest(t)
+	primary.SetMaxOpenConns(1)
+	if err := db.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		"CREATE TABLE clients(uuid TEXT PRIMARY KEY)",
+		// Deliberately omit the foreign key so the rebuild fails after its
+		// orphan cleanup. The surrounding migration transaction must restore
+		// the row rather than leaving a partially repaired schema.
+		"CREATE TABLE offline_notifications(client TEXT NOT NULL UNIQUE)",
+		"INSERT INTO offline_notifications(client) VALUES('orphan-rollback')",
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	item := schemaMigrations[len(schemaMigrations)-1]
+	err := runMigrations(context.Background(), db, []migration{item})
+	if err == nil || !strings.Contains(err.Error(), "has 0 client foreign keys") {
+		t.Fatalf("migration error=%v, want unsupported-schema failure", err)
+	}
+
+	var orphanCount int64
+	if err := db.Table("offline_notifications").Where("client = ?", "orphan-rollback").Count(&orphanCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if orphanCount != 1 {
+		t.Fatalf("orphan rows after rollback=%d, want 1", orphanCount)
+	}
+	version, err := CurrentSchemaVersion(context.Background(), db)
+	if err != nil || version != 0 {
+		t.Fatalf("schema version after rollback=%d err=%v, want 0", version, err)
 	}
 }
 

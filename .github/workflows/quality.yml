@@ -38,6 +38,9 @@ jobs:
           KOMARI_RUN_VULN_CHECK: 1
         run: ./scripts/verify-supply-chain.sh
 
+      - name: Test installer upgrade recovery
+        run: ./scripts/test-installer-upgrade.sh
+
       - name: Test default and scale builds
         run: |
           go test ./...

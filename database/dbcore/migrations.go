@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -212,6 +213,26 @@ func rebuildClientNotificationCascade(db *gorm.DB, table string) error {
 	return nil
 }
 
+// removeClientNotificationOrphans repairs rows that could be created by
+// releases which declared notification foreign keys but did not enable SQLite
+// foreign-key enforcement. The rows cannot represent a usable notification
+// because their parent client no longer exists. Keeping the cleanup in the
+// migration transaction guarantees it is rolled back if the table rebuild
+// fails for any later reason.
+func removeClientNotificationOrphans(db *gorm.DB, table string) (int64, error) {
+	quotedTable := quoteSQLiteIdentifier(table)
+	result := db.Exec(
+		"DELETE FROM " + quotedTable +
+			" WHERE NOT EXISTS (" +
+			"SELECT 1 FROM clients WHERE clients.uuid = " + quotedTable + ".client" +
+			")",
+	)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 func migrateClientNotificationCascade(db *gorm.DB) error {
 	for _, table := range []string{"offline_notifications", "traffic_report_notifications"} {
 		var tableCount int64
@@ -223,6 +244,17 @@ func migrateClientNotificationCascade(db *gorm.DB) error {
 		}
 		if tableCount == 0 {
 			continue
+		}
+		removed, err := removeClientNotificationOrphans(db, table)
+		if err != nil {
+			return fmt.Errorf("repair %s orphan rows: %w", table, err)
+		}
+		if removed != 0 {
+			log.Printf(
+				"[migration 4] removed %d orphan rows from %s before enabling cascading foreign keys",
+				removed,
+				table,
+			)
 		}
 		if err := rebuildClientNotificationCascade(db, table); err != nil {
 			return fmt.Errorf("migrate %s cascade: %w", table, err)

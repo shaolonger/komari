@@ -32,24 +32,73 @@ SERVICE_NAME="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
+SERVICE_READY_TIMEOUT_SECONDS="${KOMARI_SERVICE_READY_TIMEOUT_SECONDS:-120}"
+SERVICE_ACTIVE_STABILITY_SECONDS="${KOMARI_SERVICE_ACTIVE_STABILITY_SECONDS:-5}"
+UPGRADE_BACKUP_PATH=""
+
+sha256_file() {
+    local path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$path" | awk '{print $NF}'
+    else
+        log_error "未找到 SHA-256 校验工具（sha256sum/shasum/openssl）"
+        return 1
+    fi
+}
 
 download_binary() {
     local arch="$1"
     local file_name="komari-linux-${arch}"
     local download_url="https://github.com/${RELEASE_REPO}/releases/latest/download/${file_name}"
     local tmp_path="${BINARY_PATH}.download.$$"
+    local checksum_path="${tmp_path}.sha256"
+    local expected_checksum=""
+    local actual_checksum=""
 
     log_step "下载 Komari 二进制文件..."
     log_info "URL: $download_url"
 
-    rm -f "$tmp_path"
+    rm -f "$tmp_path" "$checksum_path"
     if ! curl -fL -o "$tmp_path" "$download_url"; then
-        rm -f "$tmp_path"
+        rm -f "$tmp_path" "$checksum_path"
         log_error "下载失败。请确认 ${RELEASE_REPO} 的 release 资源中存在 ${file_name}。"
         return 1
     fi
+    if ! curl -fL -o "$checksum_path" "${download_url}.sha256"; then
+        rm -f "$tmp_path" "$checksum_path"
+        log_error "无法下载 ${file_name} 的 SHA-256 校验文件，已拒绝安装未经验证的二进制文件。"
+        return 1
+    fi
 
-    mv -f "$tmp_path" "$BINARY_PATH"
+    expected_checksum=$(awk 'NR == 1 {print $1}' "$checksum_path")
+    if [[ ! "$expected_checksum" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        rm -f "$tmp_path" "$checksum_path"
+        log_error "发布文件中的 SHA-256 校验值格式无效。"
+        return 1
+    fi
+    if ! actual_checksum=$(sha256_file "$tmp_path"); then
+        rm -f "$tmp_path" "$checksum_path"
+        return 1
+    fi
+    actual_checksum=$(printf '%s' "$actual_checksum" | tr '[:upper:]' '[:lower:]')
+    expected_checksum=$(printf '%s' "$expected_checksum" | tr '[:upper:]' '[:lower:]')
+    if [ "$actual_checksum" != "$expected_checksum" ]; then
+        rm -f "$tmp_path" "$checksum_path"
+        log_error "二进制文件 SHA-256 校验失败，已停止安装。"
+        return 1
+    fi
+
+    if ! mv -f "$tmp_path" "$BINARY_PATH"; then
+        rm -f "$tmp_path" "$checksum_path"
+        log_error "无法把已验证的二进制文件安装到 $BINARY_PATH"
+        return 1
+    fi
+    rm -f "$checksum_path"
+    log_success "二进制文件 SHA-256 校验通过"
 }
 
 # Show banner
@@ -79,9 +128,109 @@ check_systemd() {
     fi
 }
 
+get_service_port() {
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    if [ ! -r "$service_file" ]; then
+        return 1
+    fi
+    awk '
+        /^ExecStart=/ {
+            for (index = 1; index <= NF; index++) {
+                if ($index == "-l" || $index == "--listen") {
+                    count = split($(index + 1), address, ":")
+                    print address[count]
+                    exit
+                }
+            }
+        }
+    ' "$service_file"
+}
+
+wait_for_service_ready() {
+    local port="${1:-}"
+    local elapsed=0
+    local stable_seconds=0
+
+    while [ "$elapsed" -lt "$SERVICE_READY_TIMEOUT_SECONDS" ]; do
+        if systemctl is-failed --quiet "${SERVICE_NAME}.service"; then
+            return 1
+        fi
+        if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+            if [ -n "$port" ]; then
+                if curl --fail --silent --show-error --max-time 2 \
+                    "http://127.0.0.1:${port}/api/version" >/dev/null 2>&1; then
+                    return 0
+                fi
+            else
+                stable_seconds=$((stable_seconds + 1))
+                if [ "$stable_seconds" -ge "$SERVICE_ACTIVE_STABILITY_SECONDS" ]; then
+                    return 0
+                fi
+            fi
+        else
+            stable_seconds=0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+show_service_failure() {
+    log_error "Komari 服务未能通过启动健康检查"
+    systemctl status "${SERVICE_NAME}.service" --no-pager -l || true
+    journalctl -u "${SERVICE_NAME}.service" -n 50 --no-pager -o cat || true
+}
+
+create_upgrade_backup() {
+    local timestamp
+    local database_path="$DATA_DIR/data/komari.db"
+    local backup_data_path=""
+    local backup_root="$INSTALL_DIR/upgrade-backups"
+    local previous_umask=""
+
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    UPGRADE_BACKUP_PATH="$backup_root/${timestamp}-$$"
+    backup_data_path="$UPGRADE_BACKUP_PATH/data"
+
+    previous_umask=$(umask)
+    umask 077
+    if ! mkdir -p "$backup_root" ||
+       ! mkdir "$UPGRADE_BACKUP_PATH" ||
+       ! mkdir "$backup_data_path" ||
+       ! cp -p "$BINARY_PATH" "$UPGRADE_BACKUP_PATH/komari"; then
+        umask "$previous_umask"
+        return 1
+    fi
+    for database_file in "$database_path" "${database_path}-wal" "${database_path}-shm"; do
+        if [ -f "$database_file" ]; then
+            if ! cp -p "$database_file" "$backup_data_path/"; then
+                umask "$previous_umask"
+                return 1
+            fi
+        fi
+    done
+    umask "$previous_umask"
+    log_success "升级前备份已保存到 $UPGRADE_BACKUP_PATH"
+}
+
+restore_upgrade_binary() {
+    if [ -z "$UPGRADE_BACKUP_PATH" ] || [ ! -f "$UPGRADE_BACKUP_PATH/komari" ]; then
+        log_error "找不到本次升级的二进制备份，无法自动回滚"
+        return 1
+    fi
+    if ! cp -p "$UPGRADE_BACKUP_PATH/komari" "$BINARY_PATH" ||
+       ! chmod 0755 "$BINARY_PATH" ||
+       ! chown komari:komari "$BINARY_PATH"; then
+        log_error "恢复升级前二进制文件失败"
+        return 1
+    fi
+}
+
 # Detect system architecture
 detect_arch() {
-    local arch=$(uname -m)
+    local arch
+    arch=$(uname -m)
     case $arch in
         x86_64)
             echo "amd64"
@@ -159,7 +308,8 @@ install_binary() {
 
     install_dependencies
 
-    local arch=$(detect_arch)
+    local arch
+    arch=$(detect_arch)
     log_info "检测到架构: $arch"
 
     log_step "创建安装目录: $INSTALL_DIR"
@@ -198,7 +348,7 @@ install_binary() {
     systemctl enable ${SERVICE_NAME}.service
     systemctl start ${SERVICE_NAME}.service
 
-    if systemctl is-active --quiet ${SERVICE_NAME}.service; then
+    if wait_for_service_ready "$LISTEN_PORT"; then
         log_success "Komari 服务启动成功"
         
         log_step "正在获取初始密码..."
@@ -219,7 +369,7 @@ install_binary() {
         show_access_info "$password" "$LISTEN_PORT"
     else
         log_error "Komari 服务启动失败"
-        log_info "查看日志: journalctl -u ${SERVICE_NAME} -f"
+        show_service_failure
         return 1
     fi
 }
@@ -285,32 +435,73 @@ upgrade_komari() {
         return 1
     fi
 
+    local service_port=""
+    local arch=""
+
+    service_port=$(get_service_port || true)
+
     log_step "停止 Komari 服务..."
-    systemctl stop ${SERVICE_NAME}.service
-
-    log_step "备份当前二进制文件..."
-    cp "$BINARY_PATH" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
-
-    local arch=$(detect_arch)
-
-    log_step "下载最新版本..."
-    if ! download_binary "$arch"; then
-        log_error "下载失败，正在从备份恢复"
-        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
-        systemctl start ${SERVICE_NAME}.service
+    if ! systemctl stop ${SERVICE_NAME}.service; then
+        log_error "无法停止 Komari 服务，升级已取消"
+        return 1
+    fi
+    if systemctl is-active --quiet ${SERVICE_NAME}.service; then
+        log_error "Komari 服务仍在运行，升级已取消"
         return 1
     fi
 
-    chmod +x "$BINARY_PATH"
+    log_step "备份当前二进制文件和 SQLite 数据库..."
+    if ! create_upgrade_backup; then
+        log_error "升级前备份失败，未替换现有二进制文件"
+        systemctl start ${SERVICE_NAME}.service || true
+        return 1
+    fi
+
+    arch=$(detect_arch)
+
+    log_step "下载最新版本..."
+    if ! download_binary "$arch"; then
+        log_error "下载或校验失败，现有二进制文件保持不变"
+        systemctl reset-failed ${SERVICE_NAME}.service || true
+        systemctl start ${SERVICE_NAME}.service || true
+        return 1
+    fi
+
+    if ! chmod 0755 "$BINARY_PATH" || ! chown komari:komari "$BINARY_PATH"; then
+        log_error "无法设置新二进制文件的权限，准备自动回滚"
+        systemctl stop ${SERVICE_NAME}.service || true
+        restore_upgrade_binary || true
+        systemctl reset-failed ${SERVICE_NAME}.service || true
+        systemctl start ${SERVICE_NAME}.service || true
+        return 1
+    fi
 
     log_step "重启 Komari 服务..."
-    systemctl start ${SERVICE_NAME}.service
-
-    if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-        log_success "Komari 升级成功"
+    systemctl reset-failed ${SERVICE_NAME}.service || true
+    if ! systemctl start ${SERVICE_NAME}.service; then
+        log_error "systemd 无法启动新版本，准备自动回滚"
+    elif wait_for_service_ready "$service_port"; then
+        log_success "Komari 升级成功并已通过健康检查"
+        log_info "本次升级备份: $UPGRADE_BACKUP_PATH"
+        return 0
     else
-        log_error "服务在升级后未能启动"
+        show_service_failure
     fi
+
+    log_step "恢复升级前的 Komari 二进制文件..."
+    systemctl stop ${SERVICE_NAME}.service || true
+    if ! restore_upgrade_binary; then
+        return 1
+    fi
+    systemctl reset-failed ${SERVICE_NAME}.service || true
+    if systemctl start ${SERVICE_NAME}.service &&
+       wait_for_service_ready "$service_port"; then
+        log_error "新版本启动失败，已自动恢复并启动升级前版本"
+        log_info "故障排查备份: $UPGRADE_BACKUP_PATH"
+    else
+        log_error "新旧版本均未能启动，请保留 $UPGRADE_BACKUP_PATH 并检查上方日志"
+    fi
+    return 1
 }
 
 # Uninstall function
@@ -439,6 +630,8 @@ main_menu() {
     esac
 }
 
-# Main execution
-check_root
-main_menu
+# Main execution. Tests may source the installer without opening its menu.
+if [ "${KOMARI_INSTALLER_LIBRARY_ONLY:-0}" != "1" ]; then
+    check_root
+    main_menu
+fi
