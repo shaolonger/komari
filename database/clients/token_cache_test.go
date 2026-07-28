@@ -103,11 +103,37 @@ func TestClientCredentialExpiryRotationRevocationAndDeletion(t *testing.T) {
 		resetClientCredentialCacheForTest()
 		token := "delete-" + uuid.NewString()
 		client := insertCredentialClient(t, token, time.Time{})
+		db := dbcore.GetDBInstance()
+		if err := db.Create(&models.OfflineNotification{
+			Client: client.UUID,
+			Enable: true,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&models.TrafficReportNotification{
+			Client: client.UUID,
+			Enable: true,
+			Daily:  true,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
 		if _, err := GetClientUUIDByToken(token); err != nil {
 			t.Fatal(err)
 		}
 		if err := DeleteClient(client.UUID); err != nil {
 			t.Fatal(err)
+		}
+		for name, model := range map[string]interface{}{
+			"offline notification": &models.OfflineNotification{},
+			"traffic notification": &models.TrafficReportNotification{},
+		} {
+			var count int64
+			if err := db.Model(model).Where("client = ?", client.UUID).Count(&count).Error; err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("%s rows after client deletion = %d, want 0", name, count)
+			}
 		}
 		if _, err := GetClientUUIDByToken(token); !errors.Is(err, gorm.ErrRecordNotFound) {
 			t.Fatalf("error = %v, want record not found", err)

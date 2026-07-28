@@ -167,15 +167,15 @@ func RemoveClient(c *gin.Context) {
 	uuid := c.Param("uuid")
 	err := clients.DeleteClient(uuid)
 	if err != nil {
-		c.JSON(500, gin.H{
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": "error",
-			"error":  "Failed to delete client" + err.Error(),
+			"error":  "Failed to delete client: " + err.Error(),
 		})
 		return
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditLogFunc(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
-	c.JSON(200, gin.H{"status": "success"})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
 }

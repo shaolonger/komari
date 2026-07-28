@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
 )
 
@@ -48,11 +49,11 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		t.Fatalf("repeated migration failed: %v", err)
 	}
 	version, err := CurrentSchemaVersion(ctx, db)
-	if err != nil || version != 3 {
-		t.Fatalf("schema version=%d err=%v, want 3", version, err)
+	if err != nil || version != 4 {
+		t.Fatalf("schema version=%d err=%v, want 4", version, err)
 	}
 	var migrationCount, dataCount int64
-	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 3 {
+	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 4 {
 		t.Fatalf("migration rows=%d err=%v", migrationCount, err)
 	}
 	if err := db.Table("records").Count(&dataCount).Error; err != nil || dataCount != 1 {
@@ -81,6 +82,153 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		var count int64
 		if err := db.Raw("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?", name).Scan(&count).Error; err != nil || count != 1 {
 			t.Fatalf("index %s count=%d err=%v", name, count, err)
+		}
+	}
+}
+
+func TestClientNotificationCascadeMigrationPreservesSchemaAndData(t *testing.T) {
+	db, _, _ := openSQLiteForTest(t)
+	for _, statement := range []string{
+		`CREATE TABLE clients (
+			uuid TEXT PRIMARY KEY,
+			token TEXT NOT NULL UNIQUE
+		)`,
+		`CREATE TABLE offline_notifications (
+			client TEXT NOT NULL UNIQUE,
+			enable BOOLEAN DEFAULT false,
+			grace_period INTEGER NOT NULL DEFAULT 180,
+			last_notified DATETIME,
+			legacy_note TEXT,
+			CONSTRAINT fk_offline_notifications_client_info
+				FOREIGN KEY (client) REFERENCES clients(uuid)
+		)`,
+		`CREATE INDEX idx_offline_notifications_client
+			ON offline_notifications(client)`,
+		`CREATE TRIGGER offline_notifications_audit
+			AFTER UPDATE ON offline_notifications
+			BEGIN
+				SELECT NEW.client;
+			END`,
+		`CREATE TABLE traffic_report_notifications (
+			client TEXT NOT NULL UNIQUE,
+			enable BOOLEAN DEFAULT false,
+			daily BOOLEAN DEFAULT false,
+			weekly BOOLEAN DEFAULT false,
+			monthly BOOLEAN DEFAULT false,
+			last_daily_notified DATETIME,
+			last_weekly_notified DATETIME,
+			last_monthly_notified DATETIME,
+			legacy_note TEXT,
+			CONSTRAINT fk_traffic_report_notifications_client_info
+				FOREIGN KEY (client) REFERENCES clients(uuid)
+				ON DELETE NO ACTION ON UPDATE NO ACTION
+		)`,
+		`CREATE INDEX idx_traffic_report_notifications_client
+			ON traffic_report_notifications(client)`,
+		`INSERT INTO clients(uuid,token) VALUES('node-cascade','token-cascade')`,
+		`INSERT INTO offline_notifications(client,enable,legacy_note)
+			VALUES('node-cascade',true,'offline-preserved')`,
+		`INSERT INTO traffic_report_notifications(client,enable,daily,legacy_note)
+			VALUES('node-cascade',true,true,'traffic-preserved')`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	item := schemaMigrations[len(schemaMigrations)-1]
+	if item.version != 4 {
+		t.Fatalf("last migration version = %d, want 4", item.version)
+	}
+	if err := runMigrations(context.Background(), db, []migration{item}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runMigrations(context.Background(), db, []migration{item}); err != nil {
+		t.Fatalf("repeated migration failed: %v", err)
+	}
+
+	for _, table := range []string{"offline_notifications", "traffic_report_notifications"} {
+		var action struct {
+			OnDelete string `gorm:"column:on_delete"`
+			OnUpdate string `gorm:"column:on_update"`
+		}
+		if err := db.Raw(
+			`SELECT on_delete, on_update
+			 FROM pragma_foreign_key_list(?)
+			 WHERE "table"='clients' AND "from"='client'`,
+			table,
+		).Scan(&action).Error; err != nil {
+			t.Fatal(err)
+		}
+		if action.OnDelete != "CASCADE" || action.OnUpdate != "CASCADE" {
+			t.Fatalf("%s foreign-key action = %+v, want CASCADE/CASCADE", table, action)
+		}
+		var indexCount int64
+		if err := db.Raw(
+			"SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+			table,
+		).Scan(&indexCount).Error; err != nil || indexCount != 1 {
+			t.Fatalf("%s explicit indexes=%d err=%v, want 1", table, indexCount, err)
+		}
+	}
+	var triggerCount int64
+	if err := db.Raw(
+		"SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='offline_notifications_audit'",
+	).Scan(&triggerCount).Error; err != nil || triggerCount != 1 {
+		t.Fatalf("preserved triggers=%d err=%v, want 1", triggerCount, err)
+	}
+	for table, want := range map[string]string{
+		"offline_notifications":        "offline-preserved",
+		"traffic_report_notifications": "traffic-preserved",
+	} {
+		var note string
+		if err := db.Table(table).Select("legacy_note").Where("client='node-cascade'").Scan(&note).Error; err != nil {
+			t.Fatal(err)
+		}
+		if note != want {
+			t.Fatalf("%s legacy_note=%q, want %q", table, note, want)
+		}
+	}
+
+	if err := db.Exec("DELETE FROM clients WHERE uuid='node-cascade'").Error; err != nil {
+		t.Fatalf("delete migrated client: %v", err)
+	}
+	for _, table := range []string{"offline_notifications", "traffic_report_notifications"} {
+		var count int64
+		if err := db.Table(table).Count(&count).Error; err != nil || count != 0 {
+			t.Fatalf("%s rows after cascade=%d err=%v, want 0", table, count, err)
+		}
+	}
+	var violations int64
+	if err := db.Raw("SELECT count(*) FROM pragma_foreign_key_check").Scan(&violations).Error; err != nil || violations != 0 {
+		t.Fatalf("foreign-key violations=%d err=%v", violations, err)
+	}
+}
+
+func TestNotificationModelsCreateCascadeForeignKeys(t *testing.T) {
+	db, _, _ := openSQLiteForTest(t)
+	if err := db.AutoMigrate(
+		&models.Client{},
+		&models.OfflineNotification{},
+		&models.TrafficReportNotification{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"offline_notifications", "traffic_report_notifications"} {
+		var action struct {
+			OnDelete string `gorm:"column:on_delete"`
+			OnUpdate string `gorm:"column:on_update"`
+		}
+		if err := db.Raw(
+			`SELECT on_delete, on_update
+			 FROM pragma_foreign_key_list(?)
+			 WHERE "table"='clients' AND "from"='client'`,
+			table,
+		).Scan(&action).Error; err != nil {
+			t.Fatal(err)
+		}
+		if action.OnDelete != "CASCADE" || action.OnUpdate != "CASCADE" {
+			t.Fatalf("%s model foreign-key action = %+v, want CASCADE/CASCADE", table, action)
 		}
 	}
 }

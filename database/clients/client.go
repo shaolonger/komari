@@ -160,6 +160,15 @@ func DeleteClient(clientUuid string) error {
 		if err := tx.Model(&models.Client{}).Select("token").Where("uuid = ?", clientUuid).Scan(&oldToken).Error; err != nil {
 			return err
 		}
+		// Delete these rows explicitly as a compatibility guard for databases
+		// created before schema migration 4. Those schemas declared the foreign
+		// keys without ON DELETE CASCADE and otherwise reject the client delete.
+		if err := tx.Where("client = ?", clientUuid).Delete(&models.OfflineNotification{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("client = ?", clientUuid).Delete(&models.TrafficReportNotification{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
 	})
 	if err != nil {

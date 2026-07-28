@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -112,6 +113,132 @@ var schemaMigrations = []migration{
 			"CREATE INDEX IF NOT EXISTS idx_rollup_summary_resolution_time ON record_rollup_summaries(resolution_seconds, time)",
 		},
 	},
+	{
+		version: 4,
+		name:    "client_notification_cascade",
+		statements: []string{
+			"-- rebuild per-client notification foreign keys with cascading deletes",
+		},
+		up: migrateClientNotificationCascade,
+	},
+}
+
+var clientNotificationForeignKeyPattern = regexp.MustCompile(
+	"(?i)(FOREIGN\\s+KEY\\s*\\(\\s*[`\"]?client[`\"]?\\s*\\)\\s*" +
+		"REFERENCES\\s*[`\"]?clients[`\"]?\\s*\\(\\s*[`\"]?uuid[`\"]?\\s*\\))" +
+		"(?:\\s+ON\\s+DELETE\\s+(?:NO\\s+ACTION|RESTRICT|SET\\s+NULL|SET\\s+DEFAULT|CASCADE))?" +
+		"(?:\\s+ON\\s+UPDATE\\s+(?:NO\\s+ACTION|RESTRICT|SET\\s+NULL|SET\\s+DEFAULT|CASCADE))?",
+)
+
+type sqliteSchemaObject struct {
+	Name string
+	SQL  string
+}
+
+func quoteSQLiteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+// rebuildClientNotificationCascade preserves the complete installed table
+// definition, including legacy columns, while replacing only the client
+// foreign-key action. SQLite cannot alter a foreign key in place.
+func rebuildClientNotificationCascade(db *gorm.DB, table string) error {
+	var createSQL string
+	result := db.Raw(
+		"SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+		table,
+	).Scan(&createSQL)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 || strings.TrimSpace(createSQL) == "" {
+		return nil
+	}
+
+	matches := clientNotificationForeignKeyPattern.FindAllStringIndex(createSQL, -1)
+	if len(matches) != 1 {
+		return fmt.Errorf("table %s has %d client foreign keys, want 1", table, len(matches))
+	}
+	cascadeSQL := clientNotificationForeignKeyPattern.ReplaceAllString(
+		createSQL,
+		"$1 ON DELETE CASCADE ON UPDATE CASCADE",
+	)
+
+	var schemaObjects []sqliteSchemaObject
+	if err := db.Raw(
+		`SELECT name, sql
+		 FROM sqlite_master
+		 WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL
+		 ORDER BY type, name`,
+		table,
+	).Scan(&schemaObjects).Error; err != nil {
+		return err
+	}
+
+	backupTable := table + "__cascade_v4_old"
+	var backupCount int64
+	if err := db.Raw(
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+		backupTable,
+	).Scan(&backupCount).Error; err != nil {
+		return err
+	}
+	if backupCount != 0 {
+		return fmt.Errorf("temporary migration table %s already exists", backupTable)
+	}
+
+	quotedTable := quoteSQLiteIdentifier(table)
+	quotedBackup := quoteSQLiteIdentifier(backupTable)
+	if err := db.Exec("ALTER TABLE " + quotedTable + " RENAME TO " + quotedBackup).Error; err != nil {
+		return err
+	}
+	if err := db.Exec(cascadeSQL).Error; err != nil {
+		return err
+	}
+	if err := db.Exec("INSERT INTO " + quotedTable + " SELECT * FROM " + quotedBackup).Error; err != nil {
+		return err
+	}
+	if err := db.Exec("DROP TABLE " + quotedBackup).Error; err != nil {
+		return err
+	}
+	for _, object := range schemaObjects {
+		if strings.TrimSpace(object.SQL) == "" {
+			continue
+		}
+		if err := db.Exec(object.SQL).Error; err != nil {
+			return fmt.Errorf("restore schema object %s: %w", object.Name, err)
+		}
+	}
+	return nil
+}
+
+func migrateClientNotificationCascade(db *gorm.DB) error {
+	for _, table := range []string{"offline_notifications", "traffic_report_notifications"} {
+		var tableCount int64
+		if err := db.Raw(
+			"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+			table,
+		).Scan(&tableCount).Error; err != nil {
+			return err
+		}
+		if tableCount == 0 {
+			continue
+		}
+		if err := rebuildClientNotificationCascade(db, table); err != nil {
+			return fmt.Errorf("migrate %s cascade: %w", table, err)
+		}
+		var violations int64
+		if err := db.Raw(
+			"SELECT count(*) FROM pragma_foreign_key_check(?)",
+			table,
+		).Scan(&violations).Error; err != nil {
+			return err
+		}
+		if violations != 0 {
+			return fmt.Errorf("%s foreign key check found %d violations", table, violations)
+		}
+	}
+	return nil
 }
 
 func ensureMigrationTable(db *gorm.DB) error {
