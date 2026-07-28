@@ -68,6 +68,7 @@ fi
 # resulting digest before npm sees it.
 git -C "${source_dir}" apply "${repo_root}/build/frontend-build-security.patch"
 git -C "${source_dir}" apply "${repo_root}/build/frontend-security.patch"
+git -C "${source_dir}" apply "${repo_root}/build/frontend-audit-overrides.patch"
 effective_lock_sha="$(sha256_file "${lockfile}")"
 if [[ "${effective_lock_sha}" != "${FRONTEND_EFFECTIVE_LOCK_SHA256}" ]]; then
   echo "effective frontend lockfile mismatch: expected ${FRONTEND_EFFECTIVE_LOCK_SHA256}, got ${effective_lock_sha}" >&2
