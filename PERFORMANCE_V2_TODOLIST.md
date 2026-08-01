@@ -24,7 +24,7 @@ golden/contract counterpart passes in every consumer.
 - [x] **K2-203 Coalesce Ping submissions into durable bounded micro-batches**
 - [x] **K2-204 Add raw/1m/15m/1h Ping tiers and crash-safe retention**
 - [x] **K2-205 Push Ping point/row budgets into storage query planning**
-- [ ] **K2-206 Add one set-based Ping overview/stats API**
+- [x] **K2-206 Add one set-based Ping overview/stats API**
 
 ## K2-3 Metric/RPC compatibility
 

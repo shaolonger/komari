@@ -92,38 +92,79 @@ func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pi
 	if len(queryClients) == 0 {
 		return results, 0
 	}
-	queryResult, err := tasks.QueryPingRecordsForClients(ctx, db, queryClients, -1, end.Add(-time.Hour), end)
+	type aggregateRow struct {
+		Client      string
+		TaskID      uint `gorm:"column:task_id"`
+		SampleCount int64
+		LossCount   int64
+		Average     int
+		Minimum     int
+		Maximum     int
+		Latest      int
+	}
+	var rows []aggregateRow
+	start := end.Add(-time.Hour)
+	err := db.WithContext(ctx).Table("ping_records AS pr").
+		Select(`pr.client, pr.task_id,
+			COUNT(*) AS sample_count,
+			SUM(CASE WHEN pr.value < 0 THEN 1 ELSE 0 END) AS loss_count,
+			COALESCE(CAST(AVG(CASE WHEN pr.value >= 0 THEN pr.value END) AS INTEGER), 0) AS average,
+			COALESCE(MIN(CASE WHEN pr.value >= 0 THEN pr.value END), 0) AS minimum,
+			COALESCE(MAX(CASE WHEN pr.value >= 0 THEN pr.value END), 0) AS maximum,
+			COALESCE((SELECT latest.value FROM ping_records AS latest
+				WHERE latest.client = pr.client AND latest.task_id = pr.task_id
+				AND latest.value >= 0 AND latest.time >= ? AND latest.time <= ?
+				ORDER BY latest.time DESC LIMIT 1), -1) AS latest`, models.FromTime(start), models.FromTime(end)).
+		Where("pr.client IN ?", queryClients).
+		Where("pr.time >= ? AND pr.time <= ?", models.FromTime(start), models.FromTime(end)).
+		Group("pr.client, pr.task_id").
+		Scan(&rows).Error
 	if err != nil {
 		for _, uuid := range queryClients {
 			empty := map[string]pingStat{}
 			results[uuid] = empty
 			pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), empty, cache.DefaultExpiration)
 		}
-		return results, queryResult.SQLQueries
+		return results, 1
 	}
-	grouped := make(map[string]map[uint][]models.PingRecord, len(queryClients))
 	assignedIDs := make(map[string]map[uint]struct{}, len(queryClients))
+	taskNames := make(map[uint]string, len(pingTasks))
+	for _, task := range pingTasks {
+		taskNames[task.Id] = task.Name
+	}
 	for _, uuid := range queryClients {
 		assignedIDs[uuid] = make(map[uint]struct{}, len(assignedByClient[uuid]))
 		for _, task := range assignedByClient[uuid] {
 			assignedIDs[uuid][task.Id] = struct{}{}
 		}
 	}
-	for _, record := range queryResult.Records {
-		if _, ok := assignedIDs[record.Client][record.TaskId]; !ok {
+	for _, row := range rows {
+		if _, ok := assignedIDs[row.Client][row.TaskID]; !ok {
 			continue
 		}
-		if grouped[record.Client] == nil {
-			grouped[record.Client] = make(map[uint][]models.PingRecord)
+		if results[row.Client] == nil {
+			results[row.Client] = make(map[string]pingStat)
 		}
-		grouped[record.Client][record.TaskId] = append(grouped[record.Client][record.TaskId], record)
+		loss := 0.0
+		if row.SampleCount > 0 {
+			loss = float64(row.LossCount) / float64(row.SampleCount) * 100
+		}
+		tail := 0.0
+		if row.Average > 0 && row.Maximum >= row.Average {
+			tail = float64(row.Maximum-row.Average) / float64(row.Average)
+		}
+		results[row.Client][fmt.Sprintf("%d", row.TaskID)] = pingStat{
+			Name: taskNames[row.TaskID], Latest: row.Latest, Avg: row.Average,
+			Tail: tail, Loss: loss, Min: row.Minimum, Max: row.Maximum,
+		}
 	}
 	for _, uuid := range queryClients {
-		stats := summarizeNodePingStats(assignedByClient[uuid], grouped[uuid])
-		results[uuid] = stats
-		pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), stats, cache.DefaultExpiration)
+		if results[uuid] == nil {
+			results[uuid] = map[string]pingStat{}
+		}
+		pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), results[uuid], cache.DefaultExpiration)
 	}
-	return results, queryResult.SQLQueries
+	return results, 1
 }
 
 func summarizeNodePingStats(assigned []models.PingTask, grouped map[uint][]models.PingRecord) map[string]pingStat {
