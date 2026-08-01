@@ -7,6 +7,7 @@ func init() {
 		"metric.definitions": "1",
 		"metric.migration":   "1",
 		"metric.query":       "1",
+		"history.set-query":  "1",
 		"ping.overview":      "1",
 		"ping.leases":        "1",
 		"ping.result-batch":  "1",
