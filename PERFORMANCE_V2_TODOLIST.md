@@ -36,7 +36,7 @@ golden/contract counterpart passes in every consumer.
 
 ## K2-4 Realtime and scale
 
-- [ ] **K2-401 Expose resumable sequence delta subscriptions over RPC2**
+- [x] **K2-401 Expose resumable sequence delta subscriptions over RPC2**
 - [ ] **K2-402 Integrate Agent v3 acknowledgements and Ping leases**
 - [ ] **K2-403 Preserve SQLite Lite and validate scale-store parity**
 

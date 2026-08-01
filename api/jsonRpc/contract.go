@@ -8,6 +8,7 @@ func init() {
 		"metric.migration":   "1",
 		"metric.query":       "1",
 		"ping.overview":      "1",
+		"realtime.delta":     "1",
 		"storage.embedded":   "1",
 		"telemetry.v2":       "2",
 	})
