@@ -87,6 +87,38 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 	}
 }
 
+func TestSchemaMigrationMatrixFromEveryPriorVersion(t *testing.T) {
+	for prefix := 0; prefix < len(schemaMigrations); prefix++ {
+		t.Run(fmt.Sprintf("version_%d", prefix), func(t *testing.T) {
+			db, _, _ := openSQLiteForTest(t)
+			createLegacyTelemetrySchema(t, db)
+			if prefix > 0 {
+				if err := runMigrations(context.Background(), db, schemaMigrations[:prefix]); err != nil {
+					t.Fatalf("prepare version %d: %v", prefix, err)
+				}
+			}
+			if err := RunMigrations(context.Background(), db); err != nil {
+				t.Fatalf("upgrade version %d: %v", prefix, err)
+			}
+			if err := RunMigrations(context.Background(), db); err != nil {
+				t.Fatalf("idempotency version %d: %v", prefix, err)
+			}
+			version, err := CurrentSchemaVersion(context.Background(), db)
+			if err != nil || version != len(schemaMigrations) {
+				t.Fatalf("final version=%d err=%v", version, err)
+			}
+			var integrity string
+			if err := db.Raw("PRAGMA integrity_check").Scan(&integrity).Error; err != nil || integrity != "ok" {
+				t.Fatalf("integrity=%q err=%v", integrity, err)
+			}
+			var foreignKeyViolations int64
+			if err := db.Raw("SELECT count(*) FROM pragma_foreign_key_check").Scan(&foreignKeyViolations).Error; err != nil || foreignKeyViolations != 0 {
+				t.Fatalf("foreign-key violations=%d err=%v", foreignKeyViolations, err)
+			}
+		})
+	}
+}
+
 func TestClientNotificationCascadeMigrationPreservesSchemaAndData(t *testing.T) {
 	db, primary, _ := openSQLiteForTest(t)
 	// Releases before v1.3.0 did not enable foreign-key enforcement on every
