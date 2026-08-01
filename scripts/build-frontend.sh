@@ -75,6 +75,12 @@ if [[ "${effective_lock_sha}" != "${FRONTEND_EFFECTIVE_LOCK_SHA256}" ]]; then
   exit 1
 fi
 
+# Fail before dependency installation when the pinned frontend expects an RPC
+# method the server contract does not guarantee. This prevents publishing a UI
+# that can only fail at runtime with JSON-RPC -32601.
+node "${repo_root}/scripts/verify-frontend-rpc-contract.mjs" \
+  "${repo_root}/contracts/rpc-v2.json" "${source_dir}/src"
+
 # The pinned upstream config embeds wall-clock time. Replace only that exact
 # expression with the pinned commit epoch so chunk names and PWA manifests are
 # reproducible. The exact-match guard fails closed if upstream changes.
@@ -132,4 +138,7 @@ fi
 printf 'frontend_commit=%s\nfrontend_lock_sha256=%s\n' \
   "${FRONTEND_COMMIT}" "${FRONTEND_EFFECTIVE_LOCK_SHA256}" >"${output_dir}/BUILD_PROVENANCE"
 printf 'frontend_source_date_epoch=%s\n' "${FRONTEND_SOURCE_DATE_EPOCH}" \
+  >>"${output_dir}/BUILD_PROVENANCE"
+printf 'rpc_contract=%s\n' \
+  "$(node -p "require('${repo_root}/contracts/rpc-v2.json').contract")" \
   >>"${output_dir}/BUILD_PROVENANCE"
