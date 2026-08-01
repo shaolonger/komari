@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 
+	"github.com/komari-monitor/komari/internal/runtimeprofile"
 	"github.com/mattn/go-sqlite3"
 	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -21,9 +21,11 @@ import (
 const (
 	komariSQLiteDriver      = "komari_sqlite3"
 	SQLiteBusyTimeoutMillis = 5_000
-	SQLiteCacheKiB          = 8_192
-	SQLiteMmapBytes         = 256 * 1024 * 1024
-	MaxReadConnections      = 8
+	// These exported values remain the scale-profile compatibility ceilings.
+	// Active connections use runtimeprofile.Current instead of fixed settings.
+	SQLiteCacheKiB     = 8_192
+	SQLiteMmapBytes    = 256 * 1024 * 1024
+	MaxReadConnections = 8
 )
 
 var memoryDatabaseSequence atomic.Uint64
@@ -34,13 +36,17 @@ func init() {
 }
 
 func configureSQLiteConnection(connection *sqlite3.SQLiteConn) error {
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		return err
+	}
 	pragmas := []string{
 		"PRAGMA foreign_keys = ON",
 		fmt.Sprintf("PRAGMA busy_timeout = %d", SQLiteBusyTimeoutMillis),
 		"PRAGMA synchronous = NORMAL",
-		fmt.Sprintf("PRAGMA cache_size = -%d", SQLiteCacheKiB),
-		"PRAGMA temp_store = MEMORY",
-		fmt.Sprintf("PRAGMA mmap_size = %d", SQLiteMmapBytes),
+		fmt.Sprintf("PRAGMA cache_size = -%d", profile.SQLiteCacheKiB),
+		fmt.Sprintf("PRAGMA temp_store = %s", profile.SQLiteTempStore),
+		fmt.Sprintf("PRAGMA mmap_size = %d", profile.SQLiteMmapBytes),
 	}
 	for _, pragma := range pragmas {
 		if _, err := connection.Exec(pragma, []driver.Value{}); err != nil {
@@ -68,23 +74,31 @@ func sqliteBaseURI(path string) (string, error) {
 	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}).String(), nil
 }
 
-func addSQLiteParameters(base string, writer bool) string {
+func addSQLiteParameters(base string, writer bool) (string, error) {
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		return "", err
+	}
 	separator := "?"
 	if strings.Contains(base, "?") {
 		separator = "&"
 	}
 	parameters := fmt.Sprintf(
 		"_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-%d",
-		SQLiteBusyTimeoutMillis, SQLiteCacheKiB,
+		SQLiteBusyTimeoutMillis, profile.SQLiteCacheKiB,
 	)
 	if writer {
 		parameters += "&_txlock=immediate"
 	}
-	return base + separator + parameters
+	return base + separator + parameters, nil
 }
 
 func readConnectionLimit() int {
-	return min(max(runtime.GOMAXPROCS(0), 4), MaxReadConnections)
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		return 1
+	}
+	return min(max(profile.SQLiteReadConnections, 1), MaxReadConnections)
 }
 
 func configureReadPool(database *sql.DB) {
@@ -107,9 +121,13 @@ func openSQLiteDatabase(path string, gormLogger logger.Interface) (*gorm.DB, *sq
 	if err != nil {
 		return nil, nil, err
 	}
+	primaryDSN, err := addSQLiteParameters(base, false)
+	if err != nil {
+		return nil, nil, err
+	}
 	primary, err := gorm.Open(gormsqlite.New(gormsqlite.Config{
 		DriverName: komariSQLiteDriver,
-		DSN:        addSQLiteParameters(base, false),
+		DSN:        primaryDSN,
 	}), &gorm.Config{Logger: gormLogger})
 	if err != nil {
 		return nil, nil, err
@@ -120,7 +138,12 @@ func openSQLiteDatabase(path string, gormLogger logger.Interface) (*gorm.DB, *sq
 	}
 	configureReadPool(primarySQL)
 
-	writer, err := sql.Open(komariSQLiteDriver, addSQLiteParameters(base, true))
+	writerDSN, err := addSQLiteParameters(base, true)
+	if err != nil {
+		_ = primarySQL.Close()
+		return nil, nil, err
+	}
+	writer, err := sql.Open(komariSQLiteDriver, writerDSN)
 	if err != nil {
 		_ = primarySQL.Close()
 		return nil, nil, err

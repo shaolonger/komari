@@ -7,13 +7,9 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/runtimeprofile"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/ws"
-)
-
-const (
-	pingScheduleWorkers = 16
-	pingScheduleQueue   = 2_048
 )
 
 type pingMessage struct {
@@ -35,7 +31,11 @@ type PingTaskManager struct {
 var manager = &PingTaskManager{}
 
 func (manager *PingTaskManager) Reload(pingTasks []models.PingTask) error {
-	engine, err := scheduler.New(scheduler.Config{Workers: pingScheduleWorkers, QueueCapacity: pingScheduleQueue})
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		return err
+	}
+	engine, err := scheduler.New(scheduler.Config{Workers: profile.PingWorkers, QueueCapacity: profile.PingQueueCapacity})
 	if err != nil {
 		return err
 	}

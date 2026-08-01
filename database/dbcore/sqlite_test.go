@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/runtimeprofile"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -67,17 +68,25 @@ func readSQLitePragmas(ctx context.Context, queryer interface {
 
 func assertSQLitePragmas(t testing.TB, settings sqlitePragmas) {
 	t.Helper()
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.ToLower(settings.journalMode) != "wal" {
 		t.Fatalf("journal_mode = %q, want wal", settings.journalMode)
 	}
 	if settings.foreignKeys != 1 || settings.busyTimeout != SQLiteBusyTimeoutMillis {
 		t.Fatalf("integrity settings = %+v", settings)
 	}
-	if settings.synchronous != 1 || settings.cacheSize != -SQLiteCacheKiB || settings.tempStore != 2 {
+	wantTempStore := 2
+	if profile.SQLiteTempStore == "FILE" {
+		wantTempStore = 1
+	}
+	if settings.synchronous != 1 || settings.cacheSize != -profile.SQLiteCacheKiB || settings.tempStore != wantTempStore {
 		t.Fatalf("performance settings = %+v", settings)
 	}
-	if settings.mmapSize < SQLiteMmapBytes {
-		t.Fatalf("mmap_size = %d, want >= %d", settings.mmapSize, SQLiteMmapBytes)
+	if settings.mmapSize < profile.SQLiteMmapBytes {
+		t.Fatalf("mmap_size = %d, want >= %d", settings.mmapSize, profile.SQLiteMmapBytes)
 	}
 }
 
