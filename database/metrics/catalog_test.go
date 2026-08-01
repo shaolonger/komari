@@ -100,6 +100,63 @@ func TestMetricMigrationBackfillsOnceAndCheckpoints(t *testing.T) {
 	}
 }
 
+func TestPersistMigrationPageRetriesSQLiteTableLock(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-%d?mode=memory&cache=shared&_busy_timeout=1", t.Name(), time.Now().UnixNano())), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.PingRollup{}, &models.MetricMigrationState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.MetricMigrationState{ID: 1, Status: "running"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(2)
+	blocker, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	blockerTx, err := blocker.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := blockerTx.QueryRowContext(context.Background(), "SELECT status FROM metric_migration_states WHERE id = 1").Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- persistMigrationPage(context.Background(), db, nil, 42, 3)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := blockerTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("migration page retry remained blocked")
+	}
+	var state models.MetricMigrationState
+	if err := db.First(&state, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if state.CheckpointRowID != 42 || state.MigratedPoints != 3 {
+		t.Fatalf("migration checkpoint after retry = %+v", state)
+	}
+}
+
 func TestMetricCatalogRetentionIsAllowlistedAndPersistent(t *testing.T) {
 	db := openCatalogTestDB(t)
 	ctx := context.Background()

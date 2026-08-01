@@ -13,7 +13,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const metricMigrationBatchRows = 2_000
+const (
+	metricMigrationBatchRows     = 2_000
+	metricMigrationWriteAttempts = 6
+	metricMigrationRetryBase     = 5 * time.Millisecond
+)
 
 type MigrationStatus struct {
 	Status         string            `json:"status"`
@@ -231,6 +235,44 @@ func upsertMigrationRollups(tx *gorm.DB, rows []models.PingRollup) error {
 	}).CreateInBatches(rows, 100).Error
 }
 
+func isSQLiteMigrationContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database table is locked") ||
+		strings.Contains(message, "database is busy")
+}
+
+func persistMigrationPage(ctx context.Context, db *gorm.DB, rollups []models.PingRollup, lastRowID int64, migratedPoints int) error {
+	for attempt := 0; attempt < metricMigrationWriteAttempts; attempt++ {
+		err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := upsertMigrationRollups(tx, rollups); err != nil {
+				return err
+			}
+			return tx.Model(&models.MetricMigrationState{}).Where("id = ?", 1).Updates(map[string]any{
+				"checkpoint_row_id": lastRowID,
+				"migrated_points":   gorm.Expr("migrated_points + ?", migratedPoints),
+			}).Error
+		})
+		if err == nil || !isSQLiteMigrationContention(err) || attempt == metricMigrationWriteAttempts-1 {
+			return err
+		}
+		delay := metricMigrationRetryBase << attempt
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
 func finishMigration(db *gorm.DB, status, message string) {
 	now := time.Now().UTC()
 	updates := map[string]any{"status": status, "cancel_requested": false, "ended_at": &now, "error_message": message}
@@ -281,15 +323,7 @@ func runMigration(ctx context.Context, db *gorm.DB) {
 		}
 		lastRowID := rows[len(rows)-1].RowID
 		rollups := migrationRollups(rows)
-		err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if err := upsertMigrationRollups(tx, rollups); err != nil {
-				return err
-			}
-			return tx.Model(&models.MetricMigrationState{}).Where("id = ?", 1).Updates(map[string]any{
-				"checkpoint_row_id": lastRowID,
-				"migrated_points":   gorm.Expr("migrated_points + ?", len(rows)),
-			}).Error
-		})
+		err = persistMigrationPage(ctx, db, rollups, lastRowID, len(rows))
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				finishMigration(db, "canceled", "")
