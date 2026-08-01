@@ -1,6 +1,6 @@
 # Komari Performance V2
 
-Status: implementation in progress
+Status: complete; v1.4.0 release candidate
 
 This document defines the second performance program shared by Komari,
 komari-agent and LuminaPlus. The first performance program remains the baseline;
