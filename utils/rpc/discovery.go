@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-const ContractVersion = "komari.rpc.v2.2"
+const ContractVersion = "komari.rpc.v2.3"
 
 type Discovery struct {
 	JSONRPCVersion string            `json:"jsonrpc_version"`

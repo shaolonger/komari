@@ -12,6 +12,7 @@ func resetDashboardStateForTest() {
 	mu.Lock()
 	defer mu.Unlock()
 	connectedClients = make(map[string]*SafeConn)
+	telemetryProtocol = make(map[string]uint8)
 	presenceOnly = make(map[string]struct {
 		id     int64
 		expire time.Time

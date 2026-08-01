@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari/internal/telemetry"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
 	"github.com/komari-monitor/komari/protocol/telemetryv3"
+	komariutils "github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
 )
@@ -217,9 +218,13 @@ func WebSocketReport(c *gin.Context) {
 		_ = oldConn.Close()
 	}
 	ws.SetConnectedClients(uuid, conn)
+	ws.SetClientTelemetryProtocol(uuid, conn, uint8(wireProtocol))
 	observability.WSConnected()
 	log.Printf("Client %s is reconnect success, connID: %d, telemetry protocol: v%d", uuid, conn.ID, wireProtocol)
 	go notifier.OnlineNotification(uuid, conn.ID)
+	if wireProtocol == telemetryProtocolV3 {
+		_ = komariutils.SendPingLease(uuid)
+	}
 	defer func() {
 		observability.WSDisconnected()
 		ws.DeleteClientConditionally(uuid, conn)
@@ -326,6 +331,18 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 		} else {
 			accepted = true
 		}
+	case "ping_result_batch":
+		acceptance, err := acceptPingResultBatch(context.Background(), dbcore.GetDBInstance(), uuid, decoded.BatchSequence, decoded.PingResults, tasks.SavePingRecords)
+		if errors.Is(err, ErrTelemetrySequenceGap) {
+			_ = conn.WriteJSON(gin.H{"type": "ping_result_nack", "expected": acceptance.Through + 1})
+			return
+		}
+		if err != nil {
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Failed to durably accept Ping result batch"})
+			return
+		}
+		_ = conn.WriteJSON(gin.H{"type": "ping_result_ack", "through": acceptance.Through})
+		accepted = true
 	default:
 		log.Printf("Unknown message type: %s", decoded.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
@@ -334,11 +351,13 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 
 type agentMessage struct {
 	common.Report
-	Type       string    `json:"type"`
-	PingTaskID uint      `json:"task_id"`
-	PingResult int       `json:"value"`
-	PingType   string    `json:"ping_type"`
-	FinishedAt time.Time `json:"finished_at"`
+	Type          string            `json:"type"`
+	PingTaskID    uint              `json:"task_id"`
+	PingResult    int               `json:"value"`
+	PingType      string            `json:"ping_type"`
+	FinishedAt    time.Time         `json:"finished_at"`
+	BatchSequence uint64            `json:"sequence"`
+	PingResults   []pingResultInput `json:"results"`
 }
 
 func decodeAgentMessage(message []byte, decoded *agentMessage) error {

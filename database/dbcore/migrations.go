@@ -189,6 +189,18 @@ var schemaMigrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 9,
+		name:    "ping_result_sequences",
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS ping_result_sequences (
+				client varchar(36) PRIMARY KEY NOT NULL,
+				through_sequence INTEGER NOT NULL,
+				updated_at DATETIME NOT NULL,
+				FOREIGN KEY(client) REFERENCES clients(uuid) ON DELETE CASCADE ON UPDATE CASCADE
+			)`,
+		},
+	},
 }
 
 var clientNotificationForeignKeyPattern = regexp.MustCompile(

@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	connectedClients = make(map[string]*SafeConn)
-	ConnectedUsers   = []*websocket.Conn{}
-	latestReport     = make(map[string]common.Report)
+	connectedClients  = make(map[string]*SafeConn)
+	ConnectedUsers    = []*websocket.Conn{}
+	latestReport      = make(map[string]common.Report)
+	telemetryProtocol = make(map[string]uint8)
 	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
@@ -47,6 +48,20 @@ func SetConnectedClients(uuid string, conn *SafeConn) {
 		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
 	}
 }
+
+func SetClientTelemetryProtocol(uuid string, conn *SafeConn, version uint8) {
+	mu.Lock()
+	defer mu.Unlock()
+	if current, exists := connectedClients[uuid]; exists && current == conn {
+		telemetryProtocol[uuid] = version
+	}
+}
+
+func GetClientTelemetryProtocol(uuid string) uint8 {
+	mu.RLock()
+	defer mu.RUnlock()
+	return telemetryProtocol[uuid]
+}
 func DeleteClientConditionally(uuid string, connToRemove *SafeConn) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -55,6 +70,7 @@ func DeleteClientConditionally(uuid string, connToRemove *SafeConn) {
 	wasOnline := isOnlineLocked(uuid, time.Now())
 	if currentConn, exists := connectedClients[uuid]; exists && currentConn == connToRemove {
 		delete(connectedClients, uuid)
+		delete(telemetryProtocol, uuid)
 	}
 	if wasOnline && !isOnlineLocked(uuid, time.Now()) {
 		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
@@ -66,6 +82,7 @@ func DeleteConnectedClients(uuid string) {
 	wasOnline := isOnlineLocked(uuid, time.Now())
 	// 只从 map 中删除，不再负责关闭连接
 	delete(connectedClients, uuid)
+	delete(telemetryProtocol, uuid)
 	if wasOnline && !isOnlineLocked(uuid, time.Now()) {
 		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
 	}
@@ -78,6 +95,7 @@ func CloseAllAgentConnections() {
 	for uuid, connection := range connectedClients {
 		connections = append(connections, connection)
 		delete(connectedClients, uuid)
+		delete(telemetryProtocol, uuid)
 		if !isOnlineLocked(uuid, time.Now()) {
 			appendDashboardChangeLocked(uuid, dashboardOnlineChange)
 		}

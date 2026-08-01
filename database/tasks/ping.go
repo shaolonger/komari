@@ -163,19 +163,28 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 }
 
 func SavePingRecord(record models.PingRecord) error {
+	return SavePingRecords([]models.PingRecord{record})
+}
+
+func SavePingRecords(records []models.PingRecord) error {
+	if len(records) == 0 || len(records) > 64 {
+		return errors.New("ping record batch must contain 1 to 64 records")
+	}
 	index, err := loadPingAssignmentIndex()
 	if err != nil {
 		return err
 	}
-	if _, exists := index.taskIDs[record.TaskId]; !exists {
-		return gorm.ErrRecordNotFound
-	}
-	if _, assigned := index.assignments[pingAssignmentKey{client: record.Client, taskID: record.TaskId}]; !assigned {
-		return ErrPingTaskNotAssigned
+	for _, record := range records {
+		if _, exists := index.taskIDs[record.TaskId]; !exists {
+			return gorm.ErrRecordNotFound
+		}
+		if _, assigned := index.assignments[pingAssignmentKey{client: record.Client, taskID: record.TaskId}]; !assigned {
+			return ErrPingTaskNotAssigned
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*timepkg.Second)
 	defer cancel()
-	return telemetrywriter.Submit(ctx, telemetrywriter.Batch{PingRecords: []models.PingRecord{record}})
+	return telemetrywriter.Submit(ctx, telemetrywriter.Batch{PingRecords: records})
 }
 
 func DeletePingRecordsBefore(time timepkg.Time) error {

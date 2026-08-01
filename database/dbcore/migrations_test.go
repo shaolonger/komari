@@ -64,7 +64,7 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 			t.Fatalf("deduplicated %s rows=%d err=%v, want 1", table, dataCount, err)
 		}
 	}
-	for _, table := range []string{"telemetry_compaction_state", "telemetry_compaction_pending", "telemetry_v3_sequences"} {
+	for _, table := range []string{"telemetry_compaction_state", "telemetry_compaction_pending", "telemetry_v3_sequences", "ping_result_sequences"} {
 		var count int64
 		if err := db.Raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count).Error; err != nil || count != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, count, err)
