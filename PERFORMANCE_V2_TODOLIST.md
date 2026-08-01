@@ -12,7 +12,7 @@ golden/contract counterpart passes in every consumer.
 
 ## K2-1 Embedded runtime
 
-- [ ] **K2-101 Add cgroup-aware auto/nano/standard/scale runtime profiles**
+- [x] **K2-101 Add cgroup-aware auto/nano/standard/scale runtime profiles**
 - [ ] **K2-102 Apply profile-sized SQLite pools/cache/mmap/temp settings**
 - [ ] **K2-103 CPU-budget startup-independent compaction and retention**
 - [ ] **K2-104 Harden installer systemd resources and in-process DB backup**
