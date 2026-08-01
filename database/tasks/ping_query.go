@@ -1,0 +1,193 @@
+package tasks
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/gorm"
+)
+
+const MaxPingQueryPoints = 100_000
+
+type PingQuery struct {
+	Client    string
+	TaskID    int
+	Start     time.Time
+	End       time.Time
+	MaxPoints int
+}
+
+type PingQueryResult struct {
+	Records           []models.PingRecord
+	SampleCounts      []int64
+	ValidCounts       []int64
+	LossCounts        []int64
+	MinValues         []int
+	MaxValues         []int
+	ResolutionSeconds int
+	RowsScanned       int
+	Truncated         bool
+}
+
+func validatePingQuery(query PingQuery) error {
+	if query.Start.IsZero() || query.End.IsZero() || !query.End.After(query.Start) {
+		return errors.New("invalid Ping query range")
+	}
+	if query.MaxPoints <= 0 || query.MaxPoints > MaxPingQueryPoints {
+		return fmt.Errorf("Ping point budget must be between 1 and %d", MaxPingQueryPoints)
+	}
+	return nil
+}
+
+func pingSeriesIntervals(index *pingAssignmentIndex, client string, taskID int) []int {
+	intervals := make([]int, 0)
+	if client != "" {
+		for _, task := range index.tasksByClient[client] {
+			if taskID >= 0 && task.Id != uint(taskID) {
+				continue
+			}
+			intervals = append(intervals, max(task.Interval, 1))
+		}
+		return intervals
+	}
+	for assignment := range index.assignments {
+		if taskID >= 0 && assignment.taskID != uint(taskID) {
+			continue
+		}
+		task := index.tasksByID[assignment.taskID]
+		intervals = append(intervals, max(task.Interval, 1))
+	}
+	return intervals
+}
+
+func estimatedBuckets(window time.Duration, seconds int) int64 {
+	if window <= 0 {
+		return 0
+	}
+	nanoseconds := int64(time.Duration(seconds) * time.Second)
+	return max((window.Nanoseconds()+nanoseconds-1)/nanoseconds, 1)
+}
+
+func choosePingResolution(index *pingAssignmentIndex, query PingQuery) int {
+	intervals := pingSeriesIntervals(index, query.Client, query.TaskID)
+	if len(intervals) == 0 {
+		return 0
+	}
+	var rawEstimate int64
+	for _, interval := range intervals {
+		rawEstimate += estimatedBuckets(query.End.Sub(query.Start), interval)
+	}
+	if rawEstimate <= int64(query.MaxPoints) {
+		return 0
+	}
+	for _, resolution := range []int{60, 900, 3600} {
+		estimate := estimatedBuckets(query.End.Sub(query.Start), resolution) * int64(len(intervals))
+		if estimate <= int64(query.MaxPoints) {
+			return resolution
+		}
+	}
+	return 3600
+}
+
+// QueryPingSeries selects the narrowest storage tier that can satisfy the
+// caller's total point budget. LIMIT is applied in SQL, so adversarial ranges
+// cannot first materialize millions of rows and downsample them afterward.
+func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQueryResult, error) {
+	result := PingQueryResult{Records: []models.PingRecord{}}
+	if ctx == nil || db == nil {
+		return result, errors.New("Ping query context and database are required")
+	}
+	if err := validatePingQuery(query); err != nil {
+		return result, err
+	}
+	index, err := loadPingAssignmentIndex()
+	if err != nil {
+		return result, err
+	}
+	result.ResolutionSeconds = choosePingResolution(index, query)
+	limit := query.MaxPoints + 1
+
+	if result.ResolutionSeconds == 0 {
+		request := db.WithContext(ctx).Model(&models.PingRecord{}).
+			Select("ping_records.client,ping_records.task_id,ping_records.time,ping_records.value").
+			Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_records.task_id").
+			Where("ping_records.time >= ? AND ping_records.time <= ?", models.FromTime(query.Start), models.FromTime(query.End))
+		if query.Client != "" {
+			request = request.Where("ping_records.client = ?", query.Client)
+		}
+		if query.TaskID >= 0 {
+			request = request.Where("ping_records.task_id = ?", uint(query.TaskID))
+		}
+		if err := request.Order("ping_records.time DESC").Limit(limit).Find(&result.Records).Error; err != nil {
+			return result, err
+		}
+		for _, record := range result.Records {
+			result.SampleCounts = append(result.SampleCounts, 1)
+			if record.Value < 0 {
+				result.ValidCounts = append(result.ValidCounts, 0)
+				result.LossCounts = append(result.LossCounts, 1)
+				result.MinValues = append(result.MinValues, 0)
+				result.MaxValues = append(result.MaxValues, 0)
+			} else {
+				result.ValidCounts = append(result.ValidCounts, 1)
+				result.LossCounts = append(result.LossCounts, 0)
+				result.MinValues = append(result.MinValues, record.Value)
+				result.MaxValues = append(result.MaxValues, record.Value)
+			}
+		}
+	} else {
+		type rollupProjection struct {
+			Client      string
+			TaskId      uint
+			BucketTime  models.LocalTime
+			SampleCount int64
+			ValidCount  int64
+			LossCount   int64
+			SumValue    int64
+			MinValue    int
+			MaxValue    int
+		}
+		var rows []rollupProjection
+		request := db.WithContext(ctx).Model(&models.PingRollup{}).
+			Select("ping_rollups.client,ping_rollups.task_id,ping_rollups.bucket_time,ping_rollups.sample_count,ping_rollups.valid_count,ping_rollups.loss_count,ping_rollups.sum_value,ping_rollups.min_value,ping_rollups.max_value").
+			Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_rollups.task_id").
+			Where("ping_rollups.resolution_seconds = ? AND ping_rollups.bucket_time >= ? AND ping_rollups.bucket_time <= ?", result.ResolutionSeconds, models.FromTime(query.Start), models.FromTime(query.End))
+		if query.Client != "" {
+			request = request.Where("ping_rollups.client = ?", query.Client)
+		}
+		if query.TaskID >= 0 {
+			request = request.Where("ping_rollups.task_id = ?", uint(query.TaskID))
+		}
+		if err := request.Order("ping_rollups.bucket_time DESC").Limit(limit).Scan(&rows).Error; err != nil {
+			return result, err
+		}
+		result.Records = make([]models.PingRecord, 0, len(rows))
+		for _, row := range rows {
+			value := -1
+			if row.ValidCount > 0 {
+				value = int(row.SumValue / row.ValidCount)
+			}
+			result.Records = append(result.Records, models.PingRecord{Client: row.Client, TaskId: row.TaskId, Time: row.BucketTime, Value: value})
+			result.SampleCounts = append(result.SampleCounts, row.SampleCount)
+			result.ValidCounts = append(result.ValidCounts, row.ValidCount)
+			result.LossCounts = append(result.LossCounts, row.LossCount)
+			result.MinValues = append(result.MinValues, row.MinValue)
+			result.MaxValues = append(result.MaxValues, row.MaxValue)
+		}
+	}
+
+	result.RowsScanned = len(result.Records)
+	if len(result.Records) > query.MaxPoints {
+		result.Truncated = true
+		result.Records = result.Records[:query.MaxPoints]
+		result.SampleCounts = result.SampleCounts[:query.MaxPoints]
+		result.ValidCounts = result.ValidCounts[:query.MaxPoints]
+		result.LossCounts = result.LossCounts[:query.MaxPoints]
+		result.MinValues = result.MinValues[:query.MaxPoints]
+		result.MaxValues = result.MaxValues[:query.MaxPoints]
+	}
+	return result, ctx.Err()
+}

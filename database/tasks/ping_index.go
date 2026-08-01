@@ -18,6 +18,7 @@ type pingAssignmentKey struct {
 type pingAssignmentIndex struct {
 	generation    uint64
 	tasksByClient map[string][]models.PingTask
+	tasksByID     map[uint]models.PingTask
 	taskIDs       map[uint]struct{}
 	assignments   map[pingAssignmentKey]struct{}
 }
@@ -32,6 +33,7 @@ func buildPingAssignmentIndex(pingTasks []models.PingTask) *pingAssignmentIndex 
 	index := &pingAssignmentIndex{
 		generation:    pingAssignmentVersion.Add(1),
 		tasksByClient: make(map[string][]models.PingTask),
+		tasksByID:     make(map[uint]models.PingTask, len(pingTasks)),
 		taskIDs:       make(map[uint]struct{}, len(pingTasks)),
 		assignments:   make(map[pingAssignmentKey]struct{}),
 	}
@@ -39,6 +41,7 @@ func buildPingAssignmentIndex(pingTasks []models.PingTask) *pingAssignmentIndex 
 		task := source
 		task.Clients = append(models.StringArray(nil), source.Clients...)
 		index.taskIDs[task.Id] = struct{}{}
+		index.tasksByID[task.Id] = task
 		seen := make(map[string]struct{}, len(task.Clients))
 		for _, clientID := range task.Clients {
 			if clientID == "" {

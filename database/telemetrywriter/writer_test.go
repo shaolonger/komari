@@ -101,7 +101,7 @@ func TestWriterPersistsAllRecordTypesAtomically(t *testing.T) {
 		t.Fatalf("Ping rollup tiers = %d, want 3", len(rollups))
 	}
 	for _, rollup := range rollups {
-		if rollup.SampleCount != 1 || rollup.SumValue != 12 || rollup.MinValue != 12 || rollup.MaxValue != 12 || rollup.LastValue != 12 {
+		if rollup.SampleCount != 1 || rollup.ValidCount != 1 || rollup.LossCount != 0 || rollup.SumValue != 12 || rollup.MinValue != 12 || rollup.MaxValue != 12 || rollup.LastValue != 12 {
 			t.Fatalf("invalid Ping rollup: %+v", rollup)
 		}
 	}
@@ -168,7 +168,7 @@ func TestWriterUpsertsPingRollupBucketsAtomically(t *testing.T) {
 	if err := db.Where("client = ? AND task_id = ? AND resolution_seconds = 60", client.UUID, task.Id).First(&rollup).Error; err != nil {
 		t.Fatal(err)
 	}
-	if rollup.SampleCount != 2 || rollup.SumValue != 30 || rollup.MinValue != 12 || rollup.MaxValue != 18 || rollup.LastValue != 18 {
+	if rollup.SampleCount != 2 || rollup.ValidCount != 2 || rollup.LossCount != 0 || rollup.SumValue != 30 || rollup.MinValue != 12 || rollup.MaxValue != 18 || rollup.LastValue != 18 {
 		t.Fatalf("merged Ping rollup = %+v", rollup)
 	}
 }

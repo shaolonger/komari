@@ -205,10 +205,10 @@ func TestDeletePingRecordsBeforeAppliesTieredRetention(t *testing.T) {
 	task := createPingTask(t, db, client)
 	now := time.Now().UTC()
 	rollups := []models.PingRollup{
-		{Client: client, TaskId: task.Id, ResolutionSeconds: 60, BucketTime: models.FromTime(now.Add(-8 * 24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
-		{Client: client, TaskId: task.Id, ResolutionSeconds: 900, BucketTime: models.FromTime(now.Add(-91 * 24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
-		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-731 * 24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
-		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 60, BucketTime: models.FromTime(now.Add(-8 * 24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 900, BucketTime: models.FromTime(now.Add(-91 * 24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-731 * 24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
 	}
 	if err := db.Create(&rollups).Error; err != nil {
 		t.Fatal(err)
@@ -255,5 +255,63 @@ func TestQueryPingRecordsForClientsUsesOneNarrowAuthorizedQuery(t *testing.T) {
 	empty, err := QueryPingRecordsForClients(context.Background(), db, []string{}, -1, now.Add(-time.Hour), now)
 	if err != nil || empty.SQLQueries != 0 || len(empty.Records) != 0 {
 		t.Fatalf("empty authorized query=%+v err=%v", empty, err)
+	}
+}
+
+func TestQueryPingSeriesSelectsTierBeforeScanning(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-budget-client"
+	task := createPingTask(t, db, client)
+	if err := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("interval", 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	task.Interval = 1
+	publishPingAssignmentIndex([]models.PingTask{task})
+	now := time.Now().UTC().Truncate(time.Minute)
+	raw := make([]models.PingRecord, 500)
+	for index := range raw {
+		raw[index] = models.PingRecord{
+			Client: client, TaskId: task.Id,
+			Time: models.FromTime(now.Add(-time.Duration(index) * time.Second)), Value: 10 + index%5,
+		}
+	}
+	if err := db.CreateInBatches(raw, 100).Error; err != nil {
+		t.Fatal(err)
+	}
+	rollups := make([]models.PingRollup, 10)
+	for index := range rollups {
+		rollups[index] = models.PingRollup{
+			Client: client, TaskId: task.Id, ResolutionSeconds: 60,
+			BucketTime:  models.FromTime(now.Add(-time.Duration(index) * time.Minute)),
+			SampleCount: 60, ValidCount: 60, SumValue: 720,
+			MinValue: 10, MaxValue: 14, LastValue: 12, LastTime: models.FromTime(now),
+		}
+	}
+	if err := db.Create(&rollups).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	coarse, err := QueryPingSeries(ctx, db, PingQuery{
+		Client: client, TaskID: int(task.Id), Start: now.Add(-10 * time.Minute), End: now.Add(time.Second), MaxPoints: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coarse.ResolutionSeconds != 60 || len(coarse.Records) != 10 || coarse.RowsScanned > 21 {
+		t.Fatalf("coarse query = %+v", coarse)
+	}
+	if coarse.SampleCounts[0] != 60 || coarse.Records[0].Value != 12 {
+		t.Fatalf("coarse weighted point = %+v samples=%v", coarse.Records[0], coarse.SampleCounts)
+	}
+
+	rawResult, err := QueryPingSeries(ctx, db, PingQuery{
+		Client: client, TaskID: int(task.Id), Start: now.Add(-10 * time.Minute), End: now.Add(time.Second), MaxPoints: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawResult.ResolutionSeconds != 0 || len(rawResult.Records) != 500 || rawResult.RowsScanned > 1001 {
+		t.Fatalf("raw query resolution=%d rows=%d scanned=%d", rawResult.ResolutionSeconds, len(rawResult.Records), rawResult.RowsScanned)
 	}
 }

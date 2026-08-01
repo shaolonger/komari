@@ -229,10 +229,13 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
+		pingQuery, err := tasks.QueryPingSeries(ctx, dbcore.GetDBInstance(), tasks.PingQuery{
+			Client: params.UUID, TaskID: taskId, Start: startTime, End: endTime, MaxPoints: maxCount,
+		})
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
 		}
+		recs := pingQuery.Records
 		// hidden filter
 		if !isAdmin {
 			filtered := recs[:0]
@@ -258,15 +261,16 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 			Max    int     `json:"max"`
 		}
 		type Resp struct {
-			Count     int               `json:"count"`
-			BasicInfo []ClientBasicInfo `json:"basic_info,omitempty"`
-			Records   []RecordsResp     `json:"records"`
-			Tasks     []map[string]any  `json:"tasks"`
-			From      models.LocalTime  `json:"from"`
-			To        models.LocalTime  `json:"to"`
+			Count             int               `json:"count"`
+			ResolutionSeconds int               `json:"resolution_seconds"`
+			BasicInfo         []ClientBasicInfo `json:"basic_info,omitempty"`
+			Records           []RecordsResp     `json:"records"`
+			Tasks             []map[string]any  `json:"tasks"`
+			From              models.LocalTime  `json:"from"`
+			To                models.LocalTime  `json:"to"`
 		}
 
-		response := &Resp{Count: 0, Records: []RecordsResp{}, From: models.FromTime(startTime), To: models.FromTime(endTime)}
+		response := &Resp{Count: 0, ResolutionSeconds: pingQuery.ResolutionSeconds, Records: []RecordsResp{}, From: models.FromTime(startTime), To: models.FromTime(endTime)}
 
 		// stats per client
 		clientStats := make(map[string]struct {

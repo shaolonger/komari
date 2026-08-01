@@ -232,10 +232,11 @@ func GetPingRecords(c *gin.Context) {
 		Max    int     `json:"max"`
 	}
 	type Resp struct {
-		Count     int               `json:"count"`
-		BasicInfo []ClientBasicInfo `json:"basic_info,omitempty"`
-		Records   []RecordsResp     `json:"records"`
-		Tasks     []gin.H           `json:"tasks,omitempty"`
+		Count             int               `json:"count"`
+		ResolutionSeconds int               `json:"resolution_seconds"`
+		BasicInfo         []ClientBasicInfo `json:"basic_info,omitempty"`
+		Records           []RecordsResp     `json:"records"`
+		Tasks             []gin.H           `json:"tasks,omitempty"`
 	}
 	var pingRecords []models.PingRecord
 	hiddenMap := map[string]bool{}
@@ -303,11 +304,15 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	// 查询记录，现在支持 uuid + task_id 组合查询
-	pingRecords, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
+	pingQuery, err := tasks.QueryPingSeries(c.Request.Context(), dbcore.GetDBInstance(), tasks.PingQuery{
+		Client: uuid, TaskID: taskId, Start: startTime, End: endTime, MaxPoints: maxPoints,
+	})
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
 		return
 	}
+	pingRecords = pingQuery.Records
+	response.ResolutionSeconds = pingQuery.ResolutionSeconds
 
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
 	clientStats := make(map[string]struct {

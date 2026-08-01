@@ -132,6 +132,8 @@ var schemaMigrations = []migration{
 				resolution_seconds INTEGER NOT NULL,
 				bucket_time DATETIME NOT NULL,
 				sample_count INTEGER NOT NULL,
+				valid_count INTEGER NOT NULL,
+				loss_count INTEGER NOT NULL,
 				sum_value INTEGER NOT NULL,
 				min_value INTEGER NOT NULL,
 				max_value INTEGER NOT NULL,

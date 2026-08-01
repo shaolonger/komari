@@ -11,6 +11,8 @@ type PingRollup struct {
 	ResolutionSeconds int       `json:"resolution_seconds" gorm:"primaryKey;not null"`
 	BucketTime        LocalTime `json:"time" gorm:"primaryKey;column:bucket_time;not null"`
 	SampleCount       int64     `json:"sample_count" gorm:"not null"`
+	ValidCount        int64     `json:"valid_count" gorm:"not null"`
+	LossCount         int64     `json:"loss_count" gorm:"not null"`
 	SumValue          int64     `json:"sum_value" gorm:"not null"`
 	MinValue          int       `json:"min_value" gorm:"not null"`
 	MaxValue          int       `json:"max_value" gorm:"not null"`

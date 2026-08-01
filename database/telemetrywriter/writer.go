@@ -309,7 +309,7 @@ func (w *Writer) prepareBatch(ctx context.Context, batch Batch, pingRollupRows i
 		{"records", len(batch.Records), 19, "client,time,cpu,gpu,ram,ram_total,swap,swap_total,load,temp,disk,disk_total,net_in,net_out,net_total_up,net_total_down,process,connections,connections_udp"},
 		{"gpu_records", len(batch.GPURecords), 8, "client,time,device_index,device_name,mem_total,mem_used,utilization,temperature"},
 		{"ping_records", len(batch.PingRecords), 4, "client,task_id,time,value"},
-		{"ping_rollups", pingRollupRows, 10, "client,task_id,resolution_seconds,bucket_time,sample_count,sum_value,min_value,max_value,last_value,last_time"},
+		{"ping_rollups", pingRollupRows, 12, "client,task_id,resolution_seconds,bucket_time,sample_count,valid_count,loss_count,sum_value,min_value,max_value,last_value,last_time"},
 	} {
 		for start := 0; start < spec.rows; start += w.config.ChunkRows {
 			rows := min(w.config.ChunkRows, spec.rows-start)
@@ -353,9 +353,19 @@ func aggregatePingRollups(records []models.PingRecord) []models.PingRollup {
 				}
 			}
 			aggregate.SampleCount++
-			aggregate.SumValue += int64(record.Value)
-			aggregate.MinValue = min(aggregate.MinValue, record.Value)
-			aggregate.MaxValue = max(aggregate.MaxValue, record.Value)
+			if record.Value < 0 {
+				aggregate.LossCount++
+			} else {
+				if aggregate.ValidCount == 0 {
+					aggregate.MinValue = record.Value
+					aggregate.MaxValue = record.Value
+				} else {
+					aggregate.MinValue = min(aggregate.MinValue, record.Value)
+					aggregate.MaxValue = max(aggregate.MaxValue, record.Value)
+				}
+				aggregate.ValidCount++
+				aggregate.SumValue += int64(record.Value)
+			}
 			if !exists || at.After(aggregate.LastTime.ToTime()) {
 				aggregate.LastTime = models.FromTime(at)
 				aggregate.LastValue = record.Value
@@ -428,10 +438,10 @@ func (w *Writer) writePingRecords(ctx context.Context, tx *sql.Tx, records []mod
 }
 
 func (w *Writer) writePingRollups(ctx context.Context, tx *sql.Tx, records []models.PingRollup) error {
-	const columns = 10
+	const columns = 12
 	for start := 0; start < len(records); start += w.config.ChunkRows {
 		end := min(start+w.config.ChunkRows, len(records))
-		stmt, err := w.statement(ctx, "ping_rollups", end-start, columns, "client,task_id,resolution_seconds,bucket_time,sample_count,sum_value,min_value,max_value,last_value,last_time")
+		stmt, err := w.statement(ctx, "ping_rollups", end-start, columns, "client,task_id,resolution_seconds,bucket_time,sample_count,valid_count,loss_count,sum_value,min_value,max_value,last_value,last_time")
 		if err != nil {
 			return err
 		}
@@ -439,7 +449,7 @@ func (w *Writer) writePingRollups(ctx context.Context, tx *sql.Tx, records []mod
 		for _, record := range records[start:end] {
 			args = append(args,
 				record.Client, record.TaskId, record.ResolutionSeconds, record.BucketTime,
-				record.SampleCount, record.SumValue, record.MinValue, record.MaxValue,
+				record.SampleCount, record.ValidCount, record.LossCount, record.SumValue, record.MinValue, record.MaxValue,
 				record.LastValue, record.LastTime,
 			)
 		}
@@ -460,9 +470,11 @@ func (w *Writer) statement(ctx context.Context, table string, rows, columns int,
 	if table == "ping_rollups" {
 		query += ` ON CONFLICT(client,task_id,resolution_seconds,bucket_time) DO UPDATE SET
 			sample_count=ping_rollups.sample_count+excluded.sample_count,
+			valid_count=ping_rollups.valid_count+excluded.valid_count,
+			loss_count=ping_rollups.loss_count+excluded.loss_count,
 			sum_value=ping_rollups.sum_value+excluded.sum_value,
-			min_value=MIN(ping_rollups.min_value,excluded.min_value),
-			max_value=MAX(ping_rollups.max_value,excluded.max_value),
+			min_value=CASE WHEN ping_rollups.valid_count=0 THEN excluded.min_value WHEN excluded.valid_count=0 THEN ping_rollups.min_value ELSE MIN(ping_rollups.min_value,excluded.min_value) END,
+			max_value=CASE WHEN ping_rollups.valid_count=0 THEN excluded.max_value WHEN excluded.valid_count=0 THEN ping_rollups.max_value ELSE MAX(ping_rollups.max_value,excluded.max_value) END,
 			last_value=CASE WHEN excluded.last_time>=ping_rollups.last_time THEN excluded.last_value ELSE ping_rollups.last_value END,
 			last_time=MAX(ping_rollups.last_time,excluded.last_time)`
 	}
