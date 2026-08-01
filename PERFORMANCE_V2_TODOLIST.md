@@ -7,7 +7,7 @@ golden/contract counterpart passes in every consumer.
 ## K2-0 Baseline and contract
 
 - [x] **K2-001 Freeze the three-repository design and clean baseline**
-- [ ] **K2-002 Add Nano Ping replay, memory and row-scan performance fixtures**
+- [x] **K2-002 Add Nano Ping replay, memory and row-scan performance fixtures**
 - [x] **K2-003 Add a checked-in versioned RPC contract and discovery manifest**
 
 ## K2-1 Embedded runtime
