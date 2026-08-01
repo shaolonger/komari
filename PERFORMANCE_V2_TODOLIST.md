@@ -19,7 +19,7 @@ golden/contract counterpart passes in every consumer.
 
 ## K2-2 Ping data plane
 
-- [ ] **K2-201 Replace hot Ping ORM records with compact wire/storage rows**
+- [x] **K2-201 Replace hot Ping ORM records with compact wire/storage rows**
 - [ ] **K2-202 Publish an immutable normalized Ping assignment index**
 - [ ] **K2-203 Coalesce Ping submissions into durable bounded micro-batches**
 - [ ] **K2-204 Add raw/1m/15m/1h Ping tiers and crash-safe retention**
