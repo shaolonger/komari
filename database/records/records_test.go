@@ -50,6 +50,19 @@ func newCompactionTestDB(t testing.TB) *gorm.DB {
 	return db
 }
 
+func TestCompactionBudgetYieldsWithoutFailing(t *testing.T) {
+	db := newCompactionTestDB(t)
+	if _, err := compactRecordWithBudgetAt(context.Background(), db, time.Now(), time.Nanosecond); err != nil {
+		t.Fatalf("budget exhaustion must yield cleanly: %v", err)
+	}
+
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := compactRecordWithBudgetAt(parent, db, time.Now(), time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation error = %v", err)
+	}
+}
+
 func TestIncrementalRecordCompactionBoundariesAndIdempotence(t *testing.T) {
 	db := newCompactionTestDB(t)
 	now := time.Date(2026, 6, 13, 12, 7, 0, 0, time.UTC)

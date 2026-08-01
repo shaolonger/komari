@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -43,6 +44,8 @@ type Profile struct {
 	SQLiteTempStore       string
 	PingWorkers           int
 	PingQueueCapacity     int
+	CompactionInterval    time.Duration
+	CompactionBudget      time.Duration
 }
 
 var (
@@ -86,6 +89,8 @@ func Resolve(requested string, limits Limits) (Profile, error) {
 		profile.SQLiteTempStore = "FILE"
 		profile.PingWorkers = min(max(limits.CPUs*2, 2), 4)
 		profile.PingQueueCapacity = 512
+		profile.CompactionInterval = time.Minute
+		profile.CompactionBudget = 2 * time.Second
 	case ProfileStandard:
 		profile.GoMemoryLimitBytes = standardMemoryLimit(limits.MemoryBytes)
 		profile.SQLiteReadConnections = min(max(limits.CPUs, 2), 8)
@@ -94,6 +99,8 @@ func Resolve(requested string, limits Limits) (Profile, error) {
 		profile.SQLiteTempStore = "MEMORY"
 		profile.PingWorkers = min(max(limits.CPUs*2, 4), 16)
 		profile.PingQueueCapacity = 2_048
+		profile.CompactionInterval = 5 * time.Minute
+		profile.CompactionBudget = 15 * time.Second
 	case ProfileScale:
 		profile.SQLiteReadConnections = min(max(limits.CPUs, 4), 8)
 		profile.SQLiteCacheKiB = 8 * 1024
@@ -101,6 +108,8 @@ func Resolve(requested string, limits Limits) (Profile, error) {
 		profile.SQLiteTempStore = "MEMORY"
 		profile.PingWorkers = min(max(limits.CPUs*2, 8), 32)
 		profile.PingQueueCapacity = 4_096
+		profile.CompactionInterval = 10 * time.Minute
+		profile.CompactionBudget = 30 * time.Second
 	default:
 		return Profile{}, fmt.Errorf("unknown KOMARI_PROFILE %q (expected auto, nano, standard or scale)", requested)
 	}

@@ -31,6 +31,7 @@ import (
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/runtimeprofile"
 	"github.com/komari-monitor/komari/internal/scheduler"
 	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/public"
@@ -481,12 +482,18 @@ func DoScheduledWorkContext(ctx context.Context) {
 	}
 	tasks.ReloadPingSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
-	ticker := time.NewTicker(time.Minute * 30)
+	retentionTicker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		log.Printf("Failed to resolve compaction profile: %v", err)
+		profile.CompactionInterval = 5 * time.Minute
+		profile.CompactionBudget = 15 * time.Second
+	}
+	compactionTicker := time.NewTicker(profile.CompactionInterval)
+	defer retentionTicker.Stop()
 	defer minute.Stop()
-	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
-	records.CompactRecord()
+	defer compactionTicker.Stop()
 	go notifier.CheckExpireScheduledWorkContext(ctx)
 	notificationEngine, _ := scheduler.New(scheduler.Config{Workers: 2, QueueCapacity: 16})
 	go func() {
@@ -500,10 +507,13 @@ func DoScheduledWorkContext(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-compactionTicker.C:
+			if err := records.CompactRecordContext(ctx, profile.CompactionBudget); err != nil && ctx.Err() == nil {
+				log.Printf("Telemetry compaction quantum failed: %v", err)
+			}
+		case <-retentionTicker.C:
 			cfg, _ := config.GetManyAs[config.Legacy]()
 			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			records.CompactRecord()
 			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
 			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
 			auditlog.RemoveOldLogs()

@@ -2,6 +2,7 @@ package records
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -150,38 +151,70 @@ func GetAllRecords() ([]models.Record, error) {
 
 // 压缩数据库
 func CompactRecord() (err error) {
+	return CompactRecordContext(context.Background(), 0)
+}
+
+// CompactRecordContext runs a resumable compaction quantum. A positive budget
+// bounds how long the caller may consume CPU/SQLite time; completed pages keep
+// their durable cursor and budget exhaustion is a successful yield.
+func CompactRecordContext(parent context.Context, budget time.Duration) (err error) {
+	if parent == nil {
+		return errors.New("compaction requires a parent context")
+	}
 	defer historycache.Invalidate()
 	started := time.Now()
 	buckets := 0
 	defer func() { observability.ObserveCompression(buckets, time.Since(started), err != nil) }()
 	db := dbcore.GetDBInstance()
-	recordStats, err := compactRecordStreamAt(context.Background(), db, time.Now(), compactionRunOptions{})
+	buckets, err = compactRecordWithBudgetAt(parent, db, time.Now(), budget)
 	if err != nil {
-		log.Printf("Error migrating old records: %v", err)
-		return err
+		log.Printf("Error compacting telemetry records: %v", err)
+	}
+	return err
+}
+
+func compactRecordWithBudgetAt(parent context.Context, db *gorm.DB, now time.Time, budget time.Duration) (int, error) {
+	ctx := parent
+	cancel := func() {}
+	if budget > 0 {
+		ctx, cancel = context.WithTimeout(parent, budget)
+	}
+	defer cancel()
+
+	buckets := 0
+	recordStats, err := compactRecordStreamAt(ctx, db, now, compactionRunOptions{})
+	if err != nil {
+		return buckets, normalizeCompactionBudgetError(parent, ctx, err)
 	}
 	buckets += recordStats.Buckets
 
-	gpuStats, err := compactGPUStreamAt(context.Background(), db, time.Now(), compactionRunOptions{})
+	gpuStats, err := compactGPUStreamAt(ctx, db, now, compactionRunOptions{})
 	if err != nil {
-		log.Printf("Error migrating GPU records: %v", err)
-		return err
+		return buckets, normalizeCompactionBudgetError(parent, ctx, err)
 	}
 	buckets += gpuStats.Buckets
-	hourlyStats, err := buildHourlyRollupsAt(context.Background(), db, time.Now())
+	hourlyStats, err := buildHourlyRollupsAt(ctx, db, now)
 	if err != nil {
-		log.Printf("Error building hourly telemetry rollups: %v", err)
-		return err
+		return buckets, normalizeCompactionBudgetError(parent, ctx, err)
 	}
 	buckets += hourlyStats.Buckets
 
 	if flags.DatabaseType == "sqlite" {
-		if checkpoint := db.Exec("PRAGMA wal_checkpoint(PASSIVE);"); checkpoint.Error != nil {
-			return checkpoint.Error
+		if checkpoint := db.WithContext(ctx).Exec("PRAGMA wal_checkpoint(PASSIVE);"); checkpoint.Error != nil {
+			return buckets, normalizeCompactionBudgetError(parent, ctx, checkpoint.Error)
 		}
 	}
-	//log.Printf("Record compaction completed")
-	return nil
+	return buckets, nil
+}
+
+func normalizeCompactionBudgetError(parent, run context.Context, err error) error {
+	if parent.Err() != nil {
+		return parent.Err()
+	}
+	if run.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return err
 }
 
 func migrateOldRecords(db *gorm.DB) error {

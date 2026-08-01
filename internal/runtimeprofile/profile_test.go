@@ -1,6 +1,9 @@
 package runtimeprofile
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestResolveAutoNano(t *testing.T) {
 	profile, err := Resolve("auto", Limits{CPUs: 1, MemoryBytes: 2560 * mebibyte})
@@ -15,6 +18,9 @@ func TestResolveAutoNano(t *testing.T) {
 	}
 	if profile.SQLiteTempStore != "FILE" || profile.PingWorkers != 2 {
 		t.Fatalf("unexpected nano bounds: %+v", profile)
+	}
+	if profile.CompactionInterval != time.Minute || profile.CompactionBudget != 2*time.Second {
+		t.Fatalf("unexpected compaction budget: %+v", profile)
 	}
 }
 
