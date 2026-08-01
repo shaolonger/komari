@@ -25,6 +25,7 @@ type PingQueryResult struct {
 	SampleCounts      []int64
 	ValidCounts       []int64
 	LossCounts        []int64
+	SumValues         []int64
 	MinValues         []int
 	MaxValues         []int
 	ResolutionSeconds int
@@ -131,11 +132,13 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 				result.LossCounts = append(result.LossCounts, 1)
 				result.MinValues = append(result.MinValues, 0)
 				result.MaxValues = append(result.MaxValues, 0)
+				result.SumValues = append(result.SumValues, 0)
 			} else {
 				result.ValidCounts = append(result.ValidCounts, 1)
 				result.LossCounts = append(result.LossCounts, 0)
 				result.MinValues = append(result.MinValues, record.Value)
 				result.MaxValues = append(result.MaxValues, record.Value)
+				result.SumValues = append(result.SumValues, int64(record.Value))
 			}
 		}
 	} else {
@@ -174,6 +177,7 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 			result.SampleCounts = append(result.SampleCounts, row.SampleCount)
 			result.ValidCounts = append(result.ValidCounts, row.ValidCount)
 			result.LossCounts = append(result.LossCounts, row.LossCount)
+			result.SumValues = append(result.SumValues, row.SumValue)
 			result.MinValues = append(result.MinValues, row.MinValue)
 			result.MaxValues = append(result.MaxValues, row.MaxValue)
 		}
@@ -186,6 +190,7 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 		result.SampleCounts = result.SampleCounts[:query.MaxPoints]
 		result.ValidCounts = result.ValidCounts[:query.MaxPoints]
 		result.LossCounts = result.LossCounts[:query.MaxPoints]
+		result.SumValues = result.SumValues[:query.MaxPoints]
 		result.MinValues = result.MinValues[:query.MaxPoints]
 		result.MaxValues = result.MaxValues[:query.MaxPoints]
 	}

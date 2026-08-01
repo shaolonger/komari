@@ -77,6 +77,11 @@ func catalogDefinition(name string) (Definition, bool) {
 	return Definition{}, false
 }
 
+func Lookup(name string) (Definition, bool) {
+	definition, ok := catalogDefinition(name)
+	return cloneDefinition(definition), ok
+}
+
 func List(ctx context.Context, db *gorm.DB) ([]Definition, error) {
 	if ctx == nil || db == nil {
 		return nil, errors.New("metric catalog context and database are required")
