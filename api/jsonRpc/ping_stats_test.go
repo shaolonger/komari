@@ -63,7 +63,7 @@ func TestGetPingStatsForNodesUsesOneQueryForAllCacheMisses(t *testing.T) {
 		t.Fatal("unrequested hidden node leaked into ping stats")
 	}
 	statsA := result["ping-stats-a"][fmt.Sprintf("%d", task.Id)]
-	if statsA.Latest != 20 || statsA.Avg != 15 || statsA.Min != 10 || statsA.Max != 20 || math.Abs(statsA.Loss-100.0/3.0) > 0.0001 {
+	if statsA.Total != 3 || statsA.Lost != 1 || statsA.Latest != 20 || statsA.Avg != 15 || statsA.Min != 10 || statsA.Max != 20 || math.Abs(statsA.Loss-100.0/3.0) > 0.0001 {
 		t.Fatalf("node-a stats=%+v", statsA)
 	}
 	if statsB := result["ping-stats-b"][fmt.Sprintf("%d", task.Id)]; statsB.Latest != 30 || statsB.Avg != 30 {

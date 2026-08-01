@@ -29,6 +29,8 @@ var pingStatsCache = cache.New(1*time.Minute, 2*time.Minute)
 
 type pingStat struct {
 	Name   string  `json:"name"`
+	Total  int64   `json:"total"`
+	Lost   int64   `json:"lost"`
 	Latest int     `json:"latest"`
 	Avg    int     `json:"avg"`
 	Tail   float64 `json:"tail"` // (P99-P50)/P50
@@ -154,7 +156,8 @@ func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pi
 			tail = float64(row.Maximum-row.Average) / float64(row.Average)
 		}
 		results[row.Client][fmt.Sprintf("%d", row.TaskID)] = pingStat{
-			Name: taskNames[row.TaskID], Latest: row.Latest, Avg: row.Average,
+			Name: taskNames[row.TaskID], Total: row.SampleCount, Lost: row.LossCount,
+			Latest: row.Latest, Avg: row.Average,
 			Tail: tail, Loss: loss, Min: row.Minimum, Max: row.Maximum,
 		}
 	}
