@@ -49,11 +49,11 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		t.Fatalf("repeated migration failed: %v", err)
 	}
 	version, err := CurrentSchemaVersion(ctx, db)
-	if err != nil || version != 7 {
-		t.Fatalf("schema version=%d err=%v, want 7", version, err)
+	if err != nil || version != len(schemaMigrations) {
+		t.Fatalf("schema version=%d err=%v, want %d", version, err, len(schemaMigrations))
 	}
 	var migrationCount, dataCount int64
-	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 7 {
+	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != int64(len(schemaMigrations)) {
 		t.Fatalf("migration rows=%d err=%v", migrationCount, err)
 	}
 	if err := db.Table("records").Count(&dataCount).Error; err != nil || dataCount != 1 {
@@ -64,7 +64,7 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 			t.Fatalf("deduplicated %s rows=%d err=%v, want 1", table, dataCount, err)
 		}
 	}
-	for _, table := range []string{"telemetry_compaction_state", "telemetry_compaction_pending"} {
+	for _, table := range []string{"telemetry_compaction_state", "telemetry_compaction_pending", "telemetry_v3_sequences"} {
 		var count int64
 		if err := db.Raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count).Error; err != nil || count != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, count, err)

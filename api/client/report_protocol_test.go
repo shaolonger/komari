@@ -11,6 +11,7 @@ import (
 
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
+	"github.com/komari-monitor/komari/protocol/telemetryv3"
 )
 
 func TestTelemetryV2MatchesJSONV1Report(t *testing.T) {
@@ -44,6 +45,7 @@ func TestTelemetryProtocolNegotiationDefaultsToV1AndRejectsUnknown(t *testing.T)
 		"":                            telemetryProtocolV1,
 		telemetryv2.LegacySubprotocol: telemetryProtocolV1,
 		telemetryv2.Subprotocol:       telemetryProtocolV2,
+		telemetryv3.Subprotocol:       telemetryProtocolV3,
 	}
 	for selected, want := range tests {
 		got, err := negotiatedTelemetryProtocol(selected)
@@ -53,6 +55,27 @@ func TestTelemetryProtocolNegotiationDefaultsToV1AndRejectsUnknown(t *testing.T)
 	}
 	if _, err := negotiatedTelemetryProtocol("komari.telemetry.v999"); err == nil {
 		t.Fatal("unknown subprotocol was accepted")
+	}
+}
+
+func TestTelemetryV3CrossRepositoryGolden(t *testing.T) {
+	fixtureText, err := os.ReadFile("../../protocol/telemetryv3/testdata/report_v3.hex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := hex.DecodeString(strings.TrimSpace(string(fixtureText)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, report, err := decodeTelemetryV3Report(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Sequence != 9 || !frame.Checkpoint || frame.Envelope.Count != 5 || frame.Envelope.CPUMax != 30 {
+		t.Fatalf("v3 envelope = %#v", frame)
+	}
+	if report.CPU.Usage != 20 || report.Ram.Total != 8000 || report.Network.TotalDown != 2000 || report.Process != 42 {
+		t.Fatalf("v3 latest report = %#v", report)
 	}
 }
 

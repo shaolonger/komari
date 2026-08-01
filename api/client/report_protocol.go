@@ -6,6 +6,7 @@ import (
 
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
+	"github.com/komari-monitor/komari/protocol/telemetryv3"
 )
 
 type telemetryProtocol uint8
@@ -13,6 +14,7 @@ type telemetryProtocol uint8
 const (
 	telemetryProtocolV1 telemetryProtocol = iota + 1
 	telemetryProtocolV2
+	telemetryProtocolV3
 )
 
 func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
@@ -21,9 +23,20 @@ func negotiatedTelemetryProtocol(selected string) (telemetryProtocol, error) {
 		return telemetryProtocolV1, nil
 	case telemetryv2.Subprotocol:
 		return telemetryProtocolV2, nil
+	case telemetryv3.Subprotocol:
+		return telemetryProtocolV3, nil
 	default:
 		return telemetryProtocolV1, fmt.Errorf("unsupported telemetry subprotocol %q", selected)
 	}
+}
+
+func decodeTelemetryV3Report(frame []byte) (telemetryv3.Frame, common.Report, error) {
+	decoded, err := telemetryv3.Decode(frame)
+	if err != nil {
+		return telemetryv3.Frame{}, common.Report{}, err
+	}
+	report, err := telemetryV2ToCommon(decoded.Latest)
+	return decoded, report, err
 }
 
 func decodeTelemetryV2Report(frame []byte) (common.Report, error) {

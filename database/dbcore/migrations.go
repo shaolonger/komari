@@ -177,6 +177,18 @@ var schemaMigrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 8,
+		name:    "telemetry_v3_sequences",
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS telemetry_v3_sequences (
+				client varchar(36) PRIMARY KEY NOT NULL,
+				through_sequence INTEGER NOT NULL,
+				updated_at DATETIME NOT NULL,
+				FOREIGN KEY(client) REFERENCES clients(uuid) ON DELETE CASCADE ON UPDATE CASCADE
+			)`,
+		},
+	},
 }
 
 var clientNotificationForeignKeyPattern = regexp.MustCompile(

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,11 +16,13 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/internal/observability"
 	"github.com/komari-monitor/komari/internal/telemetry"
 	"github.com/komari-monitor/komari/protocol/telemetryv2"
+	"github.com/komari-monitor/komari/protocol/telemetryv3"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
 )
@@ -179,7 +182,7 @@ func WebSocketReport(c *gin.Context) {
 		CheckOrigin: func(r *http.Request) bool {
 			return true // 被控
 		},
-		Subprotocols: []string{telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol},
+		Subprotocols: []string{telemetryv3.Subprotocol, telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol},
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
 	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -244,8 +247,31 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 	accepted := false
 	defer func() { observability.ObserveReport(len(message), time.Since(started), accepted) }()
 	if messageType == websocket.BinaryMessage {
+		if wireProtocol == telemetryProtocolV3 {
+			frame, report, err := decodeTelemetryV3Report(message)
+			if err != nil {
+				log.Printf("Rejected invalid telemetry v3 frame for client %s: %v", uuid, err)
+				_ = conn.WriteJSON(gin.H{"status": "error", "error": "Invalid telemetry v3 frame"})
+				return
+			}
+			acceptance, err := acceptTelemetryV3(context.Background(), dbcore.GetDBInstance(), uuid, frame, report, SaveClientReport)
+			if errors.Is(err, ErrTelemetrySequenceGap) {
+				_ = conn.WriteJSON(gin.H{"type": "telemetry_nack", "expected": acceptance.Through + 1})
+				return
+			}
+			if err != nil {
+				_ = conn.WriteJSON(gin.H{"status": "error", "error": "Failed to durably accept telemetry"})
+				return
+			}
+			if !acceptance.Duplicate {
+				ws.SetLatestReport(uuid, &report)
+			}
+			_ = conn.WriteJSON(gin.H{"type": "telemetry_ack", "through": acceptance.Through})
+			accepted = true
+			return
+		}
 		if wireProtocol != telemetryProtocolV2 {
-			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Binary telemetry requires protocol v2"})
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Binary telemetry requires protocol v2 or v3"})
 			return
 		}
 		report, err := decodeTelemetryV2Report(message)
