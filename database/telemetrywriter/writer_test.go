@@ -267,6 +267,44 @@ func TestWriterAllowsConcurrentWALReaders(t *testing.T) {
 	}
 }
 
+func TestWriterCoalescesFleetBurstIntoFewerTransactions(t *testing.T) {
+	db, sqlDB, _ := openTestDatabase(t)
+	var transactions atomic.Int32
+	writer := newTestWriter(t, sqlDB, Config{
+		QueueCapacity: 64,
+		MaxBatchRows:  64,
+		MaxBatchDelay: 20 * time.Millisecond,
+		beforeAttempt: func(int) error {
+			transactions.Add(1)
+			return nil
+		},
+	})
+	const submissions = 32
+	results := make(chan error, submissions)
+	ready := make(chan struct{})
+	for index := 0; index < submissions; index++ {
+		go func(index int) {
+			<-ready
+			batch := testBatch(index, 1)
+			batch.GPURecords = nil
+			results <- writer.Submit(context.Background(), batch)
+		}(index)
+	}
+	close(ready)
+	for index := 0; index < submissions; index++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := transactions.Load(); got >= submissions || got > 4 {
+		t.Fatalf("transactions = %d for %d submissions, want <= 4", got, submissions)
+	}
+	var count int64
+	if err := db.Model(&models.Record{}).Count(&count).Error; err != nil || count != submissions {
+		t.Fatalf("coalesced rows = %d err=%v, want %d", count, err, submissions)
+	}
+}
+
 func BenchmarkPreparedBatchWriter(b *testing.B) {
 	_, sqlDB, _ := openTestDatabase(b)
 	writer := newTestWriter(b, sqlDB, Config{})

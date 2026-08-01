@@ -20,6 +20,8 @@ const (
 	DefaultQueueCapacity = 64
 	DefaultMaxRetries    = 4
 	DefaultChunkRows     = 256
+	DefaultMaxBatchRows  = 1024
+	DefaultMaxBatchDelay = 2 * time.Millisecond
 	MaxQueueCapacity     = 1024
 	MaxRowsPerBatch      = 100_000
 )
@@ -40,6 +42,8 @@ type Config struct {
 	MaxRetries    int
 	RetryBackoff  time.Duration
 	ChunkRows     int
+	MaxBatchRows  int
+	MaxBatchDelay time.Duration
 	beforeAttempt func(attempt int) error
 }
 
@@ -96,6 +100,18 @@ func New(db *sql.DB, config Config) (*Writer, error) {
 	if config.ChunkRows > DefaultChunkRows {
 		return nil, fmt.Errorf("chunk rows cannot exceed %d", DefaultChunkRows)
 	}
+	if config.MaxBatchRows <= 0 {
+		config.MaxBatchRows = DefaultMaxBatchRows
+	}
+	if config.MaxBatchRows > MaxRowsPerBatch {
+		return nil, fmt.Errorf("maximum coalesced batch rows cannot exceed %d", MaxRowsPerBatch)
+	}
+	if config.MaxBatchDelay <= 0 {
+		config.MaxBatchDelay = DefaultMaxBatchDelay
+	}
+	if config.MaxBatchDelay > time.Second {
+		return nil, errors.New("maximum coalescing delay cannot exceed one second")
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	w := &Writer{
 		db: db, config: config, queue: make(chan request, config.QueueCapacity),
@@ -146,28 +162,78 @@ func (w *Writer) Submit(ctx context.Context, batch Batch) error {
 func (w *Writer) run() {
 	defer close(w.done)
 	defer w.closeStatements()
+	var pending *request
 	for {
 		if w.runCtx.Err() != nil {
 			w.failQueued(w.runCtx.Err())
 			return
 		}
-		var req request
-		select {
-		case <-w.runCtx.Done():
-			w.failQueued(w.runCtx.Err())
-			return
-		case req = <-w.queue:
+		var first request
+		if pending != nil {
+			first = *pending
+			pending = nil
+		} else {
+			select {
+			case <-w.runCtx.Done():
+				w.failQueued(w.runCtx.Err())
+				return
+			case first = <-w.queue:
+			}
 		}
 		observability.SetFlushQueueDepth(len(w.queue))
-		if req.shutdown {
+		if first.shutdown {
 			return
 		}
-		err, retries := w.process(req.ctx, req.batch)
+
+		requests, merged, shutdown := w.coalesce(first, &pending)
+		err, retries := w.process(w.runCtx, merged)
 		if err == nil {
-			observability.ObserveBatch(req.batch.Rows(), retries)
+			observability.ObserveBatch(merged.Rows(), retries)
 		}
-		req.result <- err
+		for _, req := range requests {
+			req.result <- err
+		}
+		if shutdown {
+			return
+		}
 	}
+}
+
+// coalesce drains a short bounded window into one transaction. Every caller
+// still receives the durable result, while a synchronized fleet burst pays for
+// one SQLite fsync instead of one fsync per Ping sample.
+func (w *Writer) coalesce(first request, pending **request) ([]request, Batch, bool) {
+	requests := make([]request, 0, min(len(w.queue)+1, w.config.MaxBatchRows))
+	merged := Batch{}
+	appendRequest := func(req request) {
+		requests = append(requests, req)
+		merged.Records = append(merged.Records, req.batch.Records...)
+		merged.GPURecords = append(merged.GPURecords, req.batch.GPURecords...)
+		merged.PingRecords = append(merged.PingRecords, req.batch.PingRecords...)
+	}
+	appendRequest(first)
+	timer := time.NewTimer(w.config.MaxBatchDelay)
+	defer timer.Stop()
+	for merged.Rows() < w.config.MaxBatchRows {
+		select {
+		case <-w.runCtx.Done():
+			return requests, merged, true
+		case <-timer.C:
+			return requests, merged, false
+		case next := <-w.queue:
+			observability.SetFlushQueueDepth(len(w.queue))
+			if next.shutdown {
+				return requests, merged, true
+			}
+			if next.batch.Rows()+merged.Rows() > w.config.MaxBatchRows {
+				copy := next
+				*pending = &copy
+				return requests, merged, false
+			}
+			appendRequest(next)
+		}
+	}
+	return requests, merged, false
 }
 
 func (w *Writer) process(parent context.Context, batch Batch) (error, int) {
