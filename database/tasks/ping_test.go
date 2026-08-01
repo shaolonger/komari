@@ -38,6 +38,7 @@ func resetPingTaskData(t *testing.T) *gorm.DB {
 	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.Client{}).Error; err != nil {
 		t.Fatalf("clear clients: %v", err)
 	}
+	publishPingAssignmentIndex(nil)
 	return db
 }
 
@@ -60,7 +61,39 @@ func createPingTask(t *testing.T, db *gorm.DB, client string) models.PingTask {
 	if err := db.Create(&task).Error; err != nil {
 		t.Fatalf("create ping task: %v", err)
 	}
+	var allTasks []models.PingTask
+	if err := db.Order("weight ASC").Order("id ASC").Find(&allTasks).Error; err != nil {
+		t.Fatalf("load Ping assignment fixture: %v", err)
+	}
+	publishPingAssignmentIndex(allTasks)
 	return task
+}
+
+func TestPingAssignmentIndexIsImmutableAndNormalized(t *testing.T) {
+	task := models.PingTask{
+		Id: 7, Name: "indexed", Clients: models.StringArray{"node-a", "node-a", "", "node-b"},
+		Type: "icmp", Target: "1.1.1.1", Interval: 30,
+	}
+	index := publishPingAssignmentIndex([]models.PingTask{task})
+	task.Name = "mutated source"
+	task.Clients[0] = "mutated-source"
+
+	if len(index.assignments) != 2 || len(index.tasksByClient["node-a"]) != 1 {
+		t.Fatalf("normalized index = %+v", index)
+	}
+	first := GetPingTasksByClient("node-a")
+	if len(first) != 1 || first[0].Name != "indexed" {
+		t.Fatalf("indexed tasks = %+v", first)
+	}
+	first[0].Name = "mutated reader"
+	first[0].Clients[0] = "mutated-reader"
+	second := GetPingTasksByClient("node-a")
+	if len(second) != 1 || second[0].Name != "indexed" || second[0].Clients[0] != "node-a" {
+		t.Fatalf("reader mutated immutable index: %+v", second)
+	}
+	if index.generation == 0 {
+		t.Fatal("assignment generation was not published")
+	}
 }
 
 func TestDeletePingTaskRemovesRecordsAndRejectsLateResults(t *testing.T) {

@@ -130,12 +130,14 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 
 // GetPingTasksByClient 获取指定服务器需要执行的延迟监测任务。
 func GetPingTasksByClient(uuid string) []models.PingTask {
-	db := dbcore.GetDBInstance()
-	var tasks []models.PingTask
-	if err := db.Where("clients LIKE ?", `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
+	if uuid == "" {
 		return nil
 	}
-	return tasks
+	index, err := loadPingAssignmentIndex()
+	if err != nil {
+		return nil
+	}
+	return cloneAssignedTasks(index.tasksByClient[uuid])
 }
 
 func UpdatePingTaskOrder(order map[uint]int) error {
@@ -161,12 +163,14 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 }
 
 func SavePingRecord(record models.PingRecord) error {
-	db := dbcore.GetDBInstance()
-	var task models.PingTask
-	if err := db.Select("id", "clients").First(&task, record.TaskId).Error; err != nil {
+	index, err := loadPingAssignmentIndex()
+	if err != nil {
 		return err
 	}
-	if !task.AppliesToClient(record.Client) {
+	if _, exists := index.taskIDs[record.TaskId]; !exists {
+		return gorm.ErrRecordNotFound
+	}
+	if _, assigned := index.assignments[pingAssignmentKey{client: record.Client, taskID: record.TaskId}]; !assigned {
 		return ErrPingTaskNotAssigned
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -207,11 +211,11 @@ func DeleteAllPingRecords() error {
 	return result.Error
 }
 func ReloadPingSchedule() error {
-	db := dbcore.GetDBInstance()
-	var pingTasks []models.PingTask
-	if err := db.Find(&pingTasks).Error; err != nil {
+	pingTasks, err := GetAllPingTasks()
+	if err != nil {
 		return err
 	}
+	publishPingAssignmentIndex(pingTasks)
 	return utils.ReloadPingSchedule(pingTasks)
 }
 
