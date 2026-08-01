@@ -484,6 +484,7 @@ func GetDBInstance() *gorm.DB {
 			&models.PingRecord{},
 			&models.PingTask{},
 			&models.PingRollup{},
+			&models.MetricRetentionPolicy{},
 			&models.OidcProvider{},
 			&models.MessageSenderProvider{},
 			&models.ThemeConfiguration{},

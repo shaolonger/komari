@@ -146,6 +146,17 @@ var schemaMigrations = []migration{
 			"CREATE INDEX IF NOT EXISTS idx_ping_rollup_resolution_time_task_client ON ping_rollups(resolution_seconds, bucket_time, task_id, client)",
 		},
 	},
+	{
+		version: 6,
+		name:    "metric_retention_policies",
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS metric_retention_policies (
+				name varchar(96) PRIMARY KEY NOT NULL,
+				retention_days INTEGER NOT NULL,
+				updated_at DATETIME
+			)`,
+		},
+	},
 }
 
 var clientNotificationForeignKeyPattern = regexp.MustCompile(

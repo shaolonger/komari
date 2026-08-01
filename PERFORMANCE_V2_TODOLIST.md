@@ -28,7 +28,7 @@ golden/contract counterpart passes in every consumer.
 
 ## K2-3 Metric/RPC compatibility
 
-- [ ] **K2-301 Implement capability-gated admin/public metric definitions**
+- [x] **K2-301 Implement capability-gated admin/public metric definitions**
 - [ ] **K2-302 Implement metric query and Ping metric stats methods**
 - [ ] **K2-303 Implement checkpointed metric migration status/start/cancel**
 - [ ] **K2-304 Reject unknown settings and protect storage secrets**

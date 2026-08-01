@@ -49,11 +49,11 @@ func TestSchemaMigrationUpgradesLegacyDatabaseIdempotently(t *testing.T) {
 		t.Fatalf("repeated migration failed: %v", err)
 	}
 	version, err := CurrentSchemaVersion(ctx, db)
-	if err != nil || version != 5 {
-		t.Fatalf("schema version=%d err=%v, want 5", version, err)
+	if err != nil || version != 6 {
+		t.Fatalf("schema version=%d err=%v, want 6", version, err)
 	}
 	var migrationCount, dataCount int64
-	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 5 {
+	if err := db.Table(schemaMigrationTable).Count(&migrationCount).Error; err != nil || migrationCount != 6 {
 		t.Fatalf("migration rows=%d err=%v", migrationCount, err)
 	}
 	if err := db.Table("records").Count(&dataCount).Error; err != nil || dataCount != 1 {

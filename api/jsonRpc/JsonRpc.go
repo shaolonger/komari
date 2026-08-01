@@ -40,7 +40,7 @@ func OnInternalRequest(ctx context.Context, group string, method string, params 
 	// 权限检查
 	allowed := false
 	switch namespace {
-	case "guest", "", "rpc", "common":
+	case "guest", "public", "", "rpc", "common":
 		allowed = true
 	case "client":
 		if group == "client" || group == "admin" {
@@ -131,7 +131,7 @@ func OnRpcRequest(c *gin.Context) {
 		}
 		allowed := false
 		switch fc[0] {
-		case "guest", "", "rpc", "common":
+		case "guest", "public", "", "rpc", "common":
 			allowed = true
 		case "client":
 			if permissionGroup == "client" || permissionGroup == "admin" {
@@ -232,7 +232,7 @@ func dispatchByPermissionWithMeta(conn *ws.SafeConn, permissionGroup string, met
 	}
 	ctx := rpc.NewContextWithMeta(context.TODO(), meta)
 	switch fc[0] {
-	case "guest", "", "rpc", "common":
+	case "guest", "public", "", "rpc", "common":
 		_ = conn.WriteJSON(rpc.CallWithContext(ctx, req.ID, req.Method, req.Params))
 	case "client":
 		if permissionGroup == "client" || permissionGroup == "admin" {
