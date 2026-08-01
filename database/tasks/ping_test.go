@@ -199,6 +199,32 @@ func TestSavePingRecordUsesValidatedWriter(t *testing.T) {
 	}
 }
 
+func TestDeletePingRecordsBeforeAppliesTieredRetention(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-retention-client"
+	task := createPingTask(t, db, client)
+	now := time.Now().UTC()
+	rollups := []models.PingRollup{
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 60, BucketTime: models.FromTime(now.Add(-8 * 24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 900, BucketTime: models.FromTime(now.Add(-91 * 24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-731 * 24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-24 * time.Hour)), SampleCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+	}
+	if err := db.Create(&rollups).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := DeletePingRecordsBefore(now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int64
+	if err := db.Model(&models.PingRollup{}).Count(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("retained Ping rollups = %d, want 1", remaining)
+	}
+}
+
 func TestQueryPingRecordsForClientsUsesOneNarrowAuthorizedQuery(t *testing.T) {
 	db := resetPingTaskData(t)
 	now := time.Now().UTC().Truncate(time.Second)

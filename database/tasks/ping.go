@@ -3,7 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
-	"time"
+	timepkg "time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -173,14 +173,32 @@ func SavePingRecord(record models.PingRecord) error {
 	if _, assigned := index.assignments[pingAssignmentKey{client: record.Client, taskID: record.TaskId}]; !assigned {
 		return ErrPingTaskNotAssigned
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timepkg.Second)
 	defer cancel()
 	return telemetrywriter.Submit(ctx, telemetrywriter.Batch{PingRecords: []models.PingRecord{record}})
 }
 
-func DeletePingRecordsBefore(time time.Time) error {
+func DeletePingRecordsBefore(time timepkg.Time) error {
 	db := dbcore.GetDBInstance()
-	err := db.Where("time < ?", time).Delete(&models.PingRecord{}).Error
+	now := timepkg.Now()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("time < ?", time).Delete(&models.PingRecord{}).Error; err != nil {
+			return err
+		}
+		for _, tier := range []struct {
+			resolution int
+			retention  timepkg.Duration
+		}{
+			{60, 7 * 24 * timepkg.Hour},
+			{900, 90 * 24 * timepkg.Hour},
+			{3600, 730 * 24 * timepkg.Hour},
+		} {
+			if err := tx.Where("resolution_seconds = ? AND bucket_time < ?", tier.resolution, models.FromTime(now.Add(-tier.retention))).Delete(&models.PingRollup{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err == nil {
 		historycache.Invalidate()
 	}
@@ -189,26 +207,49 @@ func DeletePingRecordsBefore(time time.Time) error {
 
 func DeletePingRecords(id []uint) error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("task_id IN ?", id).Delete(&models.PingRecord{})
-	if result.RowsAffected == 0 {
+	var affected int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("task_id IN ?", id).Delete(&models.PingRecord{})
+		if result.Error != nil {
+			return result.Error
+		}
+		affected += result.RowsAffected
+		result = tx.Where("task_id IN ?", id).Delete(&models.PingRollup{})
+		if result.Error != nil {
+			return result.Error
+		}
+		affected += result.RowsAffected
+		return nil
+	})
+	if err == nil && affected == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	if result.Error == nil {
+	if err == nil {
 		historycache.Invalidate()
 	}
-	return result.Error
+	return err
 }
 
 func DeleteAllPingRecords() error {
 	db := dbcore.GetDBInstance()
-	result := db.Exec("DELETE FROM ping_records")
-	if result.RowsAffected == 0 {
+	var affected int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for _, table := range []string{"ping_records", "ping_rollups"} {
+			result := tx.Exec("DELETE FROM " + table)
+			if result.Error != nil {
+				return result.Error
+			}
+			affected += result.RowsAffected
+		}
+		return nil
+	})
+	if err == nil && affected == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	if result.Error == nil {
+	if err == nil {
 		historycache.Invalidate()
 	}
-	return result.Error
+	return err
 }
 func ReloadPingSchedule() error {
 	pingTasks, err := GetAllPingTasks()
@@ -293,7 +334,7 @@ func MigrateAllClientsExpansion() error {
 	return nil
 }
 
-func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
+func GetPingRecords(uuid string, taskId int, start, end timepkg.Time) ([]models.PingRecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.PingRecord
 	// Old database versions could leave ping_records behind after their
@@ -315,7 +356,7 @@ func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.Pin
 // QueryPingRecordsForClients performs one narrow, orphan-safe query for a set
 // of authorized clients. nil means all clients; a non-nil empty slice means no
 // clients. Large sets are filtered after one scan to avoid SQLite bind limits.
-func QueryPingRecordsForClients(ctx context.Context, db *gorm.DB, clientIDs []string, taskID int, start, end time.Time) (PingSetQueryResult, error) {
+func QueryPingRecordsForClients(ctx context.Context, db *gorm.DB, clientIDs []string, taskID int, start, end timepkg.Time) (PingSetQueryResult, error) {
 	result := PingSetQueryResult{}
 	if db == nil {
 		return result, errors.New("ping database is required")

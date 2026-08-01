@@ -122,6 +122,28 @@ var schemaMigrations = []migration{
 		},
 		up: migrateClientNotificationCascade,
 	},
+	{
+		version: 5,
+		name:    "tiered_ping_rollups",
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS ping_rollups (
+				client varchar(36) NOT NULL,
+				task_id INTEGER NOT NULL,
+				resolution_seconds INTEGER NOT NULL,
+				bucket_time DATETIME NOT NULL,
+				sample_count INTEGER NOT NULL,
+				sum_value INTEGER NOT NULL,
+				min_value INTEGER NOT NULL,
+				max_value INTEGER NOT NULL,
+				last_value INTEGER NOT NULL,
+				last_time DATETIME NOT NULL,
+				PRIMARY KEY(client, task_id, resolution_seconds, bucket_time),
+				FOREIGN KEY(client) REFERENCES clients(uuid) ON DELETE CASCADE ON UPDATE CASCADE,
+				FOREIGN KEY(task_id) REFERENCES ping_tasks(id) ON DELETE CASCADE ON UPDATE CASCADE
+			)`,
+			"CREATE INDEX IF NOT EXISTS idx_ping_rollup_resolution_time_task_client ON ping_rollups(resolution_seconds, bucket_time, task_id, client)",
+		},
+	},
 }
 
 var clientNotificationForeignKeyPattern = regexp.MustCompile(

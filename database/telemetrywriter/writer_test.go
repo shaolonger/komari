@@ -26,7 +26,7 @@ func openTestDatabase(t testing.TB) (*gorm.DB, *sql.DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingTask{}, &models.PingRecord{}); err != nil {
+	if err := db.AutoMigrate(&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingTask{}, &models.PingRecord{}, &models.PingRollup{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, err := db.DB()
@@ -93,6 +93,18 @@ func TestWriterPersistsAllRecordTypesAtomically(t *testing.T) {
 			t.Fatalf("%T count = %d, %v; want %d", model, count, err, want)
 		}
 	}
+	var rollups []models.PingRollup
+	if err := db.Order("resolution_seconds ASC").Find(&rollups).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rollups) != 3 {
+		t.Fatalf("Ping rollup tiers = %d, want 3", len(rollups))
+	}
+	for _, rollup := range rollups {
+		if rollup.SampleCount != 1 || rollup.SumValue != 12 || rollup.MinValue != 12 || rollup.MaxValue != 12 || rollup.LastValue != 12 {
+			t.Fatalf("invalid Ping rollup: %+v", rollup)
+		}
+	}
 }
 
 func TestWriterRetriesBusyAndRejectsPermanentFailureWithoutPartialCommit(t *testing.T) {
@@ -128,6 +140,36 @@ func TestWriterRetriesBusyAndRejectsPermanentFailureWithoutPartialCommit(t *test
 	}
 	if records != 0 {
 		t.Fatalf("partial transaction committed %d records", records)
+	}
+}
+
+func TestWriterUpsertsPingRollupBucketsAtomically(t *testing.T) {
+	db, sqlDB, _ := openTestDatabase(t)
+	writer := newTestWriter(t, sqlDB, Config{})
+	client := models.Client{UUID: "rollup-node", Token: "rollup-token", Name: "rollup-node"}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	task := models.PingTask{Name: "rollup", Clients: models.StringArray{client.UUID}, Type: "icmp", Target: "127.0.0.1", Interval: 60}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Minute).Add(5 * time.Second)
+	for offset, value := range []int{12, 18} {
+		batch := Batch{PingRecords: []models.PingRecord{{
+			Client: client.UUID, TaskId: task.Id,
+			Time: models.FromTime(base.Add(time.Duration(offset) * time.Second)), Value: value,
+		}}}
+		if err := writer.Submit(context.Background(), batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var rollup models.PingRollup
+	if err := db.Where("client = ? AND task_id = ? AND resolution_seconds = 60", client.UUID, task.Id).First(&rollup).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rollup.SampleCount != 2 || rollup.SumValue != 30 || rollup.MinValue != 12 || rollup.MaxValue != 18 || rollup.LastValue != 18 {
+		t.Fatalf("merged Ping rollup = %+v", rollup)
 	}
 }
 

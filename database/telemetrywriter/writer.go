@@ -271,7 +271,8 @@ func (w *Writer) process(parent context.Context, batch Batch) (error, int) {
 }
 
 func (w *Writer) writeBatch(ctx context.Context, batch Batch) error {
-	if err := w.prepareBatch(ctx, batch); err != nil {
+	pingRollups := aggregatePingRollups(batch.PingRecords)
+	if err := w.prepareBatch(ctx, batch, len(pingRollups)); err != nil {
 		return err
 	}
 	tx, err := w.db.BeginTx(ctx, nil)
@@ -288,6 +289,9 @@ func (w *Writer) writeBatch(ctx context.Context, batch Batch) error {
 	if err := w.writePingRecords(ctx, tx, batch.PingRecords); err != nil {
 		return err
 	}
+	if err := w.writePingRollups(ctx, tx, pingRollups); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -295,7 +299,7 @@ func (w *Writer) writeBatch(ctx context.Context, batch Batch) error {
 	return nil
 }
 
-func (w *Writer) prepareBatch(ctx context.Context, batch Batch) error {
+func (w *Writer) prepareBatch(ctx context.Context, batch Batch, pingRollupRows int) error {
 	for _, spec := range []struct {
 		kind    string
 		rows    int
@@ -305,6 +309,7 @@ func (w *Writer) prepareBatch(ctx context.Context, batch Batch) error {
 		{"records", len(batch.Records), 19, "client,time,cpu,gpu,ram,ram_total,swap,swap_total,load,temp,disk,disk_total,net_in,net_out,net_total_up,net_total_down,process,connections,connections_udp"},
 		{"gpu_records", len(batch.GPURecords), 8, "client,time,device_index,device_name,mem_total,mem_used,utilization,temperature"},
 		{"ping_records", len(batch.PingRecords), 4, "client,task_id,time,value"},
+		{"ping_rollups", pingRollupRows, 10, "client,task_id,resolution_seconds,bucket_time,sample_count,sum_value,min_value,max_value,last_value,last_time"},
 	} {
 		for start := 0; start < spec.rows; start += w.config.ChunkRows {
 			rows := min(w.config.ChunkRows, spec.rows-start)
@@ -314,6 +319,55 @@ func (w *Writer) prepareBatch(ctx context.Context, batch Batch) error {
 		}
 	}
 	return nil
+}
+
+var pingRollupResolutions = [...]time.Duration{time.Minute, 15 * time.Minute, time.Hour}
+
+type pingRollupKey struct {
+	client     string
+	taskID     uint
+	resolution int
+	bucketUnix int64
+}
+
+func aggregatePingRollups(records []models.PingRecord) []models.PingRollup {
+	if len(records) == 0 {
+		return nil
+	}
+	byBucket := make(map[pingRollupKey]models.PingRollup, len(records)*len(pingRollupResolutions))
+	for _, record := range records {
+		at := record.Time.ToTime().UTC()
+		for _, resolution := range pingRollupResolutions {
+			bucket := at.Truncate(resolution)
+			key := pingRollupKey{
+				client: record.Client, taskID: record.TaskId,
+				resolution: int(resolution / time.Second), bucketUnix: bucket.Unix(),
+			}
+			aggregate, exists := byBucket[key]
+			if !exists {
+				aggregate = models.PingRollup{
+					Client: record.Client, TaskId: record.TaskId,
+					ResolutionSeconds: key.resolution, BucketTime: models.FromTime(bucket),
+					MinValue: record.Value, MaxValue: record.Value,
+					LastValue: record.Value, LastTime: models.FromTime(at),
+				}
+			}
+			aggregate.SampleCount++
+			aggregate.SumValue += int64(record.Value)
+			aggregate.MinValue = min(aggregate.MinValue, record.Value)
+			aggregate.MaxValue = max(aggregate.MaxValue, record.Value)
+			if !exists || at.After(aggregate.LastTime.ToTime()) {
+				aggregate.LastTime = models.FromTime(at)
+				aggregate.LastValue = record.Value
+			}
+			byBucket[key] = aggregate
+		}
+	}
+	result := make([]models.PingRollup, 0, len(byBucket))
+	for _, aggregate := range byBucket {
+		result = append(result, aggregate)
+	}
+	return result
 }
 
 func (w *Writer) writeRecords(ctx context.Context, tx *sql.Tx, records []models.Record) error {
@@ -373,6 +427,29 @@ func (w *Writer) writePingRecords(ctx context.Context, tx *sql.Tx, records []mod
 	return nil
 }
 
+func (w *Writer) writePingRollups(ctx context.Context, tx *sql.Tx, records []models.PingRollup) error {
+	const columns = 10
+	for start := 0; start < len(records); start += w.config.ChunkRows {
+		end := min(start+w.config.ChunkRows, len(records))
+		stmt, err := w.statement(ctx, "ping_rollups", end-start, columns, "client,task_id,resolution_seconds,bucket_time,sample_count,sum_value,min_value,max_value,last_value,last_time")
+		if err != nil {
+			return err
+		}
+		args := make([]any, 0, (end-start)*columns)
+		for _, record := range records[start:end] {
+			args = append(args,
+				record.Client, record.TaskId, record.ResolutionSeconds, record.BucketTime,
+				record.SampleCount, record.SumValue, record.MinValue, record.MaxValue,
+				record.LastValue, record.LastTime,
+			)
+		}
+		if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (w *Writer) statement(ctx context.Context, table string, rows, columns int, names string) (*sql.Stmt, error) {
 	key := statementKey{kind: table, rows: rows}
 	if statement := w.statements[key]; statement != nil {
@@ -380,6 +457,15 @@ func (w *Writer) statement(ctx context.Context, table string, rows, columns int,
 	}
 	row := "(" + strings.TrimSuffix(strings.Repeat("?,", columns), ",") + ")"
 	query := "INSERT INTO " + table + " (" + names + ") VALUES " + strings.TrimSuffix(strings.Repeat(row+",", rows), ",")
+	if table == "ping_rollups" {
+		query += ` ON CONFLICT(client,task_id,resolution_seconds,bucket_time) DO UPDATE SET
+			sample_count=ping_rollups.sample_count+excluded.sample_count,
+			sum_value=ping_rollups.sum_value+excluded.sum_value,
+			min_value=MIN(ping_rollups.min_value,excluded.min_value),
+			max_value=MAX(ping_rollups.max_value,excluded.max_value),
+			last_value=CASE WHEN excluded.last_time>=ping_rollups.last_time THEN excluded.last_value ELSE ping_rollups.last_value END,
+			last_time=MAX(ping_rollups.last_time,excluded.last_time)`
+	}
 	statement, err := w.db.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, err
