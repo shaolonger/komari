@@ -28,6 +28,8 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metrics"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -477,6 +479,7 @@ func DoScheduledWork() {
 }
 
 func DoScheduledWorkContext(ctx context.Context) {
+	metrics.ResumeMigration(dbcore.GetDBInstance())
 	if err := tasks.MigrateAllClientsExpansion(); err != nil {
 		log.Println("Failed to migrate ping task all_clients expansion:", err)
 	}

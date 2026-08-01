@@ -157,6 +157,26 @@ var schemaMigrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 7,
+		name:    "checkpointed_metric_migration",
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS metric_migration_states (
+				id INTEGER PRIMARY KEY,
+				status varchar(16) NOT NULL,
+				cancel_requested BOOLEAN NOT NULL DEFAULT false,
+				checkpoint_row_id INTEGER NOT NULL DEFAULT 0,
+				upper_row_id INTEGER NOT NULL DEFAULT 0,
+				total_metrics INTEGER NOT NULL DEFAULT 0,
+				metrics_done INTEGER NOT NULL DEFAULT 0,
+				current_metric varchar(96),
+				migrated_points INTEGER NOT NULL DEFAULT 0,
+				started_at DATETIME,
+				ended_at DATETIME,
+				error_message TEXT
+			)`,
+		},
+	},
 }
 
 var clientNotificationForeignKeyPattern = regexp.MustCompile(

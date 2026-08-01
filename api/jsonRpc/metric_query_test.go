@@ -58,6 +58,7 @@ func TestOfficialFrontendMetricRPCMethodsAreRegistered(t *testing.T) {
 	}
 	for _, method := range []string{
 		"admin:listMetricDefinitions", "admin:updateMetricDefinition",
+		"admin:getMetricMigrationStatus", "admin:startMetricMigration", "admin:cancelMetricMigration",
 		"public:listMetricDefinitions", "public:queryMetrics", "public:getPingMetricStats",
 	} {
 		if _, ok := registered[method]; !ok {

@@ -2,7 +2,9 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/driver/sqlite"
@@ -11,7 +13,7 @@ import (
 
 func openCatalogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), time.Now().UnixNano())), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,6 +21,83 @@ func openCatalogTestDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestMetricMigrationBackfillsOnceAndCheckpoints(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), time.Now().UnixNano())), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.Client{}, &models.PingTask{}, &models.PingRecord{}, &models.PingRollup{}, &models.MetricMigrationState{}); err != nil {
+		t.Fatal(err)
+	}
+	client := models.Client{UUID: "migration-node", Token: "migration-token"}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	task := models.PingTask{Name: "migration", Clients: models.StringArray{client.UUID}, Type: "icmp", Target: "127.0.0.1", Interval: 60}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Minute)
+	rows := []models.PingRecord{
+		{Client: client.UUID, TaskId: task.Id, Time: models.FromTime(base.Add(1 * time.Second)), Value: 10},
+		{Client: client.UUID, TaskId: task.Id, Time: models.FromTime(base.Add(2 * time.Second)), Value: -1},
+		{Client: client.UUID, TaskId: task.Id, Time: models.FromTime(base.Add(3 * time.Second)), Value: 20},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	// A partial/stale destination is cleared under the captured source cutoff.
+	if err := db.Create(&models.PingRollup{Client: client.UUID, TaskId: task.Id, ResolutionSeconds: 60, BucketTime: models.FromTime(base), SampleCount: 99, ValidCount: 99, SumValue: 99, LastTime: models.FromTime(base)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StartMigration(db, "user:secret@tcp(example)/metrics"); err == nil {
+		t.Fatal("external credential-bearing DSN was accepted")
+	}
+	if _, err := StartMigration(db, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitCompleted := func() MigrationStatus {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			status, err := GetMigrationStatus(context.Background(), db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Status != "running" {
+				return status
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("migration did not finish")
+		return MigrationStatus{}
+	}
+	status := waitCompleted()
+	if status.Status != "completed" || status.MigratedPoints != 3 || status.MetricsDone != 1 {
+		t.Fatalf("migration status = %+v", status)
+	}
+	var minute models.PingRollup
+	if err := db.Where("client = ? AND task_id = ? AND resolution_seconds = 60", client.UUID, task.Id).First(&minute).Error; err != nil {
+		t.Fatal(err)
+	}
+	if minute.SampleCount != 3 || minute.ValidCount != 2 || minute.LossCount != 1 || minute.SumValue != 30 {
+		t.Fatalf("backfilled rollup = %+v", minute)
+	}
+
+	// A completed rerun rebuilds from a fresh cutoff instead of double-counting.
+	if _, err := StartMigration(db, ""); err != nil {
+		t.Fatal(err)
+	}
+	if status := waitCompleted(); status.Status != "completed" || status.MigratedPoints != 3 {
+		t.Fatalf("repeated migration status = %+v", status)
+	}
+	if err := db.Where("client = ? AND task_id = ? AND resolution_seconds = 60", client.UUID, task.Id).First(&minute).Error; err != nil {
+		t.Fatal(err)
+	}
+	if minute.SampleCount != 3 {
+		t.Fatalf("repeated migration double-counted samples: %+v", minute)
+	}
 }
 
 func TestMetricCatalogRetentionIsAllowlistedAndPersistent(t *testing.T) {
