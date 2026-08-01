@@ -42,6 +42,17 @@ func TestRealtimeDeltaRejectsBudgetsBeforeDatabaseAccess(t *testing.T) {
 	}
 }
 
+func TestRecordSetRejectsUUIDBudgetBeforeDatabaseAccess(t *testing.T) {
+	request := &rpc.JsonRpcRequest{Params: map[string]any{"uuids": make([]string, maxRecordSetUUIDs+1)}}
+	if _, err := getRecordsUncached(context.Background(), request); err == nil || err.Code != rpc.InvalidParams {
+		t.Fatalf("record UUID budget error = %#v", err)
+	}
+	request.Params = map[string]any{"uuid": "one", "uuids": []string{"two"}}
+	if _, err := getRecordsUncached(context.Background(), request); err == nil || err.Code != rpc.InvalidParams {
+		t.Fatalf("record selector exclusivity error = %#v", err)
+	}
+}
+
 func TestRealtimeDeltaLongPollHonorsCancellation(t *testing.T) {
 	ws.SetLatestReport("realtime-cancel-test", &common.Report{})
 	t.Cleanup(func() { ws.DeleteLatestReport("realtime-cancel-test") })

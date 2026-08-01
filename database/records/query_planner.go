@@ -21,6 +21,7 @@ type QuerySegment struct {
 
 type RecordQuery struct {
 	Client    string
+	Clients   []string
 	Start     time.Time
 	End       time.Time
 	LoadType  string
@@ -82,6 +83,11 @@ func executeRecordQuery(ctx context.Context, db *gorm.DB, query RecordQuery, now
 			Where("time >= ? AND time < ?", segment.Start, segment.End)
 		if query.Client != "" {
 			dbQuery = dbQuery.Where("client = ?", query.Client)
+		} else if query.Clients != nil {
+			if len(query.Clients) == 0 {
+				continue
+			}
+			dbQuery = dbQuery.Where("client IN ?", query.Clients)
 		}
 		if err := dbQuery.Order("time ASC, client ASC").Find(&rows).Error; err != nil {
 			return nil, segments, fmt.Errorf("query %s segment [%s,%s): %w", segment.Table, segment.Start, segment.End, err)

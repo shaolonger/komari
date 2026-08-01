@@ -14,6 +14,7 @@ const MaxPingQueryPoints = 100_000
 
 type PingQuery struct {
 	Client    string
+	Clients   []string
 	TaskID    int
 	Start     time.Time
 	End       time.Time
@@ -43,19 +44,30 @@ func validatePingQuery(query PingQuery) error {
 	return nil
 }
 
-func pingSeriesIntervals(index *pingAssignmentIndex, client string, taskID int) []int {
+func pingSeriesIntervals(index *pingAssignmentIndex, query PingQuery) []int {
 	intervals := make([]int, 0)
-	if client != "" {
-		for _, task := range index.tasksByClient[client] {
-			if taskID >= 0 && task.Id != uint(taskID) {
+	if query.Client != "" {
+		for _, task := range index.tasksByClient[query.Client] {
+			if query.TaskID >= 0 && task.Id != uint(query.TaskID) {
 				continue
 			}
 			intervals = append(intervals, max(task.Interval, 1))
 		}
 		return intervals
 	}
+	if query.Clients != nil {
+		for _, client := range query.Clients {
+			for _, task := range index.tasksByClient[client] {
+				if query.TaskID >= 0 && task.Id != uint(query.TaskID) {
+					continue
+				}
+				intervals = append(intervals, max(task.Interval, 1))
+			}
+		}
+		return intervals
+	}
 	for assignment := range index.assignments {
-		if taskID >= 0 && assignment.taskID != uint(taskID) {
+		if query.TaskID >= 0 && assignment.taskID != uint(query.TaskID) {
 			continue
 		}
 		task := index.tasksByID[assignment.taskID]
@@ -73,7 +85,7 @@ func estimatedBuckets(window time.Duration, seconds int) int64 {
 }
 
 func choosePingResolution(index *pingAssignmentIndex, query PingQuery) int {
-	intervals := pingSeriesIntervals(index, query.Client, query.TaskID)
+	intervals := pingSeriesIntervals(index, query)
 	if len(intervals) == 0 {
 		return 0
 	}
@@ -104,6 +116,12 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 	if err := validatePingQuery(query); err != nil {
 		return result, err
 	}
+	if query.Client != "" && query.Clients != nil {
+		return result, errors.New("Ping query cannot combine client and clients")
+	}
+	if query.Clients != nil && len(query.Clients) == 0 {
+		return result, nil
+	}
 	index, err := loadPingAssignmentIndex()
 	if err != nil {
 		return result, err
@@ -118,6 +136,8 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 			Where("ping_records.time >= ? AND ping_records.time <= ?", models.FromTime(query.Start), models.FromTime(query.End))
 		if query.Client != "" {
 			request = request.Where("ping_records.client = ?", query.Client)
+		} else if query.Clients != nil {
+			request = request.Where("ping_records.client IN ?", query.Clients)
 		}
 		if query.TaskID >= 0 {
 			request = request.Where("ping_records.task_id = ?", uint(query.TaskID))
@@ -160,6 +180,8 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 			Where("ping_rollups.resolution_seconds = ? AND ping_rollups.bucket_time >= ? AND ping_rollups.bucket_time <= ?", result.ResolutionSeconds, models.FromTime(query.Start), models.FromTime(query.End))
 		if query.Client != "" {
 			request = request.Where("ping_rollups.client = ?", query.Client)
+		} else if query.Clients != nil {
+			request = request.Where("ping_rollups.client IN ?", query.Clients)
 		}
 		if query.TaskID >= 0 {
 			request = request.Where("ping_rollups.task_id = ?", uint(query.TaskID))

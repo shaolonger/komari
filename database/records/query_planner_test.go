@@ -84,6 +84,34 @@ func TestRecordQueryPlannerSelectsHourlyTierForLongBudget(t *testing.T) {
 	}
 }
 
+func TestRecordQueryPlannerFiltersAClientSetWithoutFanout(t *testing.T) {
+	db := newCompactionTestDB(t)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	rows := []models.Record{
+		{Client: "selected-a", Time: models.FromTime(now.Add(-3 * time.Minute)), Cpu: 10},
+		{Client: "selected-b", Time: models.FromTime(now.Add(-2 * time.Minute)), Cpu: 20},
+		{Client: "not-selected", Time: models.FromTime(now.Add(-time.Minute)), Cpu: 99},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := executeRecordQuery(context.Background(), db, RecordQuery{
+		Clients: []string{"selected-a", "selected-b"}, Start: now.Add(-time.Hour), End: now, LoadType: "cpu", MaxPoints: 100,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Client != "selected-a" || got[1].Client != "selected-b" {
+		t.Fatalf("selected rows=%+v", got)
+	}
+	empty, _, err := executeRecordQuery(context.Background(), db, RecordQuery{
+		Clients: []string{}, Start: now.Add(-time.Hour), End: now, LoadType: "cpu", MaxPoints: 100,
+	}, now)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty client set rows=%+v err=%v", empty, err)
+	}
+}
+
 func TestRecordQueryPlannerEmptySortDeduplicateAndErrors(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	t.Run("empty", func(t *testing.T) {

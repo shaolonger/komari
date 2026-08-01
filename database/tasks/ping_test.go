@@ -315,3 +315,45 @@ func TestQueryPingSeriesSelectsTierBeforeScanning(t *testing.T) {
 		t.Fatalf("raw query resolution=%d rows=%d scanned=%d", rawResult.ResolutionSeconds, len(rawResult.Records), rawResult.RowsScanned)
 	}
 }
+
+func TestQueryPingSeriesFiltersClientSetBeforeLimit(t *testing.T) {
+	db := resetPingTaskData(t)
+	taskA := createPingTask(t, db, "ping-series-a")
+	if err := db.Create(&[]models.Client{
+		{UUID: "ping-series-b", Token: "ping-series-b-token"},
+		{UUID: "ping-series-hidden", Token: "ping-series-hidden-token", Hidden: true},
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.PingTask{}).Where("id = ?", taskA.Id).
+		Update("clients", models.StringArray{"ping-series-a", "ping-series-b", "ping-series-hidden"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	taskA.Clients = models.StringArray{"ping-series-a", "ping-series-b", "ping-series-hidden"}
+	publishPingAssignmentIndex([]models.PingTask{taskA})
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []models.PingRecord{
+		{Client: "ping-series-a", TaskId: taskA.Id, Time: models.FromTime(now.Add(-3 * time.Minute)), Value: 10},
+		{Client: "ping-series-b", TaskId: taskA.Id, Time: models.FromTime(now.Add(-2 * time.Minute)), Value: 20},
+		{Client: "ping-series-hidden", TaskId: taskA.Id, Time: models.FromTime(now.Add(-time.Minute)), Value: 99},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, err := QueryPingSeries(context.Background(), db, PingQuery{
+		Clients: []string{"ping-series-a", "ping-series-b"}, TaskID: -1,
+		Start: now.Add(-time.Hour), End: now.Add(time.Second), MaxPoints: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Records) != 2 || got.Records[0].Client == "ping-series-hidden" || got.Records[1].Client == "ping-series-hidden" {
+		t.Fatalf("selected ping rows=%+v", got.Records)
+	}
+	empty, err := QueryPingSeries(context.Background(), db, PingQuery{
+		Clients: []string{}, TaskID: -1, Start: now.Add(-time.Hour), End: now, MaxPoints: 10,
+	})
+	if err != nil || len(empty.Records) != 0 || empty.RowsScanned != 0 {
+		t.Fatalf("empty ping client set=%+v err=%v", empty, err)
+	}
+}

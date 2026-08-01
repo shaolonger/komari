@@ -21,6 +21,8 @@ func init() {
 	Register("getRecords", getRecords)
 }
 
+const maxRecordSetUUIDs = 256
+
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
 	params, err := json.Marshal(req.Params)
@@ -45,16 +47,23 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
 	var params struct {
-		Type     string `json:"type"`      // "load" | "ping"; default "load"
-		UUID     string `json:"uuid"`      // client uuid; empty = all clients
-		Hours    int    `json:"hours"`     // time window in hours; default 1 if start/end not provided
-		Start    string `json:"start"`     // RFC3339 start time (optional)
-		End      string `json:"end"`       // RFC3339 end time (optional)
-		LoadType string `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
-		TaskID   int    `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
-		MaxCount int    `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
+		Type     string   `json:"type"`      // "load" | "ping"; default "load"
+		UUID     string   `json:"uuid"`      // client uuid; empty = all clients
+		UUIDs    []string `json:"uuids"`     // selected client set; mutually exclusive with uuid
+		Hours    int      `json:"hours"`     // time window in hours; default 1 if start/end not provided
+		Start    string   `json:"start"`     // RFC3339 start time (optional)
+		End      string   `json:"end"`       // RFC3339 end time (optional)
+		LoadType string   `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
+		TaskID   int      `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
+		MaxCount int      `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
 	}
 	req.BindParams(&params)
+	if params.UUID != "" && params.UUIDs != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "uuid and uuids are mutually exclusive", nil)
+	}
+	if len(params.UUIDs) > maxRecordSetUUIDs {
+		return nil, rpc.MakeError(rpc.InvalidParams, "too many uuids", maxRecordSetUUIDs)
+	}
 
 	// defaults
 	if params.Type == "" {
@@ -95,6 +104,7 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	// Hidden filtering for non-admin
 	isAdmin := meta.Permission == "admin"
 	hidden := map[string]bool{}
+	visible := map[string]bool{}
 	nodeCount := 1
 	if !isAdmin || params.UUID == "" {
 		cinfo, err := clients.GetAllClientBasicInfo()
@@ -108,6 +118,7 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 				continue
 			}
 			nodeCount++
+			visible[c.UUID] = true
 		}
 		if !isAdmin && params.UUID != "" && hidden[params.UUID] {
 			return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
@@ -115,6 +126,22 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 		if params.UUID != "" {
 			nodeCount = 1
 		}
+	}
+	var selectedClientIDs []string
+	if params.UUIDs != nil {
+		selectedClientIDs = make([]string, 0, len(params.UUIDs))
+		seen := make(map[string]struct{}, len(params.UUIDs))
+		for _, id := range params.UUIDs {
+			if id == "" || !visible[id] {
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				continue
+			}
+			seen[id] = struct{}{}
+			selectedClientIDs = append(selectedClientIDs, id)
+		}
+		nodeCount = len(selectedClientIDs)
 	}
 	permission := recordsdb.QueryPermissionPublic
 	if isAdmin {
@@ -131,7 +158,7 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 	switch params.Type {
 	case "load":
 		// fetch load records
-		recs, err := getLoadRecordsCombined(ctx, params.UUID, startTime, endTime, params.LoadType, maxCount)
+		recs, err := getLoadRecordsCombined(ctx, params.UUID, selectedClientIDs, startTime, endTime, params.LoadType, maxCount)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
 		}
@@ -230,7 +257,7 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 			taskId = -1
 		}
 		pingQuery, err := tasks.QueryPingSeries(ctx, dbcore.GetDBInstance(), tasks.PingQuery{
-			Client: params.UUID, TaskID: taskId, Start: startTime, End: endTime, MaxPoints: maxCount,
+			Client: params.UUID, Clients: selectedClientIDs, TaskID: taskId, Start: startTime, End: endTime, MaxPoints: maxCount,
 		})
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
@@ -540,9 +567,9 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 // getLoadRecordsCombined fetches records for a client or all clients within a time range,
 // combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombined(ctx context.Context, uuid string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
+func getLoadRecordsCombined(ctx context.Context, uuid string, uuids []string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
 	return recordsdb.QueryRecords(ctx, dbcore.GetDBInstance(), recordsdb.RecordQuery{
-		Client: uuid, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
+		Client: uuid, Clients: uuids, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
 	})
 }
 
