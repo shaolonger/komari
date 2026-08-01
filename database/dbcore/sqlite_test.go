@@ -3,7 +3,9 @@ package dbcore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -180,5 +182,69 @@ func TestSQLiteForeignKeysAreEnforcedOnWriterPool(t *testing.T) {
 	}
 	if _, err := writer.Exec("INSERT INTO children(parent_id) VALUES(999)"); err == nil {
 		t.Fatal("dedicated writer accepted a foreign-key violation")
+	}
+}
+
+func TestBackupSQLiteIncludesCommittedWALData(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "live.db")
+	destinationPath := filepath.Join(directory, "backups", "snapshot.db")
+	database, writer, err := openSQLiteDatabase(sourcePath, logger.Default.LogMode(logger.Silent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary, err := database.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer primary.Close()
+	defer writer.Close()
+	if err := database.Exec("CREATE TABLE backup_probe(id INTEGER PRIMARY KEY, value TEXT)").Error; err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 100; index++ {
+		if err := database.Exec("INSERT INTO backup_probe(value) VALUES(?)", fmt.Sprintf("value-%d", index)).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := BackupSQLite(ctx, sourcePath, destinationPath); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destinationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup permissions = %o, want 600", info.Mode().Perm())
+	}
+	backup, err := sql.Open(komariSQLiteBackupDriver, destinationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var count int
+	if err := backup.QueryRowContext(ctx, "SELECT count(*) FROM backup_probe").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 100 {
+		t.Fatalf("backup row count = %d, want 100", count)
+	}
+	if err := BackupSQLite(ctx, sourcePath, destinationPath); err == nil {
+		t.Fatal("expected existing destination to be rejected")
+	}
+}
+
+func TestBackupSQLiteHonorsCanceledContext(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	if err := os.WriteFile(sourcePath, []byte("not opened"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := BackupSQLite(ctx, sourcePath, filepath.Join(t.TempDir(), "backup.db")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("BackupSQLite error = %v, want context.Canceled", err)
 	}
 }

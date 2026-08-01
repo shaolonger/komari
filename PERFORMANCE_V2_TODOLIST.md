@@ -15,7 +15,7 @@ golden/contract counterpart passes in every consumer.
 - [x] **K2-101 Add cgroup-aware auto/nano/standard/scale runtime profiles**
 - [x] **K2-102 Apply profile-sized SQLite pools/cache/mmap/temp settings**
 - [x] **K2-103 CPU-budget startup-independent compaction and retention**
-- [ ] **K2-104 Harden installer systemd resources and in-process DB backup**
+- [x] **K2-104 Harden installer systemd resources and in-process DB backup**
 
 ## K2-2 Ping data plane
 

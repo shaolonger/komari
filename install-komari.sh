@@ -24,6 +24,7 @@ log_step() {
 }
 
 RELEASE_REPO="${KOMARI_RELEASE_REPO:-shaolonger/komari}"
+SYSTEMD_UNIT_DIR="${KOMARI_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 
 # Global variables
 INSTALL_DIR="/opt/komari"
@@ -129,7 +130,7 @@ check_systemd() {
 }
 
 get_service_port() {
-    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    local service_file="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service"
     if [ ! -r "$service_file" ]; then
         return 1
     fi
@@ -202,14 +203,23 @@ create_upgrade_backup() {
         umask "$previous_umask"
         return 1
     fi
-    for database_file in "$database_path" "${database_path}-wal" "${database_path}-shm"; do
-        if [ -f "$database_file" ]; then
-            if ! cp -p "$database_file" "$backup_data_path/"; then
-                umask "$previous_umask"
-                return 1
+    # Newer Komari binaries can make a transactionally consistent SQLite
+    # backup without an external sqlite3 executable. Keep the stopped-service
+    # file-copy path for upgrades from older releases.
+    if [ -f "$database_path" ] && [ -x "$BINARY_PATH" ] &&
+       "$BINARY_PATH" --database "$database_path" database-backup \
+           --output "$backup_data_path/komari.db" >/dev/null 2>&1; then
+        log_info "已使用 Komari 内置备份引擎生成 SQLite 快照"
+    else
+        for database_file in "$database_path" "${database_path}-wal" "${database_path}-shm"; do
+            if [ -f "$database_file" ]; then
+                if ! cp -p "$database_file" "$backup_data_path/"; then
+                    umask "$previous_umask"
+                    return 1
+                fi
             fi
-        fi
-    done
+        done
+    fi
     umask "$previous_umask"
     log_success "升级前备份已保存到 $UPGRADE_BACKUP_PATH"
 }
@@ -379,7 +389,8 @@ create_systemd_service() {
     local port="$1"
     log_step "创建 systemd 服务..."
 
-    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    local service_file="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service"
+    mkdir -p "$SYSTEMD_UNIT_DIR"
     cat > "$service_file" << EOF
 [Unit]
 Description=Komari Monitor Service
@@ -397,7 +408,38 @@ Group=komari
 WantedBy=multi-user.target
 EOF
 
+    ensure_systemd_hardening
+
     log_success "systemd 服务文件创建完成"
+}
+
+# Keep resource protection in a drop-in so upgrades do not overwrite a local
+# administrator's ExecStart/listen-port customization in the primary unit.
+ensure_systemd_hardening() {
+    local dropin_dir="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service.d"
+    local dropin_file="${dropin_dir}/20-performance-security.conf"
+
+    mkdir -p "$dropin_dir"
+    cat > "$dropin_file" << EOF
+[Service]
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=${INSTALL_DIR}
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+TasksMax=4096
+UMask=0077
+MemoryHigh=75%
+MemoryMax=90%
+EOF
 }
 
 # Show access information
@@ -475,6 +517,9 @@ upgrade_komari() {
         systemctl start ${SERVICE_NAME}.service || true
         return 1
     fi
+
+    ensure_systemd_hardening
+    systemctl daemon-reload
 
     log_step "重启 Komari 服务..."
     systemctl reset-failed ${SERVICE_NAME}.service || true

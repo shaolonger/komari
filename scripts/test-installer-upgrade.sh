@@ -84,6 +84,9 @@ systemctl() {
                 mock_service_state="stopped"
             fi
             ;;
+        daemon-reload)
+            :
+            ;;
         is-active)
             [ "$mock_service_state" = "active" ]
             ;;
@@ -109,6 +112,7 @@ configure_fixture() {
     INSTALL_DIR="${temporary_root}/${name}/opt/komari"
     DATA_DIR="$INSTALL_DIR"
     BINARY_PATH="$INSTALL_DIR/komari"
+    SYSTEMD_UNIT_DIR="${temporary_root}/${name}/systemd"
     SERVICE_READY_TIMEOUT_SECONDS=3
     SERVICE_ACTIVE_STABILITY_SECONDS=2
     UPGRADE_BACKUP_PATH=""
@@ -128,12 +132,23 @@ assert_upgrade_backup() {
     [ "$(sed -n '1p' "$UPGRADE_BACKUP_PATH/data/komari.db")" = "database-state" ]
 }
 
+assert_systemd_hardening() {
+    local dropin="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service.d/20-performance-security.conf"
+    [ -f "$dropin" ]
+    grep -qx 'NoNewPrivileges=true' "$dropin"
+    grep -qx 'ProtectSystem=strict' "$dropin"
+    grep -qx "ReadWritePaths=${INSTALL_DIR}" "$dropin"
+    grep -qx 'MemoryHigh=75%' "$dropin"
+    grep -qx 'MemoryMax=90%' "$dropin"
+}
+
 configure_fixture "success"
 mock_fail_new_binary=0
 upgrade_komari
 [ "$(sed -n '1p' "$BINARY_PATH")" = "new-binary" ]
 [ "$mock_service_state" = "active" ]
 assert_upgrade_backup
+assert_systemd_hardening
 
 configure_fixture "rollback"
 mock_fail_new_binary=1
@@ -145,5 +160,6 @@ fi
 [ "$mock_service_state" = "active" ]
 [ "$mock_start_count" -ge 2 ]
 assert_upgrade_backup
+assert_systemd_hardening
 
 printf '%s\n' "installer upgrade success/backup/rollback tests passed"
