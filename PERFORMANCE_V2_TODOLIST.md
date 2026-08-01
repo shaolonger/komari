@@ -43,6 +43,6 @@ golden/contract counterpart passes in every consumer.
 ## K2-5 Acceptance and release
 
 - [x] **K2-501 Real legacy/corrupt/orphan database migration matrix**
-- [ ] **K2-502 One-core Nano replay, race, fault and security gates**
+- [x] **K2-502 One-core Nano replay, race, fault and security gates**
 - [ ] **K2-503 24h/72h-equivalent flat-resource soak and browser contract gate**
 - [ ] **K2-504 Version, push, tag and publish the Komari release**
