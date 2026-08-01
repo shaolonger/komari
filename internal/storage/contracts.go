@@ -69,6 +69,14 @@ type GPURange struct {
 	MaxPoints int
 }
 
+type PingRange struct {
+	Client    string
+	TaskID    uint
+	Start     time.Time
+	End       time.Time
+	MaxPoints int
+}
+
 type AggregateQuery struct {
 	Range      RecordRange
 	Resolution time.Duration
@@ -97,6 +105,7 @@ type TelemetryStore interface {
 	WriteBatch(context.Context, TelemetryBatch) error
 	QueryRecords(context.Context, RecordRange) ([]models.Record, error)
 	QueryGPURecords(context.Context, GPURange) ([]models.GPURecord, error)
+	QueryPingRecords(context.Context, PingRange) ([]models.PingRecord, error)
 	AggregateRecords(context.Context, AggregateQuery) ([]models.Record, error)
 	ApplyRetention(context.Context, RetentionPolicy) (RetentionResult, error)
 	Health(context.Context) (Health, error)

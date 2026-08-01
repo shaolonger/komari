@@ -16,6 +16,10 @@ import (
 
 type TelemetryFactory func(*testing.T) storage.TelemetryStore
 
+type pingFixturePreparer interface {
+	PreparePingContractFixture(context.Context, string, uint) error
+}
+
 func Telemetry(t *testing.T, factory TelemetryFactory) {
 	t.Helper()
 	store := factory(t)
@@ -30,6 +34,11 @@ func Telemetry(t *testing.T, factory TelemetryFactory) {
 	client := fmt.Sprintf("contract-%d", time.Now().UnixNano())
 
 	t.Run("batch range and aggregate", func(t *testing.T) {
+		if preparer, ok := store.(pingFixturePreparer); ok {
+			if err := preparer.PreparePingContractFixture(context.Background(), client, 7); err != nil {
+				t.Fatal(err)
+			}
+		}
 		batch := storage.TelemetryBatch{
 			Records: []models.Record{
 				{Client: client, Time: models.FromTime(now.Add(time.Minute)), Cpu: 10},
@@ -38,6 +47,9 @@ func Telemetry(t *testing.T, factory TelemetryFactory) {
 			GPURecords: []models.GPURecord{{
 				Client: client, Time: models.FromTime(now.Add(time.Minute)),
 				DeviceIndex: 0, DeviceName: "contract-gpu", Utilization: 50,
+			}},
+			PingRecords: []models.PingRecord{{
+				Client: client, TaskId: 7, Time: models.FromTime(now.Add(2 * time.Minute)), Value: 23,
 			}},
 		}
 		if err := store.WriteBatch(context.Background(), batch); err != nil {
@@ -54,6 +66,12 @@ func Telemetry(t *testing.T, factory TelemetryFactory) {
 		})
 		if err != nil || len(gpus) != 1 || gpus[0].DeviceName != "contract-gpu" {
 			t.Fatalf("gpu records=%+v err=%v", gpus, err)
+		}
+		pings, err := store.QueryPingRecords(context.Background(), storage.PingRange{
+			Client: client, TaskID: 7, Start: now, End: now.Add(5 * time.Minute), MaxPoints: 100,
+		})
+		if err != nil || len(pings) != 1 || pings[0].Value != 23 {
+			t.Fatalf("ping records=%+v err=%v", pings, err)
 		}
 		aggregate, err := store.AggregateRecords(context.Background(), storage.AggregateQuery{
 			Range: storage.RecordRange{

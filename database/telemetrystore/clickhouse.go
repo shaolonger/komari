@@ -424,6 +424,46 @@ func (store *ClickHouse) QueryGPURecords(ctx context.Context, query storage.GPUR
 	return result, rows.Err()
 }
 
+func (store *ClickHouse) QueryPingRecords(ctx context.Context, query storage.PingRange) ([]models.PingRecord, error) {
+	limit, err := validateRange(query.Start, query.End, query.MaxPoints)
+	if err != nil {
+		return nil, err
+	}
+	sqlQuery := fmt.Sprintf(`SELECT client,task_id,time,value FROM %s FINAL
+		WHERE time >= fromUnixTimestamp64Milli(?) AND time < fromUnixTimestamp64Milli(?)`, store.table("ping_records"))
+	args := []any{query.Start.UnixMilli(), query.End.UnixMilli()}
+	if query.Client != "" {
+		sqlQuery += " AND client = ?"
+		args = append(args, query.Client)
+	}
+	if query.TaskID != 0 {
+		sqlQuery += " AND task_id = ?"
+		args = append(args, query.TaskID)
+	}
+	sqlQuery += fmt.Sprintf(" ORDER BY time,client,task_id LIMIT %d", limit+1)
+	rows, err := store.conn.Query(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]models.PingRecord, 0, min(limit, 1024))
+	for rows.Next() {
+		var record models.PingRecord
+		var taskID uint32
+		var at time.Time
+		var value int32
+		if err := rows.Scan(&record.Client, &taskID, &at, &value); err != nil {
+			return nil, err
+		}
+		record.TaskId, record.Time, record.Value = uint(taskID), models.FromTime(at), int(value)
+		result = append(result, record)
+		if len(result) > limit {
+			return nil, storage.ErrQueryLimit
+		}
+	}
+	return result, rows.Err()
+}
+
 func (store *ClickHouse) AggregateRecords(ctx context.Context, query storage.AggregateQuery) ([]models.Record, error) {
 	limit, err := validateRange(query.Range.Start, query.Range.End, query.Range.MaxPoints)
 	if err != nil {

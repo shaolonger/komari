@@ -45,6 +45,17 @@ func (store *SQLiteTelemetryStore) WriteBatch(ctx context.Context, batch storage
 	})
 }
 
+// PreparePingContractFixture is used only by the backend-neutral contract
+// suite because embedded SQLite enforces control-plane foreign keys.
+func (store *SQLiteTelemetryStore) PreparePingContractFixture(ctx context.Context, client string, taskID uint) error {
+	return store.readDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.FirstOrCreate(&models.Client{UUID: client}, "uuid = ?", client).Error; err != nil {
+			return err
+		}
+		return tx.FirstOrCreate(&models.PingTask{Id: taskID}, "id = ?", taskID).Error
+	})
+}
+
 func (store *SQLiteTelemetryStore) QueryRecords(ctx context.Context, query storage.RecordRange) ([]models.Record, error) {
 	return QueryRecords(ctx, store.readDB, RecordQuery{
 		Client: query.Client, Start: query.Start, End: query.End,
@@ -56,6 +67,41 @@ func (store *SQLiteTelemetryStore) QueryGPURecords(ctx context.Context, query st
 	return QueryGPURecords(ctx, store.readDB, GPUQuery{
 		Client: query.Client, Start: query.Start, End: query.End, MaxPoints: query.MaxPoints,
 	})
+}
+
+func (store *SQLiteTelemetryStore) QueryPingRecords(ctx context.Context, query storage.PingRange) ([]models.PingRecord, error) {
+	limit, err := validateTelemetryStoreRange(query.Start, query.End, query.MaxPoints)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.PingRecord
+	dbQuery := store.readDB.WithContext(ctx).Where("time >= ? AND time < ?", query.Start, query.End)
+	if query.Client != "" {
+		dbQuery = dbQuery.Where("client = ?", query.Client)
+	}
+	if query.TaskID != 0 {
+		dbQuery = dbQuery.Where("task_id = ?", query.TaskID)
+	}
+	if err := dbQuery.Order("time ASC, client ASC, task_id ASC").Limit(limit + 1).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) > limit {
+		return nil, storage.ErrQueryLimit
+	}
+	return rows, nil
+}
+
+func validateTelemetryStoreRange(start, end time.Time, maxPoints int) (int, error) {
+	if start.IsZero() || end.IsZero() || !end.After(start) {
+		return 0, ErrInvalidQueryRange
+	}
+	if maxPoints <= 0 {
+		maxPoints = adminQueryBudget.MaxPoints
+	}
+	if maxPoints > adminQueryBudget.MaxPoints {
+		return 0, storage.ErrQueryLimit
+	}
+	return maxPoints, nil
 }
 
 func (store *SQLiteTelemetryStore) AggregateRecords(ctx context.Context, query storage.AggregateQuery) ([]models.Record, error) {

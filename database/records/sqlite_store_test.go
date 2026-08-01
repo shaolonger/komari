@@ -32,7 +32,7 @@ func newSQLiteTelemetryContractStore(t *testing.T) (*SQLiteTelemetryStore, *gorm
 	}
 	readSQL.SetMaxOpenConns(8)
 	if err := readDB.AutoMigrate(
-		&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingTask{}, &models.PingRecord{},
+		&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingTask{}, &models.PingRecord{}, &models.PingRollup{},
 	); err != nil {
 		t.Fatal(err)
 	}

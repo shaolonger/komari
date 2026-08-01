@@ -38,7 +38,7 @@ golden/contract counterpart passes in every consumer.
 
 - [x] **K2-401 Expose resumable sequence delta subscriptions over RPC2**
 - [x] **K2-402 Integrate Agent v3 acknowledgements and Ping leases**
-- [ ] **K2-403 Preserve SQLite Lite and validate scale-store parity**
+- [x] **K2-403 Preserve SQLite Lite and validate scale-store parity**
 
 ## K2-5 Acceptance and release
 

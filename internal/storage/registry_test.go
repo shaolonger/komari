@@ -17,6 +17,9 @@ func (registryTelemetry) QueryRecords(context.Context, RecordRange) ([]models.Re
 func (registryTelemetry) QueryGPURecords(context.Context, GPURange) ([]models.GPURecord, error) {
 	return nil, nil
 }
+func (registryTelemetry) QueryPingRecords(context.Context, PingRange) ([]models.PingRecord, error) {
+	return nil, nil
+}
 func (registryTelemetry) AggregateRecords(context.Context, AggregateQuery) ([]models.Record, error) {
 	return nil, nil
 }
