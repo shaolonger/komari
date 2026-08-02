@@ -25,38 +25,66 @@ import (
 const (
 	themeArchiveConfigPath = "komari-theme.json"
 	themeArchiveIndexPath  = "dist/index.html"
+	maxThemeZipSize        = 20 * 1024 * 1024
+	maxThemeTotalUnzipSize = 30 * 1024 * 1024
+	maxThemeFileCount      = 2000
+	maxThemeSingleFileSize = 5 * 1024 * 1024
 )
+
+func themeZipSizeLimitMessage() string {
+	return fmt.Sprintf("主题包文件大小超过限制 (最大 %dMB)", maxThemeZipSize/(1024*1024))
+}
 
 // UploadTheme 上传主题
 func UploadTheme(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxThemeZipSize)
+
 	// 读取上传的文件内容
 	data, err := io.ReadAll(c.Request.Body)
-	if err != nil || len(data) == 0 {
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			api.RespondError(c, http.StatusRequestEntityTooLarge, themeZipSizeLimitMessage())
+			return
+		}
+		api.RespondError(c, http.StatusBadRequest, "读取主题文件失败: "+err.Error())
+		return
+	}
+	if len(data) == 0 {
 		api.RespondError(c, http.StatusBadRequest, "请选择要上传的主题文件")
 		return
 	}
 
 	// 临时文件名
-	tempFile := filepath.Join(os.TempDir(), "uploaded_theme.zip")
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	tempFile, err := os.CreateTemp("", "uploaded_theme-*.zip")
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "创建临时文件失败: "+err.Error())
+		return
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
 		api.RespondError(c, http.StatusInternalServerError, "保存文件失败: "+err.Error())
 		return
 	}
-	defer os.Remove(tempFile)
-
-	// 检查文件扩展名（这里假定上传的就是zip）
-	if !strings.HasSuffix(strings.ToLower(tempFile), ".zip") {
-		api.RespondError(c, http.StatusBadRequest, "只支持ZIP格式的主题文件")
+	if err := tempFile.Close(); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "关闭临时文件失败: "+err.Error())
 		return
 	}
 
 	// 解压ZIP文件并验证
-	themeInfo, err := extractAndValidateTheme(tempFile)
+	themeInfo, err := extractAndValidateTheme(tempPath)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	if err := public.RebuildThemeManifest(themeInfo.Short); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "主题 manifest 构建失败: "+err.Error())
+		return
+	}
 	api.RespondSuccessMessage(c, "主题上传成功", themeInfo)
 }
 
@@ -128,6 +156,7 @@ func DeleteTheme(c *gin.Context) {
 		return
 	}
 
+	public.InvalidateThemeManifest(req.Short)
 	api.RespondSuccessMessage(c, "主题删除成功", nil)
 }
 
@@ -150,11 +179,14 @@ func SetTheme(c *gin.Context) {
 		}
 	}
 
+	if err := public.RebuildThemeManifest(themeName); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "主题 manifest 构建失败: "+err.Error())
+		return
+	}
 	if err := config.Set("theme", themeName); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
 		return
 	}
-
 	api.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
 }
 
@@ -188,20 +220,13 @@ func findThemeArchiveFile(files []*zip.File, want string) *zip.File {
 func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	var themeInfo models.Theme
 
-	const (
-		MaxZipSize        = 10 * 1024 * 1024 // 10MB
-		MaxTotalUnzipSize = 30 * 1024 * 1024 // 30MB
-		MaxFileCount      = 2000
-		MaxSingleFileSize = 5 * 1024 * 1024  // 5MB
-	)
-
 	// 1. 验证ZIP文件本身的大小限制
 	info, err := os.Stat(zipPath)
 	if err != nil {
 		return themeInfo, fmt.Errorf("无法获取主题文件信息: %v", err)
 	}
-	if info.Size() > MaxZipSize {
-		return themeInfo, fmt.Errorf("主题包文件大小超过限制 (最大 10MB)")
+	if info.Size() > maxThemeZipSize {
+		return themeInfo, errors.New(themeZipSizeLimitMessage())
 	}
 
 	// 打开ZIP文件
@@ -212,8 +237,8 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 	defer r.Close()
 
 	// 2. 限制文件数量
-	if len(r.File) > MaxFileCount {
-		return themeInfo, fmt.Errorf("主题包内文件数量超过限制 (最大 %d 个)", MaxFileCount)
+	if len(r.File) > maxThemeFileCount {
+		return themeInfo, fmt.Errorf("主题包内文件数量超过限制 (最大 %d 个)", maxThemeFileCount)
 	}
 
 	// 3. 预先计算总解压大小和单文件解压大小限制
@@ -222,13 +247,13 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		if f.UncompressedSize64 > uint64(MaxSingleFileSize) {
-			return themeInfo, fmt.Errorf("主题包内单个文件解压大小超过限制 (最大 5MB): %s", f.Name)
+		if f.UncompressedSize64 > uint64(maxThemeSingleFileSize) {
+			return themeInfo, fmt.Errorf("主题包内单个文件解压大小超过限制 (最大 %dMB): %s", maxThemeSingleFileSize/(1024*1024), f.Name)
 		}
 		totalUnzippedSize += int64(f.UncompressedSize64)
 	}
-	if totalUnzippedSize > MaxTotalUnzipSize {
-		return themeInfo, fmt.Errorf("主题包总解压大小超过限制 (最大 30MB)")
+	if totalUnzippedSize > maxThemeTotalUnzipSize {
+		return themeInfo, fmt.Errorf("主题包总解压大小超过限制 (最大 %dMB)", maxThemeTotalUnzipSize/(1024*1024))
 	}
 
 	// 查找komari-theme.json文件
@@ -319,7 +344,7 @@ func extractAndValidateTheme(zipPath string) (models.Theme, error) {
 		}
 
 		// 使用 LimitReader 保证写入不超过限制
-		limitedRc := io.LimitReader(rc, MaxSingleFileSize)
+		limitedRc := io.LimitReader(rc, maxThemeSingleFileSize)
 		_, err = io.Copy(outFile, limitedRc)
 		outFile.Close()
 		rc.Close()
@@ -447,7 +472,11 @@ func downloadThemeFromURL(rawURL string) ([]byte, error) {
 	}
 
 	// 读取响应内容
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > maxThemeZipSize {
+		return nil, errors.New(themeZipSizeLimitMessage())
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxThemeZipSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("读取主题文件内容失败: %v", err)
 	}
@@ -455,6 +484,9 @@ func downloadThemeFromURL(rawURL string) ([]byte, error) {
 	// 检查文件大小
 	if len(data) == 0 {
 		return nil, errors.New("下载的主题文件为空")
+	}
+	if int64(len(data)) > maxThemeZipSize {
+		return nil, errors.New(themeZipSizeLimitMessage())
 	}
 
 	return data, nil

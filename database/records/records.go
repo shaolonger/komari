@@ -1,6 +1,8 @@
 package records
 
 import (
+	"context"
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -11,20 +13,39 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/historycache"
+	"github.com/komari-monitor/komari/internal/observability"
+	"github.com/komari-monitor/komari/internal/storage"
 )
 
 func RecordOne(rec models.Record) error {
+	if store, ok := storage.Telemetry(); ok {
+		return store.WriteBatch(context.Background(), storage.TelemetryBatch{Records: []models.Record{rec}})
+	}
 	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
+	if err := db.Create(&rec).Error; err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func RecordGPU(rec models.GPURecord) error {
+	if store, ok := storage.Telemetry(); ok {
+		return store.WriteBatch(context.Background(), storage.TelemetryBatch{GPURecords: []models.GPURecord{rec}})
+	}
 	db := dbcore.GetDBInstance()
-	return db.Create(&rec).Error
+	if err := db.Create(&rec).Error; err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func DeleteAll() error {
 	db := dbcore.GetDBInstance()
+	historycache.Invalidate()
+	defer historycache.Invalidate()
 	if err := db.Exec("DELETE FROM records_long_term").Error; err != nil {
 		return err
 	}
@@ -34,43 +55,22 @@ func DeleteAll() error {
 	if err := db.Exec("DELETE FROM gpu_records").Error; err != nil {
 		return err
 	}
-	return db.Exec("DELETE FROM records").Error
+	if err := db.Exec("DELETE FROM records").Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetGPURecordsByClientAndTime 获取GPU记录数据
 func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.GPURecord, error) {
-	db := dbcore.GetDBInstance()
-	var records []models.GPURecord
+	return GetGPURecordsByClientAndTimeBudgeted(uuid, start, end, 0)
+}
 
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recentRecords []models.GPURecord
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).
-			Order("time ASC, device_index ASC").Find(&recentRecords).Error
-		if err != nil {
-			log.Printf("Error fetching recent GPU records for client %s between %s and %s: %v", uuid, recentStart, end, err)
-			return nil, err
-		}
-	}
-
-	var longTermRecords []models.GPURecord
-	err := db.Table("gpu_records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).
-		Order("time ASC, device_index ASC").Find(&longTermRecords).Error
-	if err != nil {
-		log.Printf("Error fetching long-term GPU records for client %s between %s and %s: %v", uuid, start, end, err)
-		return recentRecords, nil
-	}
-
-	// 合并结果 - 不再需要类型转换
-	records = append(records, recentRecords...)
-	records = append(records, longTermRecords...)
-
-	return records, nil
+func GetGPURecordsByClientAndTimeBudgeted(uuid string, start, end time.Time, maxPoints int) ([]models.GPURecord, error) {
+	started := time.Now()
+	result, err := QueryGPURecordsDefault(context.Background(), GPUQuery{Client: uuid, Start: start, End: end, MaxPoints: maxPoints})
+	observability.ObserveQuery(len(result), time.Since(started), err != nil)
+	return result, err
 }
 
 func GetLatestRecord(uuid string) (Record []models.Record, err error) {
@@ -80,63 +80,55 @@ func GetLatestRecord(uuid string) (Record []models.Record, err error) {
 }
 
 func DeleteRecordBefore(before time.Time) error {
+	if store, ok := storage.Telemetry(); ok {
+		_, err := store.ApplyRetention(context.Background(), storage.RetentionPolicy{
+			Now: time.Now(), FinalCutoff: before,
+		})
+		return err
+	}
 	db := dbcore.GetDBInstance()
-	db.Table("records_long_term").Where("time < ?", before).Delete(&models.Record{})
-	db.Table("gpu_records_long_term").Where("time < ?", before).Delete(&models.GPURecord{})
-	db.Where("time < ?", before).Delete(&models.GPURecord{})
-	return db.Where("time < ?", before).Delete(&models.Record{}).Error
+	defer historycache.Invalidate()
+	if err := ApplyTierRetentionAt(context.Background(), db, time.Now(), before); err != nil {
+		return err
+	}
+	historycache.Invalidate()
+	return nil
 }
 
 func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Record, error) {
-	db := dbcore.GetDBInstance()
-	var records []models.Record
+	return GetRecordsByClientAndTimeProjected(uuid, start, end, "all")
+}
 
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
+func GetRecordsByClientAndTimeProjected(uuid string, start, end time.Time, loadType string) ([]models.Record, error) {
+	return GetRecordsByClientAndTimeBudgeted(uuid, start, end, loadType, 0)
+}
 
-	var recentRecords []models.Record
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		err := db.Where("client = ? AND time >= ? AND time <= ?", uuid, recentStart, end).Order("time ASC").Find(&recentRecords).Error
-		if err != nil {
-			log.Printf("Error fetching recent records for client %s between %s and %s: %v", uuid, recentStart, end, err)
-			return nil, err
-		}
-	}
-
-	var long_term []models.Record
-	err := db.Table("records_long_term").Where("client = ? AND time >= ? AND time <= ?", uuid, start, end).Order("time ASC").Find(&long_term).Error
-	if err != nil {
-		log.Printf("Error fetching long-term records for client %s between %s and %s: %v", uuid, start, end, err)
-		return recentRecords, nil
-	}
-
-	if len(long_term) == 0 {
-		// 没有查到long_term，返回全部recentRecords
-		records = append(records, recentRecords...)
-		return records, nil
-	}
-
-	// 查到了long_term，recentRecords按15分钟分组，每组只保留一条（取最新一条）
-	grouped := make(map[string]models.Record)
-	for _, rec := range recentRecords {
-		key := rec.Time.ToTime().Truncate(15 * time.Minute).Format(time.RFC3339)
-		if old, ok := grouped[key]; !ok || rec.Time.ToTime().After(old.Time.ToTime()) {
-			grouped[key] = rec
-		}
-	}
-	var groupedList []models.Record
-	for _, rec := range grouped {
-		groupedList = append(groupedList, rec)
-	}
-	sort.Slice(groupedList, func(i, j int) bool {
-		return groupedList[i].Time.ToTime().Before(groupedList[j].Time.ToTime())
+func GetRecordsByClientAndTimeBudgeted(uuid string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
+	started := time.Now()
+	result, err := QueryRecordsDefault(context.Background(), RecordQuery{
+		Client: uuid, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
 	})
-	records = append(records, groupedList...)
-	records = append(records, long_term...)
-	return records, nil
+	observability.ObserveQuery(len(result), time.Since(started), err != nil)
+	return result, err
+}
+
+func QueryRecordsDefault(ctx context.Context, query RecordQuery) ([]models.Record, error) {
+	if store, ok := storage.Telemetry(); ok {
+		return store.QueryRecords(ctx, storage.RecordRange{
+			Client: query.Client, Start: query.Start, End: query.End,
+			LoadType: query.LoadType, MaxPoints: query.MaxPoints,
+		})
+	}
+	return QueryRecords(ctx, dbcore.GetDBInstance(), query)
+}
+
+func QueryGPURecordsDefault(ctx context.Context, query GPUQuery) ([]models.GPURecord, error) {
+	if store, ok := storage.Telemetry(); ok {
+		return store.QueryGPURecords(ctx, storage.GPURange{
+			Client: query.Client, Start: query.Start, End: query.End, MaxPoints: query.MaxPoints,
+		})
+	}
+	return QueryGPURecords(ctx, dbcore.GetDBInstance(), query)
 }
 
 func GetAllRecords() ([]models.Record, error) {
@@ -158,25 +150,71 @@ func GetAllRecords() ([]models.Record, error) {
 }
 
 // 压缩数据库
-func CompactRecord() error {
-	db := dbcore.GetDBInstance()
-	err := migrateOldRecords(db)
-	if err != nil {
-		log.Printf("Error migrating old records: %v", err)
-		return err
-	}
+func CompactRecord() (err error) {
+	return CompactRecordContext(context.Background(), 0)
+}
 
-	err = migrateGPURecords(db)
-	if err != nil {
-		log.Printf("Error migrating GPU records: %v", err)
-		return err
+// CompactRecordContext runs a resumable compaction quantum. A positive budget
+// bounds how long the caller may consume CPU/SQLite time; completed pages keep
+// their durable cursor and budget exhaustion is a successful yield.
+func CompactRecordContext(parent context.Context, budget time.Duration) (err error) {
+	if parent == nil {
+		return errors.New("compaction requires a parent context")
 	}
+	defer historycache.Invalidate()
+	started := time.Now()
+	buckets := 0
+	defer func() { observability.ObserveCompression(buckets, time.Since(started), err != nil) }()
+	db := dbcore.GetDBInstance()
+	buckets, err = compactRecordWithBudgetAt(parent, db, time.Now(), budget)
+	if err != nil {
+		log.Printf("Error compacting telemetry records: %v", err)
+	}
+	return err
+}
+
+func compactRecordWithBudgetAt(parent context.Context, db *gorm.DB, now time.Time, budget time.Duration) (int, error) {
+	ctx := parent
+	cancel := func() {}
+	if budget > 0 {
+		ctx, cancel = context.WithTimeout(parent, budget)
+	}
+	defer cancel()
+
+	buckets := 0
+	recordStats, err := compactRecordStreamAt(ctx, db, now, compactionRunOptions{})
+	if err != nil {
+		return buckets, normalizeCompactionBudgetError(parent, ctx, err)
+	}
+	buckets += recordStats.Buckets
+
+	gpuStats, err := compactGPUStreamAt(ctx, db, now, compactionRunOptions{})
+	if err != nil {
+		return buckets, normalizeCompactionBudgetError(parent, ctx, err)
+	}
+	buckets += gpuStats.Buckets
+	hourlyStats, err := buildHourlyRollupsAt(ctx, db, now)
+	if err != nil {
+		return buckets, normalizeCompactionBudgetError(parent, ctx, err)
+	}
+	buckets += hourlyStats.Buckets
 
 	if flags.DatabaseType == "sqlite" {
-		db.Exec("PRAGMA wal_checkpoint(PASSIVE);")
+		if checkpoint := db.WithContext(ctx).Exec("PRAGMA wal_checkpoint(PASSIVE);"); checkpoint.Error != nil {
+			return buckets, normalizeCompactionBudgetError(parent, ctx, checkpoint.Error)
+		}
 	}
-	//log.Printf("Record compaction completed")
-	return nil
+	return buckets, nil
+}
+
+func normalizeCompactionBudgetError(parent, run context.Context, err error) error {
+	if parent.Err() != nil {
+		return parent.Err()
+	}
+	if run.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return err
 }
 
 func migrateOldRecords(db *gorm.DB) error {
@@ -184,6 +222,13 @@ func migrateOldRecords(db *gorm.DB) error {
 }
 
 func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
+	_, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{})
+	return err
+}
+
+// legacyMigrateOldRecordsAt remains temporarily as a semantic oracle for
+// differential tests while the incremental compactor is rolled out.
+func legacyMigrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 	// 计算 4 小时前的时间
 	fourHoursAgo := now.Add(-4 * time.Hour)
 
@@ -364,6 +409,13 @@ func migrateOldRecordsAt(db *gorm.DB, now time.Time) error {
 
 // migrateGPURecords 压缩GPU记录数据
 func migrateGPURecords(db *gorm.DB) error {
+	_, err := compactGPUStreamAt(context.Background(), db, time.Now(), compactionRunOptions{})
+	return err
+}
+
+// legacyMigrateGPURecords remains temporarily as a semantic oracle for
+// differential tests while the incremental compactor is rolled out.
+func legacyMigrateGPURecords(db *gorm.DB) error {
 	fourHoursAgo := time.Now().Add(-4 * time.Hour)
 
 	// 查询超过4小时的GPU记录

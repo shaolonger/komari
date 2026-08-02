@@ -1,6 +1,7 @@
 package notifier
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
@@ -14,6 +15,10 @@ import (
 )
 
 func CheckExpireScheduledWork() {
+	CheckExpireScheduledWorkContext(context.Background())
+}
+
+func CheckExpireScheduledWorkContext(ctx context.Context) {
 	for {
 		now := time.Now()
 		next := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, now.Location()) // UTC 9AM = CST 17PM
@@ -21,20 +26,32 @@ func CheckExpireScheduledWork() {
 			next = next.Add(24 * time.Hour)
 		}
 		duration := next.Sub(now)
-		time.Sleep(duration)
+		timer := time.NewTimer(duration)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
 
 		cfg, err := config.GetMany(map[string]any{
 			config.ExpireNotificationEnabledKey:  false,
 			config.ExpireNotificationLeadDaysKey: 7,
 		})
 		if err != nil {
-			time.Sleep(time.Second)
+			if !waitNotificationContext(ctx, time.Second) {
+				return
+			}
 			continue
 		}
 
 		clients_all, err := clients.GetAllClientBasicInfo()
 		if err != nil {
-			time.Sleep(time.Second)
+			if !waitNotificationContext(ctx, time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -86,10 +103,26 @@ func CheckExpireScheduledWork() {
 		}
 
 		// 等待1秒，防止多次触发
-		time.Sleep(time.Second)
+		if !waitNotificationContext(ctx, time.Second) {
+			return
+		}
 		for _, client := range clients_all {
+			if ctx.Err() != nil {
+				return
+			}
 			renewal.CheckAndAutoRenewal(client)
 		}
 	}
 
+}
+
+func waitNotificationContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

@@ -1,132 +1,257 @@
 package records
 
 import (
-	"encoding/csv"
-	"os"
-	"strconv"
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-
-	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/gorm/logger"
 )
 
 var uuid = "7901508c-304f-49aa-b84f-957c33ae6f8a"
 
-var _ = func() bool {
-	// 确保 Test 环境中使用 sqlite 内存数据库
-	return true
-}()
+func newCompactionTestDB(t testing.TB) *gorm.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	for _, migrate := range []func() error{
+		func() error { return db.AutoMigrate(&models.Record{}, &models.GPURecord{}) },
+		func() error { return db.Table("records_long_term").AutoMigrate(&models.Record{}) },
+		func() error { return db.Table("gpu_records_long_term").AutoMigrate(&models.GPURecord{}) },
+	} {
+		if err := migrate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureCompactionSchema(db, recordStream); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCompactionSchema(db, gpuStream); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureTierSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
 
-// TestCompactRecord verifies that old records are compacted into 15-minute buckets
-// while keeping the most recent 5 hours of raw data available for short-range views.
-func TestCompactRecord(t *testing.T) {
-	const totalMinutes = 12*60 + 30
+func TestCompactionBudgetYieldsWithoutFailing(t *testing.T) {
+	db := newCompactionTestDB(t)
+	if _, err := compactRecordWithBudgetAt(context.Background(), db, time.Now(), time.Nanosecond); err != nil {
+		t.Fatalf("budget exhaustion must yield cleanly: %v", err)
+	}
+
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := compactRecordWithBudgetAt(parent, db, time.Now(), time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation error = %v", err)
+	}
+}
+
+func TestIncrementalRecordCompactionBoundariesAndIdempotence(t *testing.T) {
+	db := newCompactionTestDB(t)
+	now := time.Date(2026, 6, 13, 12, 7, 0, 0, time.UTC)
+	records := []models.Record{
+		{Client: "node-a", Time: models.FromTime(time.Date(2026, 6, 13, 6, 46, 0, 0, time.UTC)), Cpu: 10},
+		{Client: "node-a", Time: models.FromTime(time.Date(2026, 6, 13, 6, 59, 0, 0, time.UTC)), Cpu: 30},
+		{Client: "node-a", Time: models.FromTime(time.Date(2026, 6, 13, 7, 46, 0, 0, time.UTC)), Cpu: 40},
+		{Client: "node-a", Time: models.FromTime(time.Date(2026, 6, 13, 7, 59, 59, 0, time.UTC)), Cpu: 60},
+		{Client: "node-a", Time: models.FromTime(time.Date(2026, 6, 13, 8, 0, 0, 0, time.UTC)), Cpu: 99},
+	}
+	if err := db.Create(&records).Error; err != nil {
+		t.Fatal(err)
+	}
+	stats, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Buckets != 2 || stats.Rows != 4 {
+		t.Fatalf("stats=%+v, want 2 buckets/4 rows", stats)
+	}
+	var long []models.Record
+	if err := db.Table("records_long_term").Order("time ASC").Find(&long).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(long) != 2 || long[0].Cpu != 24 || long[1].Cpu != 54 {
+		t.Fatalf("aggregates=%+v", long)
+	}
+	var raw []models.Record
+	if err := db.Order("time ASC").Find(&raw).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 3 || !raw[0].Time.ToTime().Equal(time.Date(2026, 6, 13, 7, 46, 0, 0, time.UTC)) || raw[2].Cpu != 99 {
+		t.Fatalf("remaining raw=%+v", raw)
+	}
+	before := append([]models.Record(nil), long...)
+	if _, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	long = nil
+	if err := db.Table("records_long_term").Order("time ASC").Find(&long).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, long) {
+		t.Fatalf("second run changed aggregates: before=%+v after=%+v", before, long)
+	}
+	var state compactionState
+	if err := db.Where("stream = ?", recordStream).First(&state).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got, want := state.Watermark.ToTime(), time.Date(2026, 6, 13, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Fatalf("watermark=%s, want %s", got, want)
+	}
+}
+
+func TestIncrementalCompactionReprocessesLateDataInsideOverlap(t *testing.T) {
+	db := newCompactionTestDB(t)
+	now := time.Date(2026, 6, 13, 12, 7, 0, 0, time.UTC)
+	first := models.Record{Client: "late-node", Time: models.FromTime(time.Date(2026, 6, 13, 7, 31, 0, 0, time.UTC)), Cpu: 10}
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	late := models.Record{Client: "late-node", Time: models.FromTime(time.Date(2026, 6, 13, 7, 39, 0, 0, time.UTC)), Cpu: 30}
+	if err := db.Create(&late).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var aggregate models.Record
+	if err := db.Table("records_long_term").Where("client = ?", "late-node").First(&aggregate).Error; err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.Cpu != 24 {
+		t.Fatalf("late-data aggregate cpu=%v, want 24", aggregate.Cpu)
+	}
+}
+
+func TestIncrementalCompactionRecoversAfterChunkedDeleteCrash(t *testing.T) {
+	db := newCompactionTestDB(t)
 	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	compactBefore := now.Add(-4 * time.Hour)
-	deleteBefore := now.Add(-5 * time.Hour)
-
-	// 使用 sqlite 内存数据库并迁移表结构
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	assert.NoError(t, err)
-	assert.NoError(t, db.AutoMigrate(&models.Record{}))
-	assert.NoError(t, db.Table("records_long_term").AutoMigrate(&models.Record{}))
-
-	expectedGroups := make(map[string]struct{})
-	expectedRemain := 0
-
-	// 插入数据
-	for i := 0; i < totalMinutes; i++ {
-		recTime := now.Add(-time.Duration(i) * time.Minute)
-		rec := models.Record{Client: uuid, Time: models.FromTime(recTime), Cpu: float32(i), Gpu: float32(i), Load: float32(i), Temp: float32(i), Ram: int64(i)}
-		err := db.Create(&rec).Error
-		assert.NoError(t, err)
-
-		if recTime.Before(compactBefore) {
-			slot := recTime.Truncate(15 * time.Minute).Format(time.RFC3339)
-			expectedGroups[slot] = struct{}{}
+	bucket := time.Date(2026, 6, 13, 5, 0, 0, 0, time.UTC)
+	records := make([]models.Record, 6_001)
+	for index := range records {
+		records[index] = models.Record{Client: "crash-node", Time: models.FromTime(bucket.Add(time.Duration(index%900) * time.Second)), Cpu: float32(index % 100)}
+	}
+	if err := db.CreateInBatches(&records, 250).Error; err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected crash after committed delete chunk")
+	fired := false
+	_, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{Failpoint: func(stage, stream string, gotBucket time.Time) error {
+		if !fired && stage == "after_delete_chunk" && stream == recordStream && gotBucket.Equal(bucket) {
+			fired = true
+			return injected
 		}
-		if !recTime.Before(deleteBefore) {
-			expectedRemain++
-		}
+		return nil
+	}})
+	if !errors.Is(err, injected) {
+		t.Fatalf("compaction error=%v, want injected crash", err)
 	}
+	var rawCount, pendingCount, aggregateCount int64
+	_ = db.Model(&models.Record{}).Count(&rawCount).Error
+	_ = db.Model(&pendingCompaction{}).Where("stream = ?", recordStream).Count(&pendingCount).Error
+	_ = db.Table("records_long_term").Count(&aggregateCount).Error
+	if rawCount != 1_001 || pendingCount != 1 || aggregateCount != 1 {
+		t.Fatalf("crash state raw=%d pending=%d aggregate=%d", rawCount, pendingCount, aggregateCount)
+	}
+	var before models.Record
+	if err := db.Table("records_long_term").First(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compactRecordStreamAt(context.Background(), db, now, compactionRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var after models.Record
+	if err := db.Table("records_long_term").First(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Model(&models.Record{}).Count(&rawCount).Error
+	_ = db.Model(&pendingCompaction{}).Where("stream = ?", recordStream).Count(&pendingCount).Error
+	if rawCount != 0 || pendingCount != 0 || !reflect.DeepEqual(before, after) {
+		t.Fatalf("recovery state raw=%d pending=%d before=%+v after=%+v", rawCount, pendingCount, before, after)
+	}
+}
 
-	// 导出原始数据到 CSV
-	os.MkdirAll("../../data", 0755)
-	var origRecs []models.Record
-	db.Order("time desc").Find(&origRecs)
-	fOrig, err := os.Create("../../data/original.csv")
-	assert.NoError(t, err)
-	defer fOrig.Close()
-	wOrig := csv.NewWriter(fOrig)
-	defer wOrig.Flush()
-	wOrig.Write([]string{"Client", "Time", "Cpu", "Gpu", "Load", "Temp", "Ram"})
-	for _, r := range origRecs {
-		wOrig.Write([]string{
-			r.Client,
-			r.Time.ToTime().Format(time.RFC3339),
-			strconv.FormatFloat(float64(r.Cpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Gpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Load), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Temp), 'f', -1, 32),
-			strconv.FormatInt(r.Ram, 10),
+func TestIncrementalGPUCompactionKeepsDevicesIndependent(t *testing.T) {
+	db := newCompactionTestDB(t)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	bucket := time.Date(2026, 6, 13, 6, 0, 0, 0, time.UTC)
+	records := []models.GPURecord{
+		{Client: "gpu-node", DeviceIndex: 0, DeviceName: "GPU 0 old", Time: models.FromTime(bucket.Add(time.Minute)), MemUsed: 10, Utilization: 10, Temperature: 40},
+		{Client: "gpu-node", DeviceIndex: 0, DeviceName: "GPU 0", Time: models.FromTime(bucket.Add(2 * time.Minute)), MemUsed: 30, Utilization: 30, Temperature: 60},
+		{Client: "gpu-node", DeviceIndex: 1, DeviceName: "GPU 1", Time: models.FromTime(bucket.Add(time.Minute)), MemUsed: 100, Utilization: 50, Temperature: 70},
+		{Client: "gpu-node", DeviceIndex: 1, DeviceName: "GPU 1", Time: models.FromTime(bucket.Add(2 * time.Minute)), MemUsed: 200, Utilization: 90, Temperature: 80},
+	}
+	if err := db.Create(&records).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compactGPUStreamAt(context.Background(), db, now, compactionRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var aggregates []models.GPURecord
+	if err := db.Table("gpu_records_long_term").Order("device_index ASC").Find(&aggregates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregates) != 2 || aggregates[0].DeviceName != "GPU 0" || aggregates[0].MemUsed != 24 || aggregates[1].MemUsed != 170 {
+		t.Fatalf("GPU aggregates=%+v", aggregates)
+	}
+	var rawCount int64
+	if err := db.Model(&models.GPURecord{}).Count(&rawCount).Error; err != nil || rawCount != 0 {
+		t.Fatalf("GPU raw rows=%d err=%v", rawCount, err)
+	}
+}
+
+func TestIncrementalRecordAggregationMatchesLegacySemantics(t *testing.T) {
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	newDB := newCompactionTestDB(t)
+	legacyDB := newCompactionTestDB(t)
+	records := make([]models.Record, 0, 120)
+	for index := 0; index < 120; index++ {
+		records = append(records, models.Record{
+			Client: "semantic-node", Time: models.FromTime(now.Add(-7 * time.Hour).Add(time.Duration(index) * time.Minute)),
+			Cpu: float32(index % 97), Gpu: float32(index % 83), Load: float32(index % 71), Temp: float32(index % 67),
+			Ram: int64(index * 100), NetIn: int64(index * 10), NetOut: int64(index * 20), Process: index,
 		})
 	}
-
-	// 运行压缩（迁移）逻辑
-	err = migrateOldRecordsAt(db, now)
-	assert.NoError(t, err)
-
-	// 验证 long-term 表中的聚合记录数
-	var longCount int64
-	assert.NoError(t, db.Table("records_long_term").Count(&longCount).Error)
-	assert.Equal(t, int64(len(expectedGroups)), longCount)
-
-	// 验证原始表中剩余记录数
-	var remainCount int64
-	assert.NoError(t, db.Table("records").Count(&remainCount).Error)
-	assert.Equal(t, int64(expectedRemain), remainCount)
-
-	// 导出压缩后的数据到 CSV
-	var compRecs []models.Record
-	db.Table("records_long_term").Order("time desc").Find(&compRecs)
-	fComp, err := os.Create("../../data/compressed.csv")
-	assert.NoError(t, err)
-	defer fComp.Close()
-	wComp := csv.NewWriter(fComp)
-	defer wComp.Flush()
-	wComp.Write([]string{"Client", "Time", "Cpu", "Gpu", "Load", "Temp", "Ram"})
-	for _, r := range compRecs {
-		wComp.Write([]string{
-			r.Client,
-			r.Time.ToTime().Format(time.RFC3339),
-			strconv.FormatFloat(float64(r.Cpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Gpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Load), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Temp), 'f', -1, 32),
-			strconv.FormatInt(r.Ram, 10),
-		})
+	if err := newDB.Create(&records).Error; err != nil {
+		t.Fatal(err)
 	}
-
-	db.Table("records").Order("time desc").Find(&compRecs)
-	fComp, err = os.Create("../../data/compressed_records.csv")
-	assert.NoError(t, err)
-	defer fComp.Close()
-	wComp = csv.NewWriter(fComp)
-	defer wComp.Flush()
-	wComp.Write([]string{"Client", "Time", "Cpu", "Gpu", "Load", "Temp", "Ram"})
-	for _, r := range compRecs {
-		wComp.Write([]string{
-			r.Client,
-			r.Time.ToTime().Format(time.RFC3339),
-			strconv.FormatFloat(float64(r.Cpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Gpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Load), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Temp), 'f', -1, 32),
-			strconv.FormatInt(r.Ram, 10),
-		})
+	if err := legacyDB.Create(&records).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compactRecordStreamAt(context.Background(), newDB, now, compactionRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyMigrateOldRecordsAt(legacyDB, now); err != nil {
+		t.Fatal(err)
+	}
+	var got, want []models.Record
+	if err := newDB.Table("records_long_term").Order("time ASC").Find(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyDB.Table("records_long_term").Order("time ASC").Find(&want).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("incremental aggregates differ from legacy\ngot=%+v\nwant=%+v", got, want)
 	}
 }

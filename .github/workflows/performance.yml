@@ -1,0 +1,82 @@
+name: Performance Regression Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controlled-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate with history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Load pinned build versions
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' build/versions.env >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Materialize base revision
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          baseline_supports_gate() {
+            local revision="$1"
+            local benchmark
+            for benchmark in \
+              BenchmarkDecodeTelemetryV2 \
+              BenchmarkShardedMinuteAccumulator \
+              BenchmarkCacheHit512KiB \
+              BenchmarkCacheGet \
+              BenchmarkStableNextRun10000Tasks \
+              BenchmarkManifestAssetLookup \
+              BenchmarkDashboardSingleDelta10000Nodes; do
+              if ! git grep -q "func ${benchmark}" "$revision" -- '*_test.go'; then
+                return 1
+              fi
+            done
+          }
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASELINE_REF="$PR_BASE_SHA"
+          else
+            BASELINE_REF="$PUSH_BASE_SHA"
+          fi
+          if [ -z "$BASELINE_REF" ] ||
+             [ "$BASELINE_REF" = "0000000000000000000000000000000000000000" ] ||
+             ! git cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null; then
+            BASELINE_REF="${{ github.sha }}^"
+          fi
+          if ! baseline_supports_gate "$BASELINE_REF"; then
+            BASELINE_REF="$(tr -d '[:space:]' < build/performance-baseline.txt)"
+            if ! git cat-file -e "${BASELINE_REF}^{commit}" 2>/dev/null ||
+               ! baseline_supports_gate "$BASELINE_REF"; then
+              echo "Pinned performance bootstrap baseline is invalid: ${BASELINE_REF}" >&2
+              exit 1
+            fi
+          fi
+          echo "Performance baseline: ${BASELINE_REF}"
+          git worktree add --detach "$RUNNER_TEMP/komari-baseline" "$BASELINE_REF"
+
+      - name: Compare on the same runner
+        env:
+          KOMARI_BENCH_COUNT: 5
+          KOMARI_BENCHTIME: 500ms
+          KOMARI_BENCH_TIME_LIMIT: 0.20
+          KOMARI_BENCH_MEMORY_LIMIT: 0.02
+          KOMARI_BENCH_ALLOC_LIMIT: 0
+        run: ./scripts/run-performance-gate.sh "$RUNNER_TEMP/komari-baseline"

@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/telemetrywriter"
+	"github.com/komari-monitor/komari/internal/storage"
 
 	"gorm.io/gorm"
 )
@@ -35,13 +38,42 @@ func SaveReport(uuid string, data map[string]interface{}) (err error) {
 }
 
 func GetClientUUIDByToken(token string) (clientUUID string, err error) {
-	db := dbcore.GetDBInstance()
+	if token == "" {
+		return "", gorm.ErrRecordNotFound
+	}
+	now := time.Now()
+	if entry, ok := cachedClientCredential(token, now); ok {
+		if !entry.Found {
+			return "", gorm.ErrRecordNotFound
+		}
+		if !entry.Value.RevokedAt.IsZero() {
+			return "", ErrClientTokenRevoked
+		}
+		if !entry.CredentialExpiresAt.IsZero() && !now.Before(entry.CredentialExpiresAt) {
+			return "", ErrClientTokenExpired
+		}
+		return entry.Value.UUID, nil
+	}
+	generation := clientCredentialGeneration()
+
 	var client models.Client
-	err = db.Where("token = ?", token).First(&client).Error
+	if store, ok := storage.Control(); ok {
+		client, err = store.ClientCredential(context.Background(), token)
+		if errors.Is(err, storage.ErrNotFound) {
+			err = gorm.ErrRecordNotFound
+		}
+	} else {
+		db := dbcore.GetDBInstance()
+		err = db.Select("uuid", "token_expires_at", "token_revoked_at", "updated_at").Where("token = ?", token).First(&client).Error
+	}
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			cacheMissingClientCredential(token, now, generation)
+		}
 		return "", err
 	}
-	if err := validateClientTokenState(client, time.Now()); err != nil {
+	cacheClientCredential(token, client, now, generation)
+	if err := validateClientTokenState(client, now); err != nil {
 		return "", err
 	}
 	return client.UUID, nil
@@ -155,17 +187,17 @@ func ReportVerify(report common.Report) error {
 
 // SaveClientReport 保存客户端报告到 Record 表
 func SaveClientReport(clientUUID string, report common.Report) (err error) {
-	db := dbcore.GetDBInstance()
-
 	if err := ReportVerify(report); err != nil {
 		return fmt.Errorf("failed to save Record: %v", err)
 	}
 
 	// 保存GPU详细记录到独立表
 	currentTime := time.Now()
+	gpuRecords := make([]models.GPURecord, 0)
 	if report.GPU != nil && len(report.GPU.DetailedInfo) > 0 {
+		gpuRecords = make([]models.GPURecord, 0, len(report.GPU.DetailedInfo))
 		for idx, gpu := range report.GPU.DetailedInfo {
-			gpuRecord := models.GPURecord{
+			gpuRecords = append(gpuRecords, models.GPURecord{
 				Client:      clientUUID,
 				Time:        models.FromTime(currentTime),
 				DeviceIndex: idx,
@@ -174,10 +206,7 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 				MemUsed:     gpu.MemoryUsed,
 				Utilization: float32(gpu.Utilization),
 				Temperature: gpu.Temperature,
-			}
-			if err := db.Create(&gpuRecord).Error; err != nil {
-				return fmt.Errorf("failed to save GPU record: %v", err)
-			}
+			})
 		}
 	}
 
@@ -210,19 +239,11 @@ func SaveClientReport(clientUUID string, report common.Report) (err error) {
 		//Uptime:         report.Uptime,
 	}
 
-	// 使用事务确保 Record 和 ClientsInfo 一致性
-	err = db.Transaction(func(tx *gorm.DB) error {
-		// 保存 Record
-		if err := tx.Create(&Record).Error; err != nil {
-			return fmt.Errorf("failed to save Record: %v", err)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return err
+	if err := telemetrywriter.Submit(context.Background(), telemetrywriter.Batch{
+		Records: []models.Record{Record}, GPURecords: gpuRecords,
+	}); err != nil {
+		return fmt.Errorf("failed to save telemetry batch: %w", err)
 	}
-
 	return nil
 }
 

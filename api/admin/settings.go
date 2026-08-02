@@ -17,10 +17,7 @@ func GetSettings(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to get settings: "+err.Error())
 		return
 	}
-	// P2-03 安全整改：读取配置时强制置空 custom_head 和 custom_body，避免历史残留数据回显并防止 XSS
-	cst[config.CustomHeadKey] = ""
-	cst[config.CustomBodyKey] = ""
-	api.RespondSuccess(c, cst)
+	api.RespondSuccess(c, config.AdminSettings(cst))
 }
 
 // EditSettings 更新自定义配置
@@ -31,18 +28,20 @@ func EditSettings(c *gin.Context) {
 		return
 	}
 
-	// P2-03 安全整改：后台禁止接收和保存任何自定义 HTML/JS 脚本，强制置空以防 Stored XSS 风险
-	cfg[config.CustomHeadKey] = ""
-	cfg[config.CustomBodyKey] = ""
+	validated, err := config.ValidateAdminSettings(cfg)
+	if err != nil {
+		api.RespondError(c, 400, "Invalid settings: "+err.Error())
+		return
+	}
 
-	if err := config.SetMany(cfg); err != nil {
+	if err := config.SetMany(validated); err != nil {
 		api.RespondError(c, 500, "Failed to update settings: "+err.Error())
 		return
 	}
 
 	uuid, _ := c.Get("uuid")
 	message := "update settings: "
-	for key := range cfg {
+	for key := range validated {
 		message += key + ", "
 	}
 	if len(message) > 2 {

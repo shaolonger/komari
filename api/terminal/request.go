@@ -31,10 +31,11 @@ func RequestTerminal(c *gin.Context) {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: ws.CheckOrigin,
 	}
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}
+	conn := ws.NewSafeConnWithConfig(unsafeConn, ws.ConnConfig{ReadLimit: 256 << 10, QueueCapacity: 128})
 	// 新建一个终端连接
 	id := utils.GenerateRandomString(32)
 	session := &TerminalSession{
@@ -50,48 +51,38 @@ func RequestTerminal(c *gin.Context) {
 	TerminalSessionsMutex.Unlock()
 	conn.SetCloseHandler(func(code int, text string) error {
 		log.Println("Terminal connection closed:", code, text)
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
-		// 通知 Agent 关闭终端连接
-		if session.Agent != nil {
-			session.Agent.Close()
-		}
+		removeTerminalSession(id, session)
+		session.close()
 		return nil
 	})
 
-	if ws.GetConnectedClients()[uuid] == nil {
-		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!\n"))
-		conn.Close()
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
+	agentConnection, online := ws.GetConnectedClient(uuid)
+	if !online || agentConnection == nil {
+		_ = conn.WriteMessageAndWait(websocket.TextMessage, []byte("Client offline!\n被控端离线!\n"))
+		session.close()
+		removeTerminalSession(id, session)
 		return
 	}
-	err = ws.GetConnectedClients()[uuid].WriteJSON(gin.H{
+	err = agentConnection.WriteJSON(gin.H{
 		"message":    "terminal",
 		"request_id": id,
 	})
 	if err != nil {
-		conn.Close()
-		TerminalSessionsMutex.Lock()
-		delete(TerminalSessions, id)
-		TerminalSessionsMutex.Unlock()
+		session.close()
+		removeTerminalSession(id, session)
 		return
 	}
-	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent...\n"))
+	_ = conn.WriteMessage(websocket.TextMessage, []byte("等待被控端连接 waiting for agent...\n"))
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
-		TerminalSessionsMutex.Lock()
-		if session.Agent == nil {
-			if session.Browser != nil {
-				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout\n"))
-				session.Browser.Close()
+		browser, agent := session.connections()
+		if agent == nil {
+			if browser != nil {
+				_ = browser.WriteMessageAndWait(websocket.TextMessage, []byte("被控端连接超时 timeout\n"))
 			}
-			conn.Close()
-			delete(TerminalSessions, id)
+			session.close()
+			removeTerminalSession(id, session)
 		}
-		TerminalSessionsMutex.Unlock()
 	})
 	//auditlog.Log(c.ClientIP(), user_uuid.(string), "request, terminal id:"+id+",client:"+session.UUID, "terminal")
 }

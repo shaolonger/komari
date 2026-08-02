@@ -48,6 +48,28 @@ func TestInternalMethods(t *testing.T) {
 	}
 }
 
+func TestRPCDiscoverIsSortedAndIsolated(t *testing.T) {
+	SetCapabilities(map[string]string{"feature.test": "1"})
+	value, err := Invoke("rpc.discover", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := value.(Discovery)
+	if manifest.Contract != ContractVersion || manifest.JSONRPCVersion != RPC_VERSION {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+	for index := 1; index < len(manifest.Methods); index++ {
+		if manifest.Methods[index-1] > manifest.Methods[index] {
+			t.Fatalf("methods are not sorted: %#v", manifest.Methods)
+		}
+	}
+	manifest.Capabilities["feature.test"] = "mutated"
+	next, _ := Invoke("rpc.discover", nil)
+	if next.(Discovery).Capabilities["feature.test"] != "1" {
+		t.Fatal("caller mutated the capability snapshot")
+	}
+}
+
 // Test rpc.help functionality
 func TestRpcHelp(t *testing.T) {
 	// Register a method with metadata

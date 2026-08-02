@@ -51,6 +51,7 @@ type Client struct {
 	ExpiredAt                    LocalTime `json:"expired_at" gorm:"type:timestamp"`
 	Group                        string    `json:"group" gorm:"type:varchar(100)"`
 	Tags                         string    `json:"tags" gorm:"type:text"` // split by ';'
+	HomeFacets                   string    `json:"home_facets,omitempty" gorm:"type:longtext"`
 	Hidden                       bool      `json:"hidden" gorm:"default:false"`
 	TrafficLimit                 int64     `json:"traffic_limit" gorm:"type:bigint"`
 	TrafficLimitType             string    `json:"traffic_limit_type" gorm:"type:varchar(10);default:'max'"` // 流量阈值类型：sum max min up down
@@ -73,15 +74,16 @@ type User struct {
 
 // Session manages user sessions
 type Session struct {
-	UUID            string    `json:"uuid" gorm:"type:varchar(36)"`
+	UUID            string    `json:"uuid" gorm:"type:varchar(36);index:idx_sessions_uuid"`
 	Session         string    `json:"session" gorm:"type:varchar(255);primaryKey;uniqueIndex:idx_sessions_session;not null"`
+	SessionDigest   []byte    `json:"-" gorm:"type:blob;uniqueIndex:idx_sessions_digest"`
 	UserAgent       string    `json:"user_agent" gorm:"type:text"`
 	Ip              string    `json:"ip" gorm:"type:varchar(100)"`
 	LoginMethod     string    `json:"login_method" gorm:"type:varchar(50)"`
 	LatestOnline    LocalTime `json:"latest_online" gorm:"type:timestamp"`
 	LatestUserAgent string    `json:"latest_user_agent" gorm:"type:text"`
 	LatestIp        string    `json:"latest_ip" gorm:"type:varchar(100)"`
-	Expires         LocalTime `json:"expires" gorm:"not null"`
+	Expires         LocalTime `json:"expires" gorm:"not null;index:idx_sessions_expires"`
 	CreatedAt       LocalTime `json:"created_at"`
 }
 

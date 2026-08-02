@@ -29,10 +29,13 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/metrics"
 	d_notification "github.com/komari-monitor/komari/database/notification"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/runtimeprofile"
+	"github.com/komari-monitor/komari/internal/scheduler"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
@@ -41,6 +44,7 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/utils/oauth"
+	"github.com/komari-monitor/komari/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -61,6 +65,7 @@ func init() {
 	// 从环境变量获取监听地址
 	listenAddr := GetEnv("KOMARI_LISTEN", "0.0.0.0:25774")
 	ServerCmd.PersistentFlags().StringVarP(&flags.Listen, "listen", "l", listenAddr, "监听地址 [env: KOMARI_LISTEN]")
+	ServerCmd.PersistentFlags().BoolVar(&flags.Diagnostics, "diagnostics", GetEnv("KOMARI_DIAGNOSTICS", "false") == "true", "启用受管理员认证保护的 pprof/trace [env: KOMARI_DIAGNOSTICS]")
 	RootCmd.AddCommand(ServerCmd)
 }
 
@@ -78,7 +83,8 @@ func RunServer() {
 		log.Fatal(err)
 	}
 	go geoip.InitGeoIp()
-	go DoScheduledWork()
+	scheduledCtx, scheduledCancel := context.WithCancel(context.Background())
+	go DoScheduledWorkContext(scheduledCtx)
 	go messageSender.Initialize()
 	// oidcInit
 	go oauth.Initialize()
@@ -180,6 +186,7 @@ func RunServer() {
 	r.Any("/ping", func(c *gin.Context) {
 		c.String(200, "pong")
 	})
+	r.GET("/admin/notification/fleet-report-settings", api.RequireRole(api.RoleAdmin), notification.FleetReportSettingsPage)
 	// #region 公开路由
 	r.POST("/api/login", public_api.Login)
 	r.GET("/api/me", public_api.GetMe)
@@ -195,6 +202,7 @@ func RunServer() {
 
 	r.GET("/api/records/load", public_api.GetRecordsByUUID)
 	r.GET("/api/records/ping", public_api.GetPingRecords)
+	r.GET("/api/traffic/range", public_api.GetTrafficRange)
 	r.GET("/api/task/ping", public_api.GetPublicPingTasks)
 	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
@@ -214,6 +222,7 @@ func RunServer() {
 	// #region 管理员
 	adminAuthrized := r.Group("/api/admin", api.RequireRole(api.RoleAdmin))
 	{
+		admin.RegisterDiagnostics(adminAuthrized, flags.Diagnostics)
 		adminAuthrized.GET("/download/backup", admin.DownloadBackup)
 		adminAuthrized.POST("/upload/backup", admin.UploadBackup)
 		// test
@@ -275,8 +284,12 @@ func RunServer() {
 			clientGroup.GET("/asset-issues", admin.GetClientAssetIssues)
 			clientGroup.POST("/asset-fx/refresh", admin.RefreshAssetFxSnapshot)
 			clientGroup.POST("/batch-edit", admin.BatchEditClientAssets)
+			clientGroup.GET("/facets", admin.ListClientHomeFacets)
+			clientGroup.POST("/facets", admin.BatchUpdateClientHomeFacets)
 			clientGroup.GET("/:uuid", admin.GetClient)
 			clientGroup.POST("/:uuid/edit", admin.EditClient)
+			clientGroup.GET("/:uuid/facets", admin.GetClientHomeFacets)
+			clientGroup.POST("/:uuid/facets", admin.UpdateClientHomeFacets)
 			clientGroup.POST("/:uuid/remove", admin.RemoveClient)
 			clientGroup.GET("/:uuid/token", admin.GetClientToken)
 			clientGroup.POST(":uuid/token/rotate", admin.RotateClientToken)
@@ -338,6 +351,19 @@ func RunServer() {
 				loadAlertGroup.POST("/delete", notification.DeleteLoadNotification)
 				loadAlertGroup.POST("/edit", notification.EditLoadNotification)
 			}
+			trafficReportGroup := notificationGroup.Group("/traffic-report")
+			{
+				trafficReportGroup.GET("", notification.ListTrafficReportNotifications)
+				trafficReportGroup.GET("/", notification.ListTrafficReportNotifications)
+				trafficReportGroup.POST("/edit", notification.EditTrafficReportNotifications)
+			}
+			fleetReportGroup := notificationGroup.Group("/fleet-report")
+			{
+				fleetReportGroup.GET("", notification.GetFleetReportNotification)
+				fleetReportGroup.GET("/", notification.GetFleetReportNotification)
+				fleetReportGroup.POST("/edit", notification.EditFleetReportNotification)
+				fleetReportGroup.POST("/test", notification.TestFleetReportNotification)
+			}
 		}
 
 		pingTaskGroup := adminAuthrized.Group("/ping")
@@ -356,10 +382,7 @@ func RunServer() {
 		r.NoRoute(handlers...)
 	})
 
-	srv := &http.Server{
-		Addr:    flags.Listen,
-		Handler: r,
-	}
+	srv := newHTTPServer(flags.Listen, r, productionHTTPServerLimits())
 	log.Printf("Starting server on %s ...", flags.Listen)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -370,16 +393,43 @@ func RunServer() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	OnShutdown()
+	scheduledCancel()
+	schedulerStopCtx, schedulerStopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := utils.StopPingSchedule(schedulerStopCtx); err != nil {
+		log.Printf("Ping scheduler shutdown failed: %v", err)
+	}
+	if err := notifier.StopLoadNotificationSchedule(schedulerStopCtx); err != nil {
+		log.Printf("Notification scheduler shutdown failed: %v", err)
+	}
+	schedulerStopCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		log.Printf("HTTP server graceful shutdown failed: %v", err)
 	}
+	if err := StopNezhaCompat(); err != nil {
+		log.Printf("Nezha compatibility server shutdown failed: %v", err)
+	}
+	ws.CloseAllAgentConnections()
+	if err := api.FlushClientReports(); err != nil {
+		log.Printf("Final telemetry flush failed: %v", err)
+	}
+	activityCtx, activityCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := accounts.CloseSessionActivity(activityCtx); err != nil {
+		log.Printf("Session activity drain failed: %v", err)
+	}
+	activityCancel()
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := storage.Close(drainCtx); err != nil {
+		log.Printf("Storage drain failed: %v", err)
+	}
+	drainCancel()
+	OnShutdown()
 
 }
 
 func InitDatabase() {
+	installStorageAdapters()
 	// // 打印数据库类型和连接信息
 	// if flags.DatabaseType == "mysql" {
 	// 	log.Printf("使用 MySQL 数据库连接: %s@%s:%s/%s",
@@ -392,8 +442,15 @@ func InitDatabase() {
 	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_FILE=%s]",
 	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_FILE"))
 	// }
-	var count int64 = 0
-	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
+	control, err := storage.RequireControl()
+	if err != nil {
+		panic(err)
+	}
+	hasUsers, err := control.HasUsers(context.Background())
+	if err != nil {
+		panic(fmt.Errorf("check control store users: %w", err))
+	}
+	if !hasUsers {
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
 		if err != nil {
 			panic(err)
@@ -407,7 +464,7 @@ func InitDatabase() {
 			filePath := "./data/init_password.txt"
 			err = os.WriteFile(filePath, []byte(passwd), 0600)
 			if err != nil {
-				_ = dbcore.GetDBInstance().Where("username = ?", user).Delete(&models.User{}).Error
+				_ = accounts.DeleteAccountByUsername(user)
 				log.Fatalf("Failed to persist the initial admin password to %s securely: %v. The default admin account has been rolled back; fix the path permissions or set ADMIN_PASSWORD before restarting.", filePath, err)
 			} else {
 				log.Printf("Default admin account created. Username: %s. Password has been securely written to local file %s to prevent log exposure. Retrieve it and delete the file.\n", user, filePath)
@@ -418,34 +475,72 @@ func InitDatabase() {
 
 // #region 定时任务
 func DoScheduledWork() {
+	DoScheduledWorkContext(context.Background())
+}
+
+func DoScheduledWorkContext(ctx context.Context) {
+	metrics.EnsureMigration(dbcore.GetDBInstance())
 	if err := tasks.MigrateAllClientsExpansion(); err != nil {
 		log.Println("Failed to migrate ping task all_clients expansion:", err)
 	}
 	tasks.ReloadPingSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
-	ticker := time.NewTicker(time.Minute * 30)
+	retentionTicker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
-	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
-	records.CompactRecord()
-	go notifier.CheckExpireScheduledWork()
+	profile, err := runtimeprofile.Current()
+	if err != nil {
+		log.Printf("Failed to resolve compaction profile: %v", err)
+		profile.CompactionInterval = 5 * time.Minute
+		profile.CompactionBudget = 15 * time.Second
+	}
+	compactionTicker := time.NewTicker(profile.CompactionInterval)
+	defer retentionTicker.Stop()
+	defer minute.Stop()
+	defer compactionTicker.Stop()
+	go notifier.CheckExpireScheduledWorkContext(ctx)
+	notificationEngine, _ := scheduler.New(scheduler.Config{Workers: 2, QueueCapacity: 16})
+	go func() {
+		_ = notificationEngine.Run(ctx, []scheduler.Task{
+			{Key: "notification:traffic-threshold", Interval: time.Minute, Run: func(context.Context) { notifier.CheckTraffic() }},
+			{Key: "notification:traffic-report", Interval: time.Minute, Run: func(context.Context) { notifier.CheckTrafficReportOnce(time.Now()) }},
+			{Key: "notification:fleet-report", Interval: time.Minute, Run: func(context.Context) { notifier.CheckFleetReportOnce(time.Now()) }},
+		})
+	}()
 	for {
-		cfg, _ := config.GetManyAs[config.Legacy]()
 		select {
-		case <-ticker.C:
-			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			records.CompactRecord()
-			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+		case <-ctx.Done():
+			return
+		case <-compactionTicker.C:
+			if err := records.CompactRecordContext(ctx, profile.CompactionBudget); err != nil && ctx.Err() == nil {
+				log.Printf("Telemetry compaction quantum failed: %v", err)
+			}
+		case <-retentionTicker.C:
+			cfg, _ := config.GetManyAs[config.Legacy]()
+			recordRetention := time.Hour * time.Duration(cfg.RecordPreserveTime)
+			pingFinalRetentionDays := 730
+			if plan, planErr := metrics.LoadRetentionPlan(ctx, dbcore.GetDBInstance()); planErr != nil {
+				log.Printf("Failed to load metric retention plan: %v", planErr)
+			} else {
+				if plan.RecordOverridden {
+					recordRetention = time.Duration(plan.RecordDays) * 24 * time.Hour
+				}
+				if plan.PingOverridden {
+					pingFinalRetentionDays = plan.PingDays
+				}
+			}
+			recordCutoff := time.Now().Add(-recordRetention)
+			records.DeleteRecordBefore(recordCutoff)
+			tasks.ClearTaskResultsByTimeBefore(recordCutoff)
+			tasks.DeletePingRecordsBeforeWithRetention(time.Now().Add(-time.Hour*time.Duration(cfg.PingRecordPreserveTime)), pingFinalRetentionDays)
 			auditlog.RemoveOldLogs()
 			accounts.RemoveExpiredSessions()
 		case <-minute.C:
+			cfg, _ := config.GetManyAs[config.Legacy]()
 			api.SaveClientReportToDB()
 			if !cfg.RecordEnabled {
 				records.DeleteAll()
 				tasks.DeleteAllPingRecords()
 			}
-			// 每分钟检查一次流量提醒
-			go notifier.CheckTraffic()
 		}
 	}
 

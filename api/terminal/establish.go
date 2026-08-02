@@ -5,12 +5,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/komari-monitor/komari/ws"
 )
 
 func EstablishConnection(c *gin.Context) {
 	session_id := c.Query("id")
-	session, exists := TerminalSessions[session_id]
-	if !exists || session == nil || session.Browser == nil {
+	session, exists := getTerminalSession(session_id)
+	if !exists || session == nil {
+		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
+		return
+	}
+	browser, _ := session.connections()
+	if browser == nil {
 		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
 		return
 	}
@@ -24,23 +30,20 @@ func EstablishConnection(c *gin.Context) {
 			return true // 被控
 		},
 	}
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		TerminalSessionsMutex.Lock()
-		if session.Browser != nil {
-			session.Browser.Close()
-		}
-		delete(TerminalSessions, session_id)
-		TerminalSessionsMutex.Unlock()
+		session.close()
+		removeTerminalSession(session_id, session)
 		return
 	}
-	session.Agent = conn
+	conn := ws.NewSafeConnWithConfig(unsafeConn, ws.ConnConfig{ReadLimit: 256 << 10, QueueCapacity: 128})
+	if !session.attachAgent(conn) {
+		_ = conn.Close()
+		return
+	}
 	conn.SetCloseHandler(func(code int, text string) error {
-		delete(TerminalSessions, session_id)
-		// 通知 Browser 关闭终端连接
-		if session.Browser != nil {
-			session.Browser.Close()
-		}
+		removeTerminalSession(session_id, session)
+		session.close()
 		return nil
 	})
 	go ForwardTerminal(session_id)

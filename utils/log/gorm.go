@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/komari-monitor/komari/internal/observability"
 	komari_utils "github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -40,6 +41,12 @@ func (l *GormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	return &newlogger
 }
 
+// ParamsFilter keeps diagnostic SQL useful while preventing credentials,
+// passwords, IP addresses and user content from being interpolated into logs.
+func (l *GormLogger) ParamsFilter(_ context.Context, sql string, _ ...interface{}) (string, []interface{}) {
+	return sql, nil
+}
+
 func (l *GormLogger) Info(ctx context.Context, msg string, data ...interface{}) {
 	if l.LogLevel >= gormlogger.Info {
 		slog.InfoContext(ctx, fmt.Sprintf(msg, data...))
@@ -59,11 +66,12 @@ func (l *GormLogger) Error(ctx context.Context, msg string, data ...interface{})
 }
 
 func (l *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	elapsed := time.Since(begin)
+	observability.ObserveSQLite(elapsed, err != nil && !errors.Is(err, gorm.ErrRecordNotFound))
 	if l.LogLevel <= gormlogger.Silent {
 		return
 	}
 
-	elapsed := time.Since(begin)
 	sql, rows := fc()
 
 	fileWithLineNum := utils.FileWithLineNum()

@@ -40,6 +40,6 @@ func GetClientRecentRecords(c *gin.Context) {
 		}
 	}
 
-	records, _ := api.Records.Get(uuid)
+	records := api.Telemetry.Recent(uuid)
 	api.RespondSuccess(c, records)
 }

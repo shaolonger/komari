@@ -53,6 +53,10 @@ func init() {
 	registerInternal("rpc.ping", func(ctx context.Context, req *JsonRpcRequest) (any, *JsonRpcError) {
 		return "pong", nil
 	})
+	// rpc.discover -> deterministic, machine-readable compatibility surface.
+	registerInternal("rpc.discover", func(ctx context.Context, req *JsonRpcRequest) (any, *JsonRpcError) {
+		return discover(), nil
+	})
 	// rpc.help -> 方法元数据或概览
 	registerInternal("rpc.help", func(ctx context.Context, req *JsonRpcRequest) (any, *JsonRpcError) {
 		var params struct {
@@ -79,6 +83,7 @@ func init() {
 	})
 	RegisterMeta("rpc.version", &MethodMeta{Name: "rpc.version", Summary: "Return the RPC version", Returns: "string"})
 	RegisterMeta("rpc.ping", &MethodMeta{Name: "rpc.ping", Summary: "Health check, returns pong", Returns: "string"})
+	RegisterMeta("rpc.discover", &MethodMeta{Name: "rpc.discover", Summary: "Return the versioned method and capability manifest", Returns: "Discovery"})
 	RegisterMeta("rpc.help", &MethodMeta{
 		Name:        "rpc.help",
 		Summary:     "Get method help",

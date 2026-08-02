@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	connectedClients = make(map[string]*SafeConn)
-	ConnectedUsers   = []*websocket.Conn{}
-	latestReport     = make(map[string]*common.Report)
+	connectedClients  = make(map[string]*SafeConn)
+	ConnectedUsers    = []*websocket.Conn{}
+	latestReport      = make(map[string]common.Report)
+	telemetryProtocol = make(map[string]uint8)
 	// presenceOnly stores online state for non-WebSocket agents (e.g., Nezha gRPC)
 	// value keeps connectionID and a soft expiration to avoid flicker
 	presenceOnly = make(map[string]struct {
@@ -31,25 +32,78 @@ func GetConnectedClients() map[string]*SafeConn {
 	return clientsCopy
 }
 
+func GetConnectedClient(uuid string) (*SafeConn, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	connection, ok := connectedClients[uuid]
+	return connection, ok
+}
+
 func SetConnectedClients(uuid string, conn *SafeConn) {
 	mu.Lock()
 	defer mu.Unlock()
+	wasOnline := isOnlineLocked(uuid, time.Now())
 	connectedClients[uuid] = conn
+	if !wasOnline {
+		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
+	}
+}
+
+func SetClientTelemetryProtocol(uuid string, conn *SafeConn, version uint8) {
+	mu.Lock()
+	defer mu.Unlock()
+	if current, exists := connectedClients[uuid]; exists && current == conn {
+		telemetryProtocol[uuid] = version
+	}
+}
+
+func GetClientTelemetryProtocol(uuid string) uint8 {
+	mu.RLock()
+	defer mu.RUnlock()
+	return telemetryProtocol[uuid]
 }
 func DeleteClientConditionally(uuid string, connToRemove *SafeConn) {
 	mu.Lock()
 	defer mu.Unlock()
 
 	// 检查当前 map 里的 conn 是否就是要删除的这一个
+	wasOnline := isOnlineLocked(uuid, time.Now())
 	if currentConn, exists := connectedClients[uuid]; exists && currentConn == connToRemove {
 		delete(connectedClients, uuid)
+		delete(telemetryProtocol, uuid)
+	}
+	if wasOnline && !isOnlineLocked(uuid, time.Now()) {
+		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
 	}
 }
 func DeleteConnectedClients(uuid string) {
 	mu.Lock()
 	defer mu.Unlock()
+	wasOnline := isOnlineLocked(uuid, time.Now())
 	// 只从 map 中删除，不再负责关闭连接
 	delete(connectedClients, uuid)
+	delete(telemetryProtocol, uuid)
+	if wasOnline && !isOnlineLocked(uuid, time.Now()) {
+		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
+	}
+}
+
+// CloseAllAgentConnections stops new telemetry before the persistence writer is drained.
+func CloseAllAgentConnections() {
+	mu.Lock()
+	connections := make([]*SafeConn, 0, len(connectedClients))
+	for uuid, connection := range connectedClients {
+		connections = append(connections, connection)
+		delete(connectedClients, uuid)
+		delete(telemetryProtocol, uuid)
+		if !isOnlineLocked(uuid, time.Now()) {
+			appendDashboardChangeLocked(uuid, dashboardOnlineChange)
+		}
+	}
+	mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
 }
 
 // SetPresence sets or clears presence for non-WebSocket agents.
@@ -58,10 +112,15 @@ func DeleteConnectedClients(uuid string) {
 func KeepAlivePresence(uuid string, connectionID int64, ttl time.Duration) {
 	mu.Lock()
 	defer mu.Unlock()
+	now := time.Now()
+	wasOnline := isOnlineLocked(uuid, now)
 	presenceOnly[uuid] = struct {
 		id     int64
 		expire time.Time
-	}{id: connectionID, expire: time.Now().Add(ttl)}
+	}{id: connectionID, expire: now.Add(ttl)}
+	if !wasOnline {
+		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
+	}
 }
 
 var defaultPresenceTTL = 20 * time.Second
@@ -70,15 +129,23 @@ var defaultPresenceTTL = 20 * time.Second
 func SetPresence(uuid string, connectionID int64, present bool) {
 	mu.Lock()
 	defer mu.Unlock()
+	now := time.Now()
+	wasOnline := isOnlineLocked(uuid, now)
 	if present {
 		presenceOnly[uuid] = struct {
 			id     int64
 			expire time.Time
-		}{id: connectionID, expire: time.Now().Add(defaultPresenceTTL)}
+		}{id: connectionID, expire: now.Add(defaultPresenceTTL)}
+		if !wasOnline {
+			appendDashboardChangeLocked(uuid, dashboardOnlineChange)
+		}
 		return
 	}
 	if cur, ok := presenceOnly[uuid]; ok && cur.id == connectionID {
 		delete(presenceOnly, uuid)
+	}
+	if wasOnline && !isOnlineLocked(uuid, now) {
+		appendDashboardChangeLocked(uuid, dashboardOnlineChange)
 	}
 }
 
@@ -86,38 +153,36 @@ func SetPresence(uuid string, connectionID int64, present bool) {
 func GetAllOnlineUUIDs() []string {
 	mu.RLock()
 	defer mu.RUnlock()
-	set := make(map[string]struct{})
-	for k := range connectedClients {
-		set[k] = struct{}{}
-	}
-	now := time.Now()
-	for k, v := range presenceOnly {
-		if v.expire.After(now) {
-			set[k] = struct{}{}
-		}
-	}
-	res := make([]string, 0, len(set))
-	for k := range set {
-		res = append(res, k)
-	}
-	return res
+	return onlineUUIDsLocked(time.Now())
 }
 func GetLatestReport() map[string]*common.Report {
 	mu.RLock()
 	defer mu.RUnlock()
-	reportCopy := make(map[string]*common.Report)
-	for k, v := range latestReport {
-		reportCopy[k] = v
+	reportCopy := make(map[string]*common.Report, len(latestReport))
+	for uuid, report := range latestReport {
+		cloned := cloneReport(report)
+		reportCopy[uuid] = &cloned
 	}
 	return reportCopy
 }
 func SetLatestReport(uuid string, report *common.Report) {
 	mu.Lock()
 	defer mu.Unlock()
-	latestReport[uuid] = report
+	if report == nil {
+		if _, exists := latestReport[uuid]; exists {
+			delete(latestReport, uuid)
+			appendDashboardChangeLocked(uuid, dashboardReportChange)
+		}
+		return
+	}
+	latestReport[uuid] = cloneReport(*report)
+	appendDashboardChangeLocked(uuid, dashboardReportChange)
 }
 func DeleteLatestReport(uuid string) {
 	mu.Lock()
 	defer mu.Unlock()
-	delete(latestReport, uuid)
+	if _, exists := latestReport[uuid]; exists {
+		delete(latestReport, uuid)
+		appendDashboardChangeLocked(uuid, dashboardReportChange)
+	}
 }

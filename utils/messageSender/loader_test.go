@@ -17,10 +17,18 @@ func Test(t *testing.T) {
 		t.Error("No sender configs found")
 		return
 	}
-	LoadProvider("email", `{"host":"smtp.example.com","port":587,"username":"user","password":"pass"}`)
+	if err := LoadProvider("email", `{"host":"smtp.example.com","port":587,"username":"user","password":"pass"}`); err != nil {
+		t.Fatalf("LoadProvider(email) error = %v", err)
+	}
 	cp := CurrentProvider
 	if cp() == nil {
 		t.Error("Current provider is nil")
 		return
+	}
+}
+
+func TestLoadProviderReturnsInitError(t *testing.T) {
+	if err := LoadProvider("Javascript", `{"script":""}`); err == nil {
+		t.Fatal("LoadProvider(Javascript) error = nil, want initialization error")
 	}
 }

@@ -2,6 +2,7 @@ package jsonRpc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/utils/rpc"
 )
 
@@ -19,19 +21,49 @@ func init() {
 	Register("getRecords", getRecords)
 }
 
+const maxRecordSetUUIDs = 256
+
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
+	params, err := json.Marshal(req.Params)
+	if err == nil {
+		key := fmt.Sprintf("jsonrpc-records-v1|permission=%s|minute=%d|params=%s", meta.Permission, time.Now().Unix()/60, params)
+		generation := historycache.Generation()
+		if cached, ok := historycache.Get(key, generation); ok {
+			return json.RawMessage(cached), nil
+		}
+		result, rpcErr := getRecordsUncached(ctx, req)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		if encoded, marshalErr := json.Marshal(result); marshalErr == nil {
+			historycache.PutIfGeneration(key, encoded, generation)
+		}
+		return result, nil
+	}
+	return getRecordsUncached(ctx, req)
+}
+
+func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	meta := rpc.MetaFromContext(ctx)
 	var params struct {
-		Type     string `json:"type"`      // "load" | "ping"; default "load"
-		UUID     string `json:"uuid"`      // client uuid; empty = all clients
-		Hours    int    `json:"hours"`     // time window in hours; default 1 if start/end not provided
-		Start    string `json:"start"`     // RFC3339 start time (optional)
-		End      string `json:"end"`       // RFC3339 end time (optional)
-		LoadType string `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
-		TaskID   int    `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
-		MaxCount int    `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
+		Type     string   `json:"type"`      // "load" | "ping"; default "load"
+		UUID     string   `json:"uuid"`      // client uuid; empty = all clients
+		UUIDs    []string `json:"uuids"`     // selected client set; mutually exclusive with uuid
+		Hours    int      `json:"hours"`     // time window in hours; default 1 if start/end not provided
+		Start    string   `json:"start"`     // RFC3339 start time (optional)
+		End      string   `json:"end"`       // RFC3339 end time (optional)
+		LoadType string   `json:"load_type"` // for type=load: cpu|gpu|ram|swap|load|temp|disk|network|process|connections|all
+		TaskID   int      `json:"task_id"`   // for type=ping: optional task id; -1 or omitted means all
+		MaxCount int      `json:"maxCount"`  // max number of points; -1 unlimited; default 4000
 	}
 	req.BindParams(&params)
+	if params.UUID != "" && params.UUIDs != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "uuid and uuids are mutually exclusive", nil)
+	}
+	if len(params.UUIDs) > maxRecordSetUUIDs {
+		return nil, rpc.MakeError(rpc.InvalidParams, "too many uuids", maxRecordSetUUIDs)
+	}
 
 	// defaults
 	if params.Type == "" {
@@ -72,25 +104,61 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	// Hidden filtering for non-admin
 	isAdmin := meta.Permission == "admin"
 	hidden := map[string]bool{}
-	if !isAdmin {
+	visible := map[string]bool{}
+	nodeCount := 1
+	if !isAdmin || params.UUID == "" {
 		cinfo, err := clients.GetAllClientBasicInfo()
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
 		}
+		nodeCount = 0
 		for _, c := range cinfo {
-			if c.Hidden {
+			if !isAdmin && c.Hidden {
 				hidden[c.UUID] = true
+				continue
 			}
+			nodeCount++
+			visible[c.UUID] = true
 		}
-		if params.UUID != "" && hidden[params.UUID] {
+		if !isAdmin && params.UUID != "" && hidden[params.UUID] {
 			return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
 		}
+		if params.UUID != "" {
+			nodeCount = 1
+		}
+	}
+	var selectedClientIDs []string
+	if params.UUIDs != nil {
+		selectedClientIDs = make([]string, 0, len(params.UUIDs))
+		seen := make(map[string]struct{}, len(params.UUIDs))
+		for _, id := range params.UUIDs {
+			if id == "" || !visible[id] {
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				continue
+			}
+			seen[id] = struct{}{}
+			selectedClientIDs = append(selectedClientIDs, id)
+		}
+		nodeCount = len(selectedClientIDs)
+	}
+	permission := recordsdb.QueryPermissionPublic
+	if isAdmin {
+		permission = recordsdb.QueryPermissionAdmin
+	}
+	maxCount, err := recordsdb.ValidateQueryBudget(startTime, endTime, nodeCount, params.MaxCount, permission)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)
+	}
+	if params.Type == "load" && !recordsdb.ValidLoadType(params.LoadType) {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid load_type", params.LoadType)
 	}
 
 	switch params.Type {
 	case "load":
 		// fetch load records
-		recs, err := getLoadRecordsCombined(params.UUID, startTime, endTime)
+		recs, err := getLoadRecordsCombined(ctx, params.UUID, selectedClientIDs, startTime, endTime, params.LoadType, maxCount)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
 		}
@@ -106,29 +174,20 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			recs = filtered
 		}
 
-		// resolve maxCount default for load
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-
 		// optional load_type filtering -> group by client
 		if params.LoadType != "" && params.LoadType != "all" {
-			items := filterRecordsByLoadType(recs, params.LoadType)
-			grouped := make(map[string][]flatRecord)
-			for _, it := range items {
-				grouped[it.Client] = append(grouped[it.Client], it)
+			groupedModels := make(map[string][]models.Record)
+			for _, record := range recs {
+				groupedModels[record.Client] = append(groupedModels[record.Client], record)
 			}
-			// sort and count
 			total := 0
 			groupsMeta := make([]struct {
 				name   string
 				length int
-			}, 0, len(grouped))
-			for name := range grouped {
-				arr := grouped[name]
+			}, 0, len(groupedModels))
+			for name, arr := range groupedModels {
 				sort.Slice(arr, func(i, j int) bool { return arr[i].Time.ToTime().Before(arr[j].Time.ToTime()) })
-				grouped[name] = arr
+				groupedModels[name] = arr
 				l := len(arr)
 				total += l
 				groupsMeta = append(groupsMeta, struct {
@@ -136,14 +195,17 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 					length int
 				}{name: name, length: l})
 			}
-			// downsample across all clients proportionally
-			if maxCount != -1 && total > maxCount {
+			if total > maxCount {
 				targets := allocateTargets(groupsMeta, maxCount)
 				total = 0
 				for name, k := range targets {
-					grouped[name] = downsampleFlatRecords(grouped[name], k)
-					total += len(grouped[name])
+					groupedModels[name] = recordsdb.DownsampleRecords(groupedModels[name], k, params.LoadType)
+					total += len(groupedModels[name])
 				}
+			}
+			grouped := make(map[string][]flatRecord, len(groupedModels))
+			for name, records := range groupedModels {
+				grouped[name] = filterRecordsByLoadType(records, params.LoadType)
 			}
 			return struct {
 				Count    int                     `json:"count"`
@@ -174,11 +236,11 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 				length int
 			}{name: name, length: l})
 		}
-		if maxCount != -1 && total > maxCount {
+		if total > maxCount {
 			targets := allocateTargets(groupsMeta, maxCount)
 			total = 0
 			for name, k := range targets {
-				grouped[name] = downsampleModelRecords(grouped[name], k)
+				grouped[name] = recordsdb.DownsampleRecords(grouped[name], k, "all")
 				total += len(grouped[name])
 			}
 		}
@@ -194,27 +256,25 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecords(params.UUID, taskId, startTime, endTime)
+		pingQuery, err := tasks.QueryPingSeries(ctx, dbcore.GetDBInstance(), tasks.PingQuery{
+			Client: params.UUID, Clients: selectedClientIDs, TaskID: taskId, Start: startTime, End: endTime, MaxPoints: maxCount,
+		})
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
 		}
-		// hidden filter
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if r.Client != "" && hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			recs = filtered
-		}
-
+		recs := pingQuery.Records
 		type RecordsResp struct {
-			TaskId uint             `json:"task_id,omitempty"`
-			Time   models.LocalTime `json:"time"`
-			Value  int              `json:"value"`
-			Client string           `json:"client,omitempty"`
+			TaskId      uint             `json:"task_id,omitempty"`
+			Time        models.LocalTime `json:"time"`
+			Value       int              `json:"value"`
+			Client      string           `json:"client,omitempty"`
+			SampleCount int64            `json:"sample_count,omitempty"`
+			ValidCount  int64            `json:"valid_count,omitempty"`
+			LossCount   int64            `json:"loss_count,omitempty"`
+			MinValue    int              `json:"min_value,omitempty"`
+			MaxValue    int              `json:"max_value,omitempty"`
+			LastValue   int              `json:"last_value"`
+			LastTime    models.LocalTime `json:"last_time"`
 		}
 		type ClientBasicInfo struct {
 			Client string  `json:"client"`
@@ -223,41 +283,47 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			Max    int     `json:"max"`
 		}
 		type Resp struct {
-			Count     int               `json:"count"`
-			BasicInfo []ClientBasicInfo `json:"basic_info,omitempty"`
-			Records   []RecordsResp     `json:"records"`
-			Tasks     []map[string]any  `json:"tasks"`
-			From      models.LocalTime  `json:"from"`
-			To        models.LocalTime  `json:"to"`
+			Count             int               `json:"count"`
+			ResolutionSeconds int               `json:"resolution_seconds"`
+			BasicInfo         []ClientBasicInfo `json:"basic_info,omitempty"`
+			Records           []RecordsResp     `json:"records"`
+			Tasks             []map[string]any  `json:"tasks"`
+			From              models.LocalTime  `json:"from"`
+			To                models.LocalTime  `json:"to"`
 		}
 
-		response := &Resp{Count: 0, Records: []RecordsResp{}, From: models.FromTime(startTime), To: models.FromTime(endTime)}
+		response := &Resp{Count: 0, ResolutionSeconds: pingQuery.ResolutionSeconds, Records: []RecordsResp{}, From: models.FromTime(startTime), To: models.FromTime(endTime)}
 
 		// stats per client
 		clientStats := make(map[string]struct {
-			total int
-			loss  int
+			total int64
+			loss  int64
 			min   int
 			max   int
 		})
 
-		for _, r := range recs {
+		for position, r := range recs {
+			if !isAdmin && r.Client != "" && hidden[r.Client] {
+				continue
+			}
 			rr := RecordsResp{
-				TaskId: r.TaskId,
-				Time:   r.Time,
-				Value:  r.Value,
-				Client: r.Client,
+				TaskId:      r.TaskId,
+				Time:        r.Time,
+				Value:       r.Value,
+				Client:      r.Client,
+				SampleCount: pingQuery.SampleCounts[position], ValidCount: pingQuery.ValidCounts[position], LossCount: pingQuery.LossCounts[position],
+				MinValue: pingQuery.MinValues[position], MaxValue: pingQuery.MaxValues[position],
+				LastValue: pingQuery.LastValues[position], LastTime: pingQuery.LastTimes[position],
 			}
 			st := clientStats[r.Client]
-			st.total++
-			if r.Value < 0 {
-				st.loss++
-			} else {
-				if st.min == 0 || r.Value < st.min {
-					st.min = r.Value
+			st.total += pingQuery.SampleCounts[position]
+			st.loss += pingQuery.LossCounts[position]
+			if pingQuery.ValidCounts[position] > 0 {
+				if st.min == 0 || pingQuery.MinValues[position] < st.min {
+					st.min = pingQuery.MinValues[position]
 				}
-				if r.Value > st.max {
-					st.max = r.Value
+				if pingQuery.MaxValues[position] > st.max {
+					st.max = pingQuery.MaxValues[position]
 				}
 			}
 			clientStats[r.Client] = st
@@ -298,42 +364,45 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 					continue
 				}
 			}
-			total := 0
-			lossCount := 0
+			total := int64(0)
+			lossCount := int64(0)
 			minLat := 0
 			maxLat := 0
-			sum := 0
-			valid := 0
+			sum := int64(0)
+			valid := int64(0)
 			latestVal := -1
 			var latestTs time.Time
-			// 收集该任务的所有有效(非丢包)延迟值以计算百分位
-			latencies := make([]int, 0, 64)
-			for _, r := range recs {
+			// Rollup rows carry exact counts/sums/extrema. Percentiles use the
+			// bucket average weighted by its valid sample count; raw rows have a
+			// weight of one and therefore preserve the legacy exact calculation.
+			latencies := make([]weightedPingValue, 0, 64)
+			for position, r := range recs {
 				if r.TaskId != t.Id {
 					continue
 				}
 				if params.UUID != "" && r.Client != params.UUID {
 					continue
 				}
-				total++
-				if r.Value < 0 { // 丢包
-					lossCount++
+				sampleCount := pingQuery.SampleCounts[position]
+				validCount := pingQuery.ValidCounts[position]
+				total += sampleCount
+				lossCount += pingQuery.LossCounts[position]
+				if validCount == 0 {
 					continue
 				}
-				valid++
-				sum += r.Value
-				latencies = append(latencies, r.Value)
-				if minLat == 0 || r.Value < minLat {
-					minLat = r.Value
+				valid += validCount
+				sum += pingQuery.SumValues[position]
+				latencies = append(latencies, weightedPingValue{value: r.Value, weight: validCount})
+				if minLat == 0 || pingQuery.MinValues[position] < minLat {
+					minLat = pingQuery.MinValues[position]
 				}
-				if r.Value > maxLat {
-					maxLat = r.Value
+				if pingQuery.MaxValues[position] > maxLat {
+					maxLat = pingQuery.MaxValues[position]
 				}
-				// track latest non-negative value
-				ts := r.Time.ToTime()
-				if latestTs.IsZero() || ts.After(latestTs) {
+				ts := pingQuery.LastTimes[position].ToTime()
+				if pingQuery.LastValues[position] >= 0 && (latestTs.IsZero() || ts.After(latestTs)) {
 					latestTs = ts
-					latestVal = r.Value
+					latestVal = pingQuery.LastValues[position]
 				}
 			}
 
@@ -341,29 +410,8 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			p50 := 0
 			p99 := 0
 			if len(latencies) > 0 {
-				sort.Ints(latencies)
-				getPercentileInt := func(values []int, percentile float64) int {
-					if len(values) == 0 {
-						return 0
-					}
-					if percentile <= 0 {
-						return values[0]
-					}
-					if percentile >= 1 {
-						return values[len(values)-1]
-					}
-					pos := (float64(len(values) - 1)) * percentile
-					lo := int(math.Floor(pos))
-					hi := int(math.Ceil(pos))
-					if lo == hi {
-						return values[lo]
-					}
-					frac := pos - float64(lo)
-					v := float64(values[lo]) + (float64(values[hi])-float64(values[lo]))*frac
-					return int(math.Round(v))
-				}
-				p50 = getPercentileInt(latencies, 0.50)
-				p99 = getPercentileInt(latencies, 0.99)
+				p50 = weightedPercentile(latencies, 0.50)
+				p99 = weightedPercentile(latencies, 0.99)
 			}
 			ratio := 0.0
 			if p50 > 0 && p99 >= p50 {
@@ -377,7 +425,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			}
 			avg := 0
 			if valid > 0 {
-				avg = sum / valid
+				avg = int(sum / valid)
 			}
 			info := map[string]any{
 				"id":            t.Id,
@@ -401,12 +449,8 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			toList = append(toList, info)
 		}
 		response.Tasks = toList
-		// apply maxCount for ping
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-		if maxCount != -1 && len(response.Records) > maxCount {
+		// apply the permission-aware total point budget for ping
+		if len(response.Records) > maxCount {
 			// group records by TaskId for proportional downsampling
 			taskGroups := make(map[uint][]RecordsResp)
 			for _, r := range response.Records {
@@ -505,50 +549,10 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 // getLoadRecordsCombined fetches records for a client or all clients within a time range,
 // combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombined(uuid string, start, end time.Time) ([]models.Record, error) {
-	// prefer the existing function when uuid provided
-	if uuid != "" {
-		return recordsdb.GetRecordsByClientAndTime(uuid, start, end)
-	}
-	db := dbcore.GetDBInstance()
-	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-
-	var recent []models.Record
-	recentStart := start
-	if end.After(fourHoursAgo) {
-		if recentStart.Before(fourHoursAgo) {
-			recentStart = fourHoursAgo
-		}
-		_ = db.Table("records").Where("time >= ? AND time <= ?", recentStart, end).Order("time ASC").Find(&recent).Error
-	}
-
-	var longTerm []models.Record
-	_ = db.Table("records_long_term").Where("time >= ? AND time <= ?", start, end).Order("time ASC").Find(&longTerm).Error
-
-	// if no long term, return all recent
-	if len(longTerm) == 0 {
-		return recent, nil
-	}
-
-	// group recent by client+15min, keep latest in bucket
-	type key struct {
-		c    string
-		slot string
-	}
-	grouped := make(map[key]models.Record)
-	for _, rec := range recent {
-		k := key{c: rec.Client, slot: rec.Time.ToTime().Truncate(15 * time.Minute).Format(time.RFC3339)}
-		if old, ok := grouped[k]; !ok || rec.Time.ToTime().After(old.Time.ToTime()) {
-			grouped[k] = rec
-		}
-	}
-	flat := make([]models.Record, 0, len(grouped))
-	for _, rec := range grouped {
-		flat = append(flat, rec)
-	}
-	sort.Slice(flat, func(i, j int) bool { return flat[i].Time.ToTime().Before(flat[j].Time.ToTime()) })
-	flat = append(flat, longTerm...)
-	return flat, nil
+func getLoadRecordsCombined(ctx context.Context, uuid string, uuids []string, start, end time.Time, loadType string, maxPoints int) ([]models.Record, error) {
+	return recordsdb.QueryRecords(ctx, dbcore.GetDBInstance(), recordsdb.RecordQuery{
+		Client: uuid, Clients: uuids, Start: start, End: end, LoadType: loadType, MaxPoints: maxPoints,
+	})
 }
 
 // ---------- downsampling helpers ----------
@@ -659,56 +663,6 @@ func allocateTargets(groups []struct {
 		}
 	}
 	return result
-}
-
-func downsampleModelRecords(in []models.Record, k int) []models.Record {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []models.Record{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]models.Record, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
-}
-
-func downsampleFlatRecords(in []flatRecord, k int) []flatRecord {
-	n := len(in)
-	if k <= 0 || n == 0 {
-		return []flatRecord{}
-	}
-	if k >= n {
-		return in
-	}
-	out := make([]flatRecord, 0, k)
-	if k == 1 {
-		out = append(out, in[n-1])
-		return out
-	}
-	for i := 0; i < k; i++ {
-		idx := int(math.Round(float64(i) * float64(n-1) / float64(k-1)))
-		if idx < 0 {
-			idx = 0
-		} else if idx >= n {
-			idx = n - 1
-		}
-		out = append(out, in[idx])
-	}
-	return out
 }
 
 // flatRecord is a projection used when load_type is specified.

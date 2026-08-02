@@ -1,12 +1,14 @@
 package client
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"gorm.io/gorm"
 )
 
 func GetPingTasks(c *gin.Context) {
@@ -47,6 +49,14 @@ func UploadPingResult(c *gin.Context) {
 		Time:   models.FromTime(req.FinishedAt),
 	}
 	if err := tasks.SavePingRecord(record); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Ping task no longer exists"})
+			return
+		}
+		if errors.Is(err, tasks.ErrPingTaskNotAssigned) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Ping task is not assigned to this client"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save ping result: " + err.Error()})
 		return
 	}

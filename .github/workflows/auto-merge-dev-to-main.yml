@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0 # Required for git history
@@ -37,7 +37,7 @@ jobs:
       - name: Get PR number
         id: get-pr
         run: |
-          echo "pr_number=${{ github.event.number }}" >> $GITHUB_OUTPUT
+          echo "pr_number=${{ github.event.number }}" >> "$GITHUB_OUTPUT"
 
       - name: Check for conflicts
         id: check-conflicts
@@ -45,13 +45,14 @@ jobs:
           # Ensure local branches are up-to-date
           git fetch origin main
           git fetch origin dev
-          
+
           # Use merge-base to find the common ancestor and check for conflicts
-          if git merge-tree $(git merge-base origin/main origin/dev) origin/main origin/dev | grep -q '<<<<<<<'; then
-            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+          merge_base="$(git merge-base origin/main origin/dev)"
+          if git merge-tree "$merge_base" origin/main origin/dev | grep -q '<<<<<<<'; then
+            echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
             echo "❌ Merge conflicts detected"
           else
-            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+            echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
             echo "✅ No merge conflicts"
           fi
 
@@ -60,7 +61,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr comment ${{ steps.get-pr.outputs.pr_number }} \
+          gh pr comment "${{ steps.get-pr.outputs.pr_number }}" \
             --body "❌ **Merge Conflict Detection**
 
             This PR has merge conflicts and cannot be automatically merged. Please resolve conflicts manually and push to the dev branch.
@@ -79,13 +80,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Enable auto-merge using a merge commit
-          gh pr merge ${{ steps.get-pr.outputs.pr_number }} \
+          gh pr merge "${{ steps.get-pr.outputs.pr_number }}" \
             --auto \
             --merge \
             --delete-branch=false
-          
+
           # Add success comment
-          gh pr comment ${{ steps.get-pr.outputs.pr_number }} \
+          gh pr comment "${{ steps.get-pr.outputs.pr_number }}" \
             --body "✅ **Auto-merge Enabled**
 
             This PR has no merge conflicts and auto-merge has been enabled. It will be automatically merged to the main branch once all checks pass.
@@ -95,15 +96,15 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### 🤖 Auto-merge Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- 📝 Processing PR #${{ steps.get-pr.outputs.pr_number }} (dev → main)" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ steps.check-conflicts.outputs.has_conflicts }}" == "true" ]; then
-            echo "- ❌ Merge conflicts detected, manual resolution required" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- ✅ No merge conflicts, auto-merge enabled" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**PR Link**: https://github.com/${{ github.repository }}/pull/${{ steps.get-pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### 🤖 Auto-merge Summary"
+            echo ""
+            echo "- 📝 Processing PR #${{ steps.get-pr.outputs.pr_number }} (dev → main)"
+            if [ "${{ steps.check-conflicts.outputs.has_conflicts }}" == "true" ]; then
+              echo "- ❌ Merge conflicts detected, manual resolution required"
+            else
+              echo "- ✅ No merge conflicts, auto-merge enabled"
+            fi
+            echo ""
+            echo "**PR Link**: https://github.com/${{ github.repository }}/pull/${{ steps.get-pr.outputs.pr_number }}"
+          } >> "$GITHUB_STEP_SUMMARY"

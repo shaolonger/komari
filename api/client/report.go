@@ -1,33 +1,71 @@
 package client
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"sync"
-	"time"
-
 	"log"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/observability"
+	"github.com/komari-monitor/komari/internal/telemetry"
+	"github.com/komari-monitor/komari/protocol/telemetryv2"
+	"github.com/komari-monitor/komari/protocol/telemetryv3"
+	komariutils "github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
-	"github.com/patrickmn/go-cache"
 )
 
 const (
-	// 如果超过这个时间没有收到任何消息，则认为连接已死
-	// 因为目前server没有存agent的信息上报间隔。只有写一个默认的
-	readWait = 11 * time.Second
+	// Legacy HTTP reporters normally post every second, so this remains a
+	// deliberately short presence TTL. WebSockets have their own heartbeat
+	// budget and must tolerate several missed scheduling intervals under load.
+	postPresenceWait       = 11 * time.Second
+	websocketPongWait      = 75 * time.Second
+	websocketPingPeriod    = 25 * time.Second
+	websocketQueueCapacity = 128
 )
+
+type telemetryAcknowledgement struct {
+	Type            string `json:"type"`
+	Through         uint64 `json:"through"`
+	AcceptedThrough uint64 `json:"accepted_through"`
+}
+
+func reportWebSocketConfig() ws.ConnConfig {
+	return ws.ConnConfig{
+		ReadLimit:     telemetryv2.MaxFrameSize,
+		PongWait:      websocketPongWait,
+		PingPeriod:    websocketPingPeriod,
+		QueueCapacity: websocketQueueCapacity,
+	}
+}
+
+func telemetryAcknowledgementFor(acceptance telemetryAcceptance, lastThrough uint64) (telemetryAcknowledgement, bool) {
+	// ACKs are cumulative durable checkpoints. Repeating a non-advancing ACK is
+	// redundant on an ordered WebSocket and caused older agents to replay their
+	// accepted-but-not-yet-durable suffix indefinitely. A reconnect resets the
+	// per-connection watermark, so a lost connection always gets a fresh ACK.
+	if acceptance.Through == 0 || acceptance.Through <= lastThrough {
+		return telemetryAcknowledgement{}, false
+	}
+	return telemetryAcknowledgement{
+		Type:            "telemetry_ack",
+		Through:         acceptance.Through,
+		AcceptedThrough: acceptance.AcceptedThrough,
+	}, true
+}
 
 // postPresenceEntry 保存单个客户端的 POST 上报会话状态
 type postPresenceEntry struct {
@@ -53,16 +91,16 @@ func refreshPostPresence(uuid string) {
 		entry.timer.Stop()
 		// 重新创建 AfterFunc 以在闭包中捕获新的 generation
 		gen := entry.generation
-		entry.timer = time.AfterFunc(readWait, func() {
+		entry.timer = time.AfterFunc(postPresenceWait, func() {
 			postPresenceExpired(uuid, entry.connID, gen)
 		})
-		ws.KeepAlivePresence(uuid, entry.connID, readWait)
+		ws.KeepAlivePresence(uuid, entry.connID, postPresenceWait)
 		return
 	}
 
 	// 新 POST 会话：生成 connID，标记在线，启动超时定时器
 	connID := time.Now().UnixNano()
-	ws.KeepAlivePresence(uuid, connID, readWait)
+	ws.KeepAlivePresence(uuid, connID, postPresenceWait)
 	go notifier.OnlineNotification(uuid, connID)
 
 	defaultGeneration := uint64(0)
@@ -72,7 +110,7 @@ func refreshPostPresence(uuid string) {
 		generation: defaultGeneration,
 	}
 
-	entry.timer = time.AfterFunc(readWait, func() {
+	entry.timer = time.AfterFunc(postPresenceWait, func() {
 		postPresenceExpired(uuid, connID, defaultGeneration)
 	})
 
@@ -97,46 +135,44 @@ func postPresenceExpired(uuid string, connID int64, gen uint64) {
 }
 
 func UploadReport(c *gin.Context) {
+	started := time.Now()
+	accepted := false
+	bodySize := 0
+	defer func() { observability.ObserveReport(bodySize, time.Since(started), accepted) }()
+	uuid, ok := authenticatedClientUUID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authenticated client identity is required"})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, telemetryv2.MaxFrameSize)
 	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodySize = len(bodyBytes)
 	if err != nil {
-		log.Println("Failed to read request body:", err)
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Report exceeds maximum size"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
-
-	var data map[string]interface{}
-	err = json.Unmarshal(bodyBytes, &data)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-	// Save report to database
 	var report common.Report
-	err = json.Unmarshal(bodyBytes, &report)
-	if err != nil {
+	if err := decodeAuthenticatedJSONReport(bodyBytes, uuid, &report); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 	report.UpdatedAt = time.Now()
 
-	// 优先使用 body 中的 UUID，若为空则从中间件注入的上下文中获取
-	uuid := report.UUID
-	if uuid == "" {
-		if v, ok := c.Get("client_uuid"); ok {
-			uuid, _ = v.(string)
-		}
-	}
-	if uuid == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "UUID is required"})
-		return
-	}
-	report.UUID = uuid
-
 	err = SaveClientReport(uuid, report)
 	if err != nil {
+		if errors.Is(err, telemetry.ErrSampleLimit) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("%v", err)})
 		return
 	}
+	accepted = true
 	// Update report with method and token
 
 	ws.SetLatestReport(uuid, &report)
@@ -144,11 +180,33 @@ func UploadReport(c *gin.Context) {
 	// POST 上报后标记节点在线，超时未收到新 POST 则触发离线
 	refreshPostPresence(uuid)
 
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore the body for further use
 	c.JSON(200, gin.H{"status": "success"})
 }
 
+func authenticatedClientUUID(c *gin.Context) (string, bool) {
+	value, exists := c.Get("client_uuid")
+	if !exists {
+		return "", false
+	}
+	uuid, ok := value.(string)
+	return uuid, ok && uuid != ""
+}
+
+func decodeAuthenticatedJSONReport(body []byte, uuid string, report *common.Report) error {
+	*report = common.Report{}
+	if err := json.Unmarshal(body, report); err != nil {
+		return err
+	}
+	report.UUID = uuid
+	return nil
+}
+
 func WebSocketReport(c *gin.Context) {
+	uuid, ok := authenticatedClientUUID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "Authenticated client identity is required"})
+		return
+	}
 	// 升级ws
 	if !websocket.IsWebSocketUpgrade(c.Request) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
@@ -158,6 +216,7 @@ func WebSocketReport(c *gin.Context) {
 		CheckOrigin: func(r *http.Request) bool {
 			return true // 被控
 		},
+		Subprotocols: []string{telemetryv3.Subprotocol, telemetryv2.Subprotocol, telemetryv2.LegacySubprotocol},
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
 	unsafeConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -165,135 +224,201 @@ func WebSocketReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 		return
 	}
-	conn := ws.NewSafeConn(unsafeConn)
+	wireProtocol, err := negotiatedTelemetryProtocol(unsafeConn.Subprotocol())
+	if err != nil {
+		_ = unsafeConn.Close()
+		return
+	}
+	conn := ws.NewSafeConnWithConfig(unsafeConn, reportWebSocketConfig())
 	defer conn.Close()
 
-	_, message, err := conn.ReadMessage()
+	messageType, message, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("Error reading message:", err)
+		log.Printf("Client %s telemetry connection failed before its first report: %v", uuid, err)
 		return
 	}
-
-	// 第一次数据拿token
-	data := map[string]interface{}{}
-	err = json.Unmarshal(message, &data)
-	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
-		return
-	}
-	// it should ok,token was verfied in the middleware
-	token := ""
-	var errMsg string
-
-	// 优先使用统一的 Token 提取方法
-	token = api.ExtractClientToken(c)
-
-	// 如果 token 为空，返回错误
-	if token == "" {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
-		return
-	}
-
-	uuid, err := clients.GetClientUUIDByToken(token)
-	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
-		return
-	}
-
 	// 接受新连接，并处理旧连接
-	if oldConn, exists := ws.GetConnectedClients()[uuid]; exists {
+	if oldConn, exists := ws.GetConnectedClient(uuid); exists {
+		observability.WSReconnected()
 		log.Printf("Client %s is reconnecting. Closing the old connection.", uuid)
 
 		// 强制关闭旧连接。这将导致旧连接的 ReadMessage() 循环出错退出。
-		go oldConn.Close()
+		_ = oldConn.Close()
 	}
 	ws.SetConnectedClients(uuid, conn)
-	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
+	ws.SetClientTelemetryProtocol(uuid, conn, uint8(wireProtocol))
+	observability.WSConnected()
+	log.Printf("Client %s is reconnect success, connID: %d, telemetry protocol: v%d", uuid, conn.ID, wireProtocol)
 	go notifier.OnlineNotification(uuid, conn.ID)
+	if wireProtocol == telemetryProtocolV3 {
+		_ = komariutils.SendPingLease(uuid)
+	}
 	defer func() {
+		observability.WSDisconnected()
 		ws.DeleteClientConditionally(uuid, conn)
 		notifier.OfflineNotification(uuid, conn.ID)
 	}()
 
 	// 首先处理第一次ws conn收到的消息
-	processMessage(conn, message, uuid)
+	lastTelemetryACK := uint64(0)
+	processMessage(conn, messageType, message, uuid, wireProtocol, &lastTelemetryACK)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(readWait))
-
-		_, message, err := conn.ReadMessage()
+		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Client %s connection error: %v", uuid, err)
-			}
+			log.Printf("Client %s telemetry connection ended (connID: %d): %v", uuid, conn.ID, err)
 			break // 任何读错误（包括超时）都意味着连接已断开，退出循环
 		}
-		processMessage(conn, message, uuid)
+		processMessage(conn, messageType, message, uuid, wireProtocol, &lastTelemetryACK)
 	}
 }
 
 // 将消息处理逻辑提取到一个函数中，方便复用
-func processMessage(conn *ws.SafeConn, message []byte, uuid string) {
-	type MessageType struct {
-		Type string `json:"type"`
+func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid string, wireProtocol telemetryProtocol, lastTelemetryACK *uint64) {
+	started := time.Now()
+	accepted := false
+	defer func() { observability.ObserveReport(len(message), time.Since(started), accepted) }()
+	if messageType == websocket.BinaryMessage {
+		if wireProtocol == telemetryProtocolV3 {
+			frame, report, err := decodeTelemetryV3Report(message)
+			if err != nil {
+				log.Printf("Rejected invalid telemetry v3 frame for client %s: %v", uuid, err)
+				_ = conn.WriteJSON(gin.H{"status": "error", "error": "Invalid telemetry v3 frame"})
+				return
+			}
+			acceptance, err := acceptTelemetryV3(context.Background(), dbcore.GetDBInstance(), uuid, frame, report, SaveClientReportV3)
+			if errors.Is(err, ErrTelemetrySequenceGap) {
+				_ = conn.WriteJSON(gin.H{"type": "telemetry_nack", "expected": acceptance.Expected})
+				return
+			}
+			if err != nil {
+				_ = conn.WriteJSON(gin.H{"status": "error", "error": "Failed to durably accept telemetry"})
+				return
+			}
+			if !acceptance.Duplicate {
+				ws.SetLatestReport(uuid, &report)
+			}
+			if acknowledgement, shouldSend := telemetryAcknowledgementFor(acceptance, *lastTelemetryACK); shouldSend {
+				if err := conn.WriteJSON(acknowledgement); err == nil {
+					*lastTelemetryACK = acceptance.Through
+				}
+			}
+			accepted = true
+			return
+		}
+		if wireProtocol != telemetryProtocolV2 {
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Binary telemetry requires protocol v2 or v3"})
+			return
+		}
+		report, err := decodeTelemetryV2Report(message)
+		if err != nil {
+			log.Printf("Rejected invalid telemetry v2 frame for client %s: %v", uuid, err)
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Invalid telemetry frame"})
+			return
+		}
+		report.UUID = uuid
+		report.UpdatedAt = time.Now()
+		if err := SaveClientReport(uuid, report); err != nil {
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
+			return
+		}
+		ws.SetLatestReport(uuid, &report)
+		accepted = true
+		return
 	}
-	var msgType MessageType
-	err := json.Unmarshal(message, &msgType)
-	if err != nil {
+	if messageType != websocket.TextMessage {
+		_ = conn.WriteJSON(gin.H{"status": "error", "error": "Unsupported WebSocket message type"})
+		return
+	}
+	var decoded agentMessage
+	if err := decodeAgentMessage(message, &decoded); err != nil {
 		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
 		return
 	}
 
-	switch msgType.Type {
+	switch decoded.Type {
 	case "", "report":
-		report := common.Report{}
-		err = json.Unmarshal(message, &report)
-		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid report format"})
-			return
-		}
+		report := decoded.Report
+		report.UUID = uuid
 		report.UpdatedAt = time.Now()
-		err = SaveClientReport(uuid, report)
-		if err != nil {
+		if err := SaveClientReport(uuid, report); err != nil {
 			conn.WriteJSON(gin.H{"status": "error", "error": fmt.Sprintf("%v", err)})
 			return
 		}
 		ws.SetLatestReport(uuid, &report)
+		accepted = true
 	case "ping_result":
-		var reqBody struct {
-			PingTaskID uint      `json:"task_id"`
-			PingResult int       `json:"value"`
-			PingType   string    `json:"ping_type"`
-			FinishedAt time.Time `json:"finished_at"`
-		}
-		err = json.Unmarshal(message, &reqBody)
-		if err != nil {
-			conn.WriteJSON(gin.H{"status": "error", "error": "Invalid ping result format"})
-			return
-		}
 		pingResult := models.PingRecord{
 			Client: uuid,
-			TaskId: reqBody.PingTaskID,
-			Value:  reqBody.PingResult,
-			Time:   models.FromTime(reqBody.FinishedAt),
+			TaskId: decoded.PingTaskID,
+			Value:  decoded.PingResult,
+			Time:   models.FromTime(decoded.FinishedAt),
 		}
-		tasks.SavePingRecord(pingResult)
+		if err := tasks.SavePingRecord(pingResult); err != nil {
+			// A ping can finish after its task has been removed. Do not recreate an
+			// orphaned history row; the agent will receive the next schedule from
+			// the refreshed task list.
+			log.Printf("Discarded ping result for client %s, task %d: %v", uuid, decoded.PingTaskID, err)
+		} else {
+			accepted = true
+		}
+	case "ping_result_batch":
+		acceptance, err := acceptPingResultBatch(context.Background(), dbcore.GetDBInstance(), uuid, decoded.BatchSequence, decoded.PingResults, tasks.SavePingRecordsWithCheckpoint)
+		if errors.Is(err, ErrTelemetrySequenceGap) {
+			_ = conn.WriteJSON(gin.H{"type": "ping_result_nack", "expected": acceptance.Through + 1})
+			return
+		}
+		if err != nil {
+			_ = conn.WriteJSON(gin.H{"status": "error", "error": "Failed to durably accept Ping result batch"})
+			return
+		}
+		_ = conn.WriteJSON(gin.H{"type": "ping_result_ack", "through": acceptance.Through})
+		accepted = true
 	default:
-		log.Printf("Unknown message type: %s", msgType.Type)
+		log.Printf("Unknown message type: %s", decoded.Type)
 		conn.WriteJSON(gin.H{"status": "error", "error": "Unknown message type"})
 	}
 }
 
-func SaveClientReport(uuid string, report common.Report) error {
-	reports, _ := api.Records.Get(uuid)
-	if reports == nil {
-		reports = []common.Report{}
+type agentMessage struct {
+	common.Report
+	Type          string            `json:"type"`
+	PingTaskID    uint              `json:"task_id"`
+	PingResult    int               `json:"value"`
+	PingType      string            `json:"ping_type"`
+	FinishedAt    time.Time         `json:"finished_at"`
+	BatchSequence uint64            `json:"sequence"`
+	PingResults   []pingResultInput `json:"results"`
+}
+
+func decodeAgentMessage(message []byte, decoded *agentMessage) error {
+	*decoded = agentMessage{}
+	if err := json.Unmarshal(message, decoded); err != nil {
+		return err
 	}
+	return nil
+}
+
+func SaveClientReport(uuid string, report common.Report) error {
 	if report.CPU.Usage < 0.01 {
 		report.CPU.Usage = 0.01
 	}
-	reports = append(reports.([]common.Report), report)
-	api.Records.Set(uuid, reports, cache.DefaultExpiration)
+	return api.Telemetry.Add(uuid, report)
+}
 
-	return nil
+func SaveClientReportV3(uuid string, report common.Report, frame telemetryv3.Frame) error {
+	if report.CPU.Usage < 0.01 {
+		report.CPU.Usage = 0.01
+	}
+	err := api.Telemetry.AddV3(uuid, report, frame.Envelope, frame.Sequence)
+	if !errors.Is(err, telemetry.ErrWindowBacklog) {
+		return err
+	}
+	// A reconnect may replay many historical minute windows faster than the
+	// periodic flusher. Commit the bounded chunk and retry the exact frame; the
+	// sequence checkpoint is part of that same database transaction.
+	if err := api.SaveClientReportToDB(); err != nil {
+		return err
+	}
+	return api.Telemetry.AddV3(uuid, report, frame.Envelope, frame.Sequence)
 }

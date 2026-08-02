@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	clientapi "github.com/komari-monitor/komari/api/client"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/records"
@@ -16,9 +17,21 @@ var reissueClientTokenFunc = clients.ReissueClientToken
 var revokeClientTokenFunc = clients.RevokeClientToken
 var auditLogFunc = auditlog.Log
 var saveClientFunc = clients.SaveClient
+var getAllClientHomeFacetRowsFunc = clients.GetAllClientHomeFacetRows
+var getClientHomeFacetRowFunc = clients.GetClientHomeFacetRow
+var saveClientHomeFacetsFunc = clients.SaveClientHomeFacets
+var batchSaveClientHomeFacetsFunc = clients.BatchSaveClientHomeFacets
 
 type clientTokenLifecycleRequest struct {
 	ExpiresInHours int64 `json:"expires_in_hours"`
+}
+
+type clientHomeFacetsRequest struct {
+	Facets map[string]interface{} `json:"facets"`
+}
+
+type batchClientHomeFacetsRequest struct {
+	Facets map[string]map[string]interface{} `json:"facets"`
 }
 
 func writeClientTokenStatusResponse(c *gin.Context, status clients.ClientTokenStatus) {
@@ -155,17 +168,18 @@ func RemoveClient(c *gin.Context) {
 	uuid := c.Param("uuid")
 	err := clients.DeleteClient(uuid)
 	if err != nil {
-		c.JSON(500, gin.H{
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": "error",
-			"error":  "Failed to delete client" + err.Error(),
+			"error":  "Failed to delete client: " + err.Error(),
 		})
 		return
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditLogFunc(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
-	c.JSON(200, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
+	clientapi.ForgetClientTelemetry(uuid)
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func ClearRecord(c *gin.Context) {
@@ -211,6 +225,89 @@ func ListClients(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, cls)
+}
+
+func ListClientHomeFacets(c *gin.Context) {
+	rows, err := getAllClientHomeFacetRowsFunc()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func GetClientHomeFacets(c *gin.Context) {
+	uuid := c.Param("uuid")
+	if uuid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid or missing UUID"})
+		return
+	}
+	row, err := getClientHomeFacetRowFunc(uuid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func UpdateClientHomeFacets(c *gin.Context) {
+	uuid := c.Param("uuid")
+	if uuid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid or missing UUID"})
+		return
+	}
+	var req clientHomeFacetsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	facets, err := clients.NormalizeHomeFacets(req.Facets)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	if err := saveClientHomeFacetsFunc(uuid, facets); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	userUUID, _ := c.Get("uuid")
+	auditLogFunc(c.ClientIP(), userUUID.(string), "edit client home facets:"+uuid, "info")
+	c.JSON(http.StatusOK, gin.H{"status": "success", "uuid": uuid, "home_facets": facets})
+}
+
+func BatchUpdateClientHomeFacets(c *gin.Context) {
+	var req batchClientHomeFacetsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	if len(req.Facets) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "facets is required"})
+		return
+	}
+
+	items := make(map[string]clients.HomeFacetValues, len(req.Facets))
+	for uuid, rawFacets := range req.Facets {
+		if uuid == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "client UUID must not be empty"})
+			return
+		}
+		facets, err := clients.NormalizeHomeFacets(rawFacets)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error(), "uuid": uuid})
+			return
+		}
+		items[uuid] = facets
+	}
+
+	updated, err := batchSaveClientHomeFacetsFunc(items)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
+	userUUID, _ := c.Get("uuid")
+	auditLogFunc(c.ClientIP(), userUUID.(string), "batch edit client home facets", "info")
+	c.JSON(http.StatusOK, gin.H{"status": "success", "updated": updated})
 }
 
 func GetClientToken(c *gin.Context) {

@@ -1,13 +1,26 @@
 package tasks
 
 import (
-	"time"
+	"context"
+	"errors"
+	timepkg "time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/telemetrywriter"
+	"github.com/komari-monitor/komari/internal/historycache"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
 )
+
+var ErrPingTaskNotAssigned = errors.New("ping task is not assigned to this client")
+
+const maxPingSQLClientFilter = 256
+
+type PingSetQueryResult struct {
+	Records    []models.PingRecord
+	SQLQueries int
+}
 
 // AddPingTask 创建延迟监测任务。defaultOn 表示新加入的服务器是否自动开启此监测。
 func AddPingTask(clients []string, defaultOn bool, name string, target, task_type string, interval int) (uint, error) {
@@ -40,18 +53,38 @@ func AddPingTask(clients []string, defaultOn bool, name string, target, task_typ
 	if err != nil {
 		return 0, err
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return task.Id, nil
 }
 
 func DeletePingTask(id []uint) error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("id IN ?", id).Delete(&models.PingTask{})
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+	err := db.Transaction(func(tx *gorm.DB) error {
+		// PingRecord has historically existed without a database-enforced foreign
+		// key on some installations. Delete it explicitly so deleting a task never
+		// leaves historical samples that can be mistaken for an active task.
+		var taskCount int64
+		if err := tx.Model(&models.PingTask{}).Where("id IN ?", id).Count(&taskCount).Error; err != nil {
+			return err
+		}
+		if taskCount == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := tx.Where("task_id IN ?", id).Delete(&models.PingRecord{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id IN ?", id).Delete(&models.PingTask{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
-	return result.Error
+	return nil
 }
 
 // EditPingTask 批量更新延迟监测任务配置。
@@ -73,6 +106,7 @@ func EditPingTask(tasks []*models.PingTask) error {
 			return gorm.ErrRecordNotFound
 		}
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return nil
 }
@@ -96,12 +130,14 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 
 // GetPingTasksByClient 获取指定服务器需要执行的延迟监测任务。
 func GetPingTasksByClient(uuid string) []models.PingTask {
-	db := dbcore.GetDBInstance()
-	var tasks []models.PingTask
-	if err := db.Where("clients LIKE ?", `%"`+uuid+`"%`).Find(&tasks).Error; err != nil {
+	if uuid == "" {
 		return nil
 	}
-	return tasks
+	index, err := loadPingAssignmentIndex()
+	if err != nil {
+		return nil
+	}
+	return cloneAssignedTasks(index.tasksByClient[uuid])
 }
 
 func UpdatePingTaskOrder(order map[uint]int) error {
@@ -121,44 +157,143 @@ func UpdatePingTaskOrder(order map[uint]int) error {
 	if err != nil {
 		return err
 	}
+	historycache.Invalidate()
 	ReloadPingSchedule()
 	return nil
 }
 
 func SavePingRecord(record models.PingRecord) error {
-	db := dbcore.GetDBInstance()
-	return db.Create(&record).Error
+	return SavePingRecords([]models.PingRecord{record})
 }
 
-func DeletePingRecordsBefore(time time.Time) error {
+func SavePingRecords(records []models.PingRecord) error {
+	return savePingRecords(records, nil)
+}
+
+func SavePingRecordsWithCheckpoint(records []models.PingRecord, checkpoint models.PingResultSequence) error {
+	if checkpoint.Client == "" || checkpoint.ThroughSequence == 0 {
+		return errors.New("invalid Ping result checkpoint")
+	}
+	for _, record := range records {
+		if record.Client != checkpoint.Client {
+			return errors.New("Ping checkpoint client does not match record batch")
+		}
+	}
+	return savePingRecords(records, &checkpoint)
+}
+
+func savePingRecords(records []models.PingRecord, checkpoint *models.PingResultSequence) error {
+	if len(records) == 0 || len(records) > 64 {
+		return errors.New("ping record batch must contain 1 to 64 records")
+	}
+	index, err := loadPingAssignmentIndex()
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if _, exists := index.taskIDs[record.TaskId]; !exists {
+			return gorm.ErrRecordNotFound
+		}
+		if _, assigned := index.assignments[pingAssignmentKey{client: record.Client, taskID: record.TaskId}]; !assigned {
+			return ErrPingTaskNotAssigned
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*timepkg.Second)
+	defer cancel()
+	batch := telemetrywriter.Batch{PingRecords: records}
+	if checkpoint != nil {
+		batch.PingSequences = []models.PingResultSequence{*checkpoint}
+	}
+	return telemetrywriter.Submit(ctx, batch)
+}
+
+func DeletePingRecordsBefore(time timepkg.Time) error {
+	return DeletePingRecordsBeforeWithRetention(time, 730)
+}
+
+func DeletePingRecordsBeforeWithRetention(time timepkg.Time, finalRetentionDays int) error {
 	db := dbcore.GetDBInstance()
-	err := db.Where("time < ?", time).Delete(&models.PingRecord{}).Error
+	now := timepkg.Now()
+	if finalRetentionDays <= 0 {
+		finalRetentionDays = 730
+	}
+	finalRetention := timepkg.Duration(finalRetentionDays) * 24 * timepkg.Hour
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("time < ?", time).Delete(&models.PingRecord{}).Error; err != nil {
+			return err
+		}
+		for _, tier := range []struct {
+			resolution int
+			retention  timepkg.Duration
+		}{
+			{60, min(7*24*timepkg.Hour, finalRetention)},
+			{900, min(90*24*timepkg.Hour, finalRetention)},
+			{3600, finalRetention},
+		} {
+			if err := tx.Where("resolution_seconds = ? AND bucket_time < ?", tier.resolution, models.FromTime(now.Add(-tier.retention))).Delete(&models.PingRollup{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		historycache.Invalidate()
+	}
 	return err
 }
 
 func DeletePingRecords(id []uint) error {
 	db := dbcore.GetDBInstance()
-	result := db.Where("task_id IN ?", id).Delete(&models.PingRecord{})
-	if result.RowsAffected == 0 {
+	var affected int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("task_id IN ?", id).Delete(&models.PingRecord{})
+		if result.Error != nil {
+			return result.Error
+		}
+		affected += result.RowsAffected
+		result = tx.Where("task_id IN ?", id).Delete(&models.PingRollup{})
+		if result.Error != nil {
+			return result.Error
+		}
+		affected += result.RowsAffected
+		return nil
+	})
+	if err == nil && affected == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	return result.Error
+	if err == nil {
+		historycache.Invalidate()
+	}
+	return err
 }
 
 func DeleteAllPingRecords() error {
 	db := dbcore.GetDBInstance()
-	result := db.Exec("DELETE FROM ping_records")
-	if result.RowsAffected == 0 {
+	var affected int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for _, table := range []string{"ping_records", "ping_rollups"} {
+			result := tx.Exec("DELETE FROM " + table)
+			if result.Error != nil {
+				return result.Error
+			}
+			affected += result.RowsAffected
+		}
+		return nil
+	})
+	if err == nil && affected == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	return result.Error
+	if err == nil {
+		historycache.Invalidate()
+	}
+	return err
 }
 func ReloadPingSchedule() error {
-	db := dbcore.GetDBInstance()
-	var pingTasks []models.PingTask
-	if err := db.Find(&pingTasks).Error; err != nil {
+	pingTasks, err := GetAllPingTasks()
+	if err != nil {
 		return err
 	}
+	publishPingAssignmentIndex(pingTasks)
 	return utils.ReloadPingSchedule(pingTasks)
 }
 
@@ -195,6 +330,7 @@ func AddDefaultOnClientUUID(uuid string) error {
 		changed = true
 	}
 	if changed {
+		historycache.Invalidate()
 		return ReloadPingSchedule()
 	}
 	return nil
@@ -235,18 +371,73 @@ func MigrateAllClientsExpansion() error {
 	return nil
 }
 
-func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
+func GetPingRecords(uuid string, taskId int, start, end timepkg.Time) ([]models.PingRecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.PingRecord
-	dbQuery := db.Model(&models.PingRecord{})
+	// Old database versions could leave ping_records behind after their
+	// ping_tasks row was removed. An inner join makes those orphaned records
+	// invisible immediately, even before the operator's next retention cleanup.
+	dbQuery := db.Model(&models.PingRecord{}).Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_records.task_id")
 	if uuid != "" {
-		dbQuery = dbQuery.Where("client = ?", uuid)
+		dbQuery = dbQuery.Where("ping_records.client = ?", uuid)
 	}
 	if taskId >= 0 {
-		dbQuery = dbQuery.Where("task_id = ?", uint(taskId))
+		dbQuery = dbQuery.Where("ping_records.task_id = ?", uint(taskId))
 	}
-	if err := dbQuery.Where("time >= ? AND time <= ?", start, end).Order("time DESC").Find(&records).Error; err != nil {
+	if err := dbQuery.Where("ping_records.time >= ? AND ping_records.time <= ?", start, end).Order("ping_records.time DESC").Find(&records).Error; err != nil {
 		return nil, err
 	}
 	return records, nil
+}
+
+// QueryPingRecordsForClients performs one narrow, orphan-safe query for a set
+// of authorized clients. nil means all clients; a non-nil empty slice means no
+// clients. Large sets are filtered after one scan to avoid SQLite bind limits.
+func QueryPingRecordsForClients(ctx context.Context, db *gorm.DB, clientIDs []string, taskID int, start, end timepkg.Time) (PingSetQueryResult, error) {
+	result := PingSetQueryResult{}
+	if db == nil {
+		return result, errors.New("ping database is required")
+	}
+	if ctx == nil {
+		return result, errors.New("ping query context is required")
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return result, errors.New("invalid ping query range")
+	}
+	if clientIDs != nil && len(clientIDs) == 0 {
+		result.Records = []models.PingRecord{}
+		return result, nil
+	}
+	query := db.WithContext(ctx).Model(&models.PingRecord{}).
+		Select("ping_records.client,ping_records.task_id,ping_records.time,ping_records.value").
+		Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_records.task_id").
+		Where("ping_records.time >= ? AND ping_records.time <= ?", models.FromTime(start), models.FromTime(end))
+	filterInSQL := len(clientIDs) > 0 && len(clientIDs) <= maxPingSQLClientFilter
+	if filterInSQL {
+		query = query.Where("ping_records.client IN ?", clientIDs)
+	}
+	if taskID >= 0 {
+		query = query.Where("ping_records.task_id = ?", uint(taskID))
+	}
+	result.SQLQueries = 1
+	if err := query.Order("ping_records.client ASC,ping_records.task_id ASC,ping_records.time DESC").Find(&result.Records).Error; err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if !filterInSQL && len(clientIDs) > 0 {
+		allowed := make(map[string]struct{}, len(clientIDs))
+		for _, clientID := range clientIDs {
+			allowed[clientID] = struct{}{}
+		}
+		filtered := result.Records[:0]
+		for _, record := range result.Records {
+			if _, ok := allowed[record.Client]; ok {
+				filtered = append(filtered, record)
+			}
+		}
+		result.Records = filtered
+	}
+	return result, nil
 }

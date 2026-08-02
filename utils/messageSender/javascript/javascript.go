@@ -1,8 +1,10 @@
 package javascript
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -10,10 +12,13 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
 
+const javascriptExecutionTimeout = 30 * time.Second
+
 type JavaScriptSender struct {
 	Addition
 	vm          *goja.Runtime
 	noopProgram *goja.Program
+	mu          sync.Mutex
 }
 
 func (j *JavaScriptSender) GetName() string {
@@ -25,10 +30,47 @@ func (j *JavaScriptSender) GetConfiguration() factory.Configuration {
 }
 
 func (j *JavaScriptSender) Init() error {
-	return errors.New("JavaScript notification sender is disabled for security reasons")
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.initLocked()
+}
+
+func (j *JavaScriptSender) initLocked() error {
+	if j.Addition.Script == "" {
+		return errors.New("JavaScript script is empty")
+	}
+
+	vm := goja.New()
+	j.vm = vm
+
+	prog, err := goja.Compile("noop.js", "void 0", false)
+	if err == nil {
+		j.noopProgram = prog
+	}
+
+	j.setupGlobals()
+
+	if _, err := j.vm.RunString(j.Addition.Script); err != nil {
+		j.vm = nil
+		return fmt.Errorf("failed to load JavaScript script: %v", err)
+	}
+
+	sendMessage := j.vm.Get("sendMessage")
+	if sendMessage == nil || goja.IsUndefined(sendMessage) {
+		j.vm = nil
+		return errors.New("sendMessage function not defined in script")
+	}
+	if _, ok := goja.AssertFunction(sendMessage); !ok {
+		j.vm = nil
+		return errors.New("sendMessage is not a function")
+	}
+
+	return nil
 }
 
 func (j *JavaScriptSender) Destroy() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	if j.vm != nil {
 		j.vm = nil
 	}
@@ -36,11 +78,112 @@ func (j *JavaScriptSender) Destroy() error {
 }
 
 func (j *JavaScriptSender) SendTextMessage(message, title string) error {
-	return errors.New("JavaScript notification sender is disabled for security reasons")
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	if j.vm == nil {
+		if err := j.initLocked(); err != nil {
+			return err
+		}
+	}
+
+	sendMessageFunc, ok := goja.AssertFunction(j.vm.Get("sendMessage"))
+	if !ok {
+		return errors.New("sendMessage is not a callable function")
+	}
+
+	result, err := j.callJavaScriptLocked(sendMessageFunc, j.vm.ToValue(message), j.vm.ToValue(title))
+	if err != nil {
+		return err
+	}
+	return j.resultToErrorLocked(result, "sendMessage")
 }
 
 func (j *JavaScriptSender) SendEvent(event models.EventMessage) error {
-	return errors.New("JavaScript notification sender is disabled for security reasons")
+	j.mu.Lock()
+
+	if j.vm == nil {
+		if err := j.initLocked(); err != nil {
+			j.mu.Unlock()
+			return err
+		}
+	}
+
+	sendEventValue := j.vm.Get("sendEvent")
+	if sendEventValue == nil || goja.IsUndefined(sendEventValue) {
+		j.mu.Unlock()
+		return j.fallbackToTextMessage(event)
+	}
+
+	sendEventFunc, ok := goja.AssertFunction(sendEventValue)
+	if !ok {
+		j.mu.Unlock()
+		return j.fallbackToTextMessage(event)
+	}
+
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		j.mu.Unlock()
+		return fmt.Errorf("failed to marshal event: %v", err)
+	}
+	var eventMap map[string]interface{}
+	if err := json.Unmarshal(eventJSON, &eventMap); err != nil {
+		j.mu.Unlock()
+		return fmt.Errorf("failed to unmarshal event: %v", err)
+	}
+
+	result, err := j.callJavaScriptLocked(sendEventFunc, j.vm.ToValue(eventMap))
+	if err != nil {
+		j.mu.Unlock()
+		return err
+	}
+	err = j.resultToErrorLocked(result, "sendEvent")
+	j.mu.Unlock()
+	return err
+}
+
+func (j *JavaScriptSender) callJavaScriptLocked(fn goja.Callable, args ...goja.Value) (goja.Value, error) {
+	timer := time.AfterFunc(javascriptExecutionTimeout, func() {
+		j.vm.Interrupt("JavaScript execution timeout")
+	})
+	defer timer.Stop()
+
+	result, err := fn(goja.Undefined(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("JavaScript error: %v", err)
+	}
+	return result, nil
+}
+
+func (j *JavaScriptSender) resultToErrorLocked(result goja.Value, functionName string) error {
+	if result == nil || goja.IsUndefined(result) || goja.IsNull(result) {
+		return errors.New(functionName + " returned empty result")
+	}
+
+	if promise, ok := result.Export().(*goja.Promise); ok {
+		deadline := time.Now().Add(javascriptExecutionTimeout)
+		for {
+			j.runMicrotasks()
+			switch promise.State() {
+			case goja.PromiseStateFulfilled:
+				if promise.Result().ToBoolean() {
+					return nil
+				}
+				return errors.New(functionName + " returned false")
+			case goja.PromiseStateRejected:
+				return fmt.Errorf("Promise rejected: %v", promise.Result())
+			}
+			if time.Now().After(deadline) {
+				return errors.New("JavaScript execution timeout")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if result.ToBoolean() {
+		return nil
+	}
+	return errors.New(functionName + " returned false")
 }
 
 // fallbackToTextMessage 当没有定义 sendEvent 时,回退到使用文本消息格式
@@ -120,14 +263,22 @@ func (j *JavaScriptSender) setupGlobals() {
 	j.vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
 		callback := call.Argument(0)
 		delay := call.Argument(1).ToInteger()
-
-		go func() {
+		if delay < 0 {
+			delay = 0
+		}
+		if delay > 5000 {
+			delay = 5000
+		}
+		if delay > 0 {
 			time.Sleep(time.Duration(delay) * time.Millisecond)
-			if fn, ok := goja.AssertFunction(callback); ok {
-				fn(goja.Undefined())
-			}
-		}()
+		}
+		if fn, ok := goja.AssertFunction(callback); ok {
+			_, _ = fn(goja.Undefined())
+		}
 
+		return goja.Undefined()
+	})
+	j.vm.Set("clearTimeout", func(goja.FunctionCall) goja.Value {
 		return goja.Undefined()
 	})
 

@@ -1,8 +1,10 @@
 package accounts
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,10 +12,12 @@ import (
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 const constantSalt = "06Wm4Jv1Hkxx"
@@ -31,10 +35,14 @@ func hashPasswdBcrypt(passwd string) (string, error) {
 //
 // 如果密码正确，返回用户的 UUID 和 true；否则返回空字符串和 false
 func CheckPassword(username, passwd string) (uuid string, success bool) {
-	db := dbcore.GetDBInstance()
 	var user models.User
-	result := db.Where("username = ?", username).First(&user)
-	if result.Error != nil {
+	if store, ok := storage.Control(); ok {
+		var err error
+		user, err = store.UserByUsername(context.Background(), username)
+		if err != nil {
+			return "", false
+		}
+	} else if err := dbcore.GetDBInstance().Where("username = ?", username).First(&user).Error; err != nil {
 		// 静默处理错误，不显示日志
 		return "", false
 	}
@@ -56,7 +64,14 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 	// 验证成功，在此处平滑迁移旧哈希密码至 Bcrypt 哈希
 	newHash, err := hashPasswdBcrypt(passwd)
 	if err == nil {
-		_ = db.Model(&models.User{}).Where("uuid = ?", user.UUID).Update("passwd", newHash)
+		user.Passwd = newHash
+		user.UpdatedAt = models.FromTime(time.Now())
+		if writer, ok := storage.ExternalControlWriter(); ok {
+			_ = writer.UpsertUserAuth(context.Background(), user)
+		}
+		_ = dbcore.GetDBInstance().Model(&models.User{}).Where("uuid = ?", user.UUID).Updates(map[string]any{
+			"passwd": newHash, "updated_at": user.UpdatedAt,
+		})
 	}
 
 	return user.UUID, true
@@ -69,13 +84,40 @@ func ForceResetPassword(username, passwd string) (err error) {
 	if err != nil {
 		return err
 	}
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashedPassword)
-	if result.Error != nil {
-		return result.Error
+	var authoritative models.User
+	if store, ok := storage.Control(); ok {
+		authoritative, err = store.UserByUsername(context.Background(), username)
+	} else {
+		err = db.Where("username = ?", username).First(&authoritative).Error
 	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("无法找到用户名")
+	if err != nil {
+		return fmt.Errorf("无法找到用户名: %w", err)
 	}
+	authoritative.Passwd = hashedPassword
+	authoritative.UpdatedAt = models.FromTime(time.Now())
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertUserAuth(context.Background(), authoritative); err != nil {
+			return err
+		}
+		if err := writer.DeleteSessionsByUserAuth(context.Background(), authoritative.UUID); err != nil {
+			return err
+		}
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		if err := tx.Select("uuid").Where("uuid = ?", authoritative.UUID).First(&user).Error; err != nil {
+			return fmt.Errorf("无法找到用户名: %w", err)
+		}
+		if err := tx.Model(&models.User{}).Where("uuid = ?", user.UUID).Update("passwd", hashedPassword).Error; err != nil {
+			return err
+		}
+		return tx.Where("uuid = ?", user.UUID).Delete(&models.Session{}).Error
+	})
+	if err != nil {
+		return err
+	}
+	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
@@ -95,9 +137,21 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 		return models.User{}, err
 	}
 	user = models.User{
-		UUID:     uuid.New().String(),
-		Username: username,
-		Passwd:   hashedPassword,
+		UUID:      uuid.New().String(),
+		Username:  username,
+		Passwd:    hashedPassword,
+		CreatedAt: models.FromTime(time.Now()),
+		UpdatedAt: models.FromTime(time.Now()),
+	}
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertUserAuth(context.Background(), user); err != nil {
+			return models.User{}, err
+		}
+		defer func() {
+			if err != nil {
+				_ = writer.DeleteUserAuth(context.Background(), user.UUID)
+			}
+		}()
 	}
 	err = db.Create(&user).Error
 	if err != nil {
@@ -108,10 +162,40 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 
 func DeleteAccountByUsername(username string) (err error) {
 	db := dbcore.GetDBInstance()
-	err = db.Where("username = ?", username).Delete(&models.User{}).Error
+	var authoritative models.User
+	if store, ok := storage.Control(); ok {
+		authoritative, err = store.UserByUsername(context.Background(), username)
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if writer, ok := storage.ExternalControlWriter(); ok && authoritative.UUID != "" {
+		if err := writer.DeleteUserAuth(context.Background(), authoritative.UUID); err != nil {
+			return err
+		}
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var user models.User
+		result := tx.Select("uuid").Where("username = ?", username).First(&user)
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if result.Error != nil {
+			return result.Error
+		}
+		if err := tx.Where("uuid = ?", user.UUID).Delete(&models.Session{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("uuid = ?", user.UUID).Delete(&models.User{}).Error
+	})
 	if err != nil {
 		return err
 	}
+	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
@@ -143,6 +227,16 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 		UpdatedAt: models.FromTime(time.Now()),
 	}
 
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertUserAuth(context.Background(), user); err != nil {
+			return "", "", err
+		}
+		defer func() {
+			if err != nil {
+				_ = writer.DeleteUserAuth(context.Background(), user.UUID)
+			}
+		}()
+	}
 	err = db.Create(&user).Error
 	if err != nil {
 		return "", "", err
@@ -152,6 +246,13 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 }
 
 func GetUserByUUID(uuid string) (user models.User, err error) {
+	if store, ok := storage.Control(); ok {
+		user, err = store.UserByUUID(context.Background(), uuid)
+		if errors.Is(err, storage.ErrNotFound) {
+			err = gorm.ErrRecordNotFound
+		}
+		return user, err
+	}
 	db := dbcore.GetDBInstance()
 	err = db.Where("uuid = ?", uuid).First(&user).Error
 	if err != nil {
@@ -162,6 +263,13 @@ func GetUserByUUID(uuid string) (user models.User, err error) {
 
 // 通过 SSO 信息获取用户
 func GetUserBySSO(ssoID string) (user models.User, err error) {
+	if store, ok := storage.Control(); ok {
+		user, err = store.UserBySSO(context.Background(), ssoID)
+		if errors.Is(err, storage.ErrNotFound) {
+			return models.User{}, fmt.Errorf("用户不存在：%s", ssoID)
+		}
+		return user, err
+	}
 	db := dbcore.GetDBInstance()
 
 	// 首先尝试查找已存在的用户
@@ -175,6 +283,11 @@ func GetUserBySSO(ssoID string) (user models.User, err error) {
 }
 
 func BindingExternalAccount(uuid string, sso_id string) error {
+	if err := updateExternalUserAuth(uuid, false, func(user *models.User) {
+		user.SSOID = sso_id
+	}); err != nil {
+		return err
+	}
 	db := dbcore.GetDBInstance()
 	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", sso_id).Error
 	if err != nil {
@@ -184,6 +297,11 @@ func BindingExternalAccount(uuid string, sso_id string) error {
 }
 
 func UnbindExternalAccount(uuid string) error {
+	if err := updateExternalUserAuth(uuid, false, func(user *models.User) {
+		user.SSOID = ""
+	}); err != nil {
+		return err
+	}
 	db := dbcore.GetDBInstance()
 	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", "").Error
 	if err != nil {
@@ -194,12 +312,6 @@ func UnbindExternalAccount(uuid string) error {
 
 func UpdateUser(uuid string, name, password, sso_type *string) error {
 	db := dbcore.GetDBInstance()
-	// Check if user exists
-	var existingUser models.User
-	result := db.Where("uuid = ?", uuid).First(&existingUser)
-	if result.Error != nil {
-		return fmt.Errorf("user not found: %s", uuid)
-	}
 	updates := make(map[string]interface{})
 	if name != nil {
 		updates["username"] = *name
@@ -215,12 +327,62 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		updates["sso_type"] = *sso_type
 	}
 	updates["updated_at"] = time.Now()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error
+	if err := updateExternalUserAuth(uuid, password != nil, func(user *models.User) {
+		if name != nil {
+			user.Username = *name
+		}
+		if password != nil {
+			user.Passwd = updates["passwd"].(string)
+		}
+		if sso_type != nil {
+			user.SSOType = *sso_type
+		}
+	}); err != nil {
+		return err
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var existingUser models.User
+		if err := tx.Select("uuid").Where("uuid = ?", uuid).First(&existingUser).Error; err != nil {
+			return fmt.Errorf("user not found: %s", uuid)
+		}
+		if err := tx.Model(&models.User{}).Where("uuid = ?", uuid).Updates(updates).Error; err != nil {
+			return err
+		}
+		if password != nil {
+			return tx.Where("uuid = ?", uuid).Delete(&models.Session{}).Error
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 	if password != nil {
-		DeleteAllSessions()
+		clearSessionCredentials()
+		clearDefaultSessionActivity()
+	}
+	return nil
+}
+
+func updateExternalUserAuth(uuid string, revokeSessions bool, mutate func(*models.User)) error {
+	writer, ok := storage.ExternalControlWriter()
+	if !ok {
+		return nil
+	}
+	store, ok := storage.Control()
+	if !ok {
+		return storage.ErrNotConfigured
+	}
+	user, err := store.UserByUUID(context.Background(), uuid)
+	if err != nil {
+		return err
+	}
+	mutate(&user)
+	user.UpdatedAt = models.FromTime(time.Now())
+	if err := writer.UpsertUserAuth(context.Background(), user); err != nil {
+		return err
+	}
+	if revokeSessions {
+		return writer.DeleteSessionsByUserAuth(context.Background(), uuid)
 	}
 	return nil
 }

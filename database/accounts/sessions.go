@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,10 +11,15 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
+	"github.com/komari-monitor/komari/internal/credentialcache"
+	"github.com/komari-monitor/komari/internal/storage"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
+
+var ErrSessionExpired = errors.New("session expired")
 
 // GetAllSessions 获取所有会话
 func GetAllSessions() (sessions []models.Session, err error) {
@@ -29,17 +35,19 @@ func GetAllSessions() (sessions []models.Session, err error) {
 func CreateSession(uuid string, expires int, userAgent, ip, login_method string) (string, error) {
 	db := dbcore.GetDBInstance()
 	session := utils.GenerateRandomString(32)
+	digest := credentialcache.Digest(session)
 
 	sessionRecord := models.Session{
-		UUID:         uuid,
-		Session:      session,
-		Expires:      models.FromTime(time.Now().Add(time.Duration(expires) * time.Second)),
-		UserAgent:    userAgent,
-		Ip:           ip,
-		LoginMethod:  login_method,
-		LatestOnline: models.FromTime(time.Now()),
+		UUID:          uuid,
+		Session:       session,
+		SessionDigest: append([]byte(nil), digest[:]...),
+		Expires:       models.FromTime(time.Now().Add(time.Duration(expires) * time.Second)),
+		UserAgent:     userAgent,
+		Ip:            ip,
+		LoginMethod:   login_method,
+		LatestOnline:  models.FromTime(time.Now()),
 	}
-	go func() {
+	notifyLogin := func() {
 		LoginNotification, _ := config.GetAs[bool](config.LoginNotificationKey, false)
 		if LoginNotification {
 			var ipinfo *geoip.GeoInfo
@@ -58,90 +66,187 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 				Emoji:   "🔑",
 			})
 		}
-	}()
+	}
 
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.UpsertSessionAuth(context.Background(), sessionRecord); err != nil {
+			return "", err
+		}
+	}
 	err := db.Create(&sessionRecord).Error
 	if err != nil {
+		if writer, ok := storage.ExternalControlWriter(); ok {
+			_ = writer.DeleteSessionAuth(context.Background(), sessionRecord.SessionDigest)
+		}
 		return "", err
 	}
+	invalidateSessionCredential(session)
+	go notifyLogin()
 	return session, nil
 }
 
 // GetSession 根据会话 ID 获取 UUID
 func GetSession(session string) (uuid string, err error) {
-	db := dbcore.GetDBInstance()
+	if session == "" {
+		return "", gorm.ErrRecordNotFound
+	}
+	now := time.Now()
+	if entry, ok := cachedSessionCredential(session, now); ok {
+		if !entry.Found {
+			return "", gorm.ErrRecordNotFound
+		}
+		if !entry.CredentialExpiresAt.IsZero() && !now.Before(entry.CredentialExpiresAt) {
+			_ = DeleteSession(session)
+			return "", ErrSessionExpired
+		}
+		return entry.Value.UUID, nil
+	}
+	generation := sessionCredentialGeneration()
+
 	var sessionRecord models.Session
-	err = db.Where("session = ?", session).First(&sessionRecord).Error
+	digest := credentialcache.Digest(session)
+	if store, ok := storage.Control(); ok {
+		sessionRecord, err = store.SessionCredential(context.Background(), session, digest[:])
+		if errors.Is(err, storage.ErrNotFound) {
+			err = gorm.ErrRecordNotFound
+		}
+	} else {
+		db := dbcore.GetDBInstance()
+		err = db.Select("uuid", "expires", "created_at").Where("session_digest = ?", digest[:]).First(&sessionRecord).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Existing databases gain the digest column through AutoMigrate. Lazily
+			// backfill legacy rows on their first successful authentication so active
+			// sessions migrate without storing plaintext in the activity tracker.
+			err = db.Select("uuid", "expires", "created_at").Where("session = ?", session).First(&sessionRecord).Error
+			if err == nil {
+				if updateErr := db.Model(&models.Session{}).Where("session = ?", session).Update("session_digest", digest[:]).Error; updateErr != nil {
+					return "", updateErr
+				}
+			}
+		}
+	}
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			cacheMissingSessionCredential(session, now, generation)
+		}
 		return "", err
 	}
 
-	if time.Now().After(sessionRecord.Expires.ToTime()) {
+	cacheSessionCredential(session, sessionRecord, now, generation)
+	if !now.Before(sessionRecord.Expires.ToTime()) {
 		// 会话已过期，删除它
 		_ = DeleteSession(session)
-		return "", errors.New("session expired")
+		return "", ErrSessionExpired
 	}
 
 	return sessionRecord.UUID, nil
 }
 
 func GetUserBySession(session string) (models.User, error) {
-	db := dbcore.GetDBInstance()
-	var sessionRecord models.Session
-	err := db.Where("session = ?", session).First(&sessionRecord).Error
+	uuid, err := GetSession(session)
 	if err != nil {
 		return models.User{}, err
 	}
-	return GetUserByUUID(sessionRecord.UUID)
+	return GetUserByUUID(uuid)
 }
 
 // DeleteSession 删除指定会话
 func DeleteSession(session string) (err error) {
+	digest := credentialcache.Digest(session)
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteSessionAuth(context.Background(), digest[:]); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
 	result := db.Where("session = ?", session).Delete(&models.Session{})
 	if result.Error != nil {
 		return result.Error
 	}
+	invalidateSessionCredential(session)
+	forgetDefaultSessionActivity(session)
 	return nil
 }
 
 func DeleteAllSessions() error {
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteAllSessionsAuth(context.Background()); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
 	result := db.Where("1 = 1").Delete(&models.Session{})
 	if result.Error != nil {
 		return result.Error
 	}
+	clearSessionCredentials()
+	clearDefaultSessionActivity()
+	return nil
+}
+
+func DeleteSessionsByUUID(uuid string) error {
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteSessionsByUserAuth(context.Background(), uuid); err != nil {
+			return err
+		}
+	}
+	db := dbcore.GetDBInstance()
+	result := db.Where("uuid = ?", uuid).Delete(&models.Session{})
+	if result.Error != nil {
+		return result.Error
+	}
+	// The cache deliberately has no plaintext secondary index. Clearing this
+	// bounded cache makes account-level revocation immediate without retaining
+	// session identifiers or building a high-cardinality UUID index.
+	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }
 
 func UpdateLatestOnline(session string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_online", time.Now()).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.TouchOnline(session, time.Now())
 }
 
 func UpdateLatestUserAgent(session, userAgent string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_user_agent", userAgent).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.TouchUserAgent(session, userAgent, time.Now())
 }
 func UpdateLatestIp(session, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Update("latest_ip", ip).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.TouchIP(session, ip, time.Now())
 }
 
 func UpdateLatest(session, useragent, ip string) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{
-		"latest_online":     time.Now(),
-		"latest_user_agent": useragent,
-		"latest_ip":         ip,
-	}).Error
+	tracker, err := defaultSessionActivity()
+	if err != nil {
+		return err
+	}
+	return tracker.Touch(session, useragent, ip, time.Now())
 }
 
 func RemoveExpiredSessions() error {
+	now := time.Now()
+	if writer, ok := storage.ExternalControlWriter(); ok {
+		if err := writer.DeleteExpiredSessionsAuth(context.Background(), now); err != nil {
+			return err
+		}
+	}
 	db := dbcore.GetDBInstance()
-	result := db.Where("expires < ?", time.Now()).Delete(&models.Session{})
+	result := db.Where("expires < ?", now).Delete(&models.Session{})
 	if result.Error != nil {
 		return result.Error
 	}
+	clearSessionCredentials()
+	clearDefaultSessionActivity()
 	return nil
 }

@@ -2,88 +2,82 @@ name: Development Environment
 
 on:
   push:
-    branches:
-      - dev
+    branches: [dev]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-binaries:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      #- name: Create dummy index.html
-      #  run: |
-      #    mkdir -p public/defaultTheme/dist
-      #    echo "<html><body><h1>This is komari development server.</h1></body></html>" > public/defaultTheme/dist/index.html
+      - name: Load pinned build versions
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' build/versions.env >> "$GITHUB_ENV"
 
-      - name: Clone and build frontend
-        run: |
-          git clone https://github.com/komari-monitor/komari-web web
-          cd web
-          npm install
-          npm run build
-          cd ..
-          mkdir -p public/defaultTheme/dist
-          rm -rf public/defaultTheme/dist/*
-          cp -r web/dist/* public/defaultTheme/dist/
-          cp -f web/komari-theme.json public/defaultTheme/
-          if [ -f web/preview.png ]; then cp -f web/preview.png public/defaultTheme/; fi
-          if [ -f web/perview.png ]; then cp -f web/perview.png public/defaultTheme/; fi
-          # Compatibility: ensure both filenames exist if only one is present
-          if [ -f public/defaultTheme/preview.png ] && [ ! -f public/defaultTheme/perview.png ]; then cp -f public/defaultTheme/preview.png public/defaultTheme/perview.png; fi
-          if [ -f public/defaultTheme/perview.png ] && [ ! -f public/defaultTheme/preview.png ]; then cp -f public/defaultTheme/perview.png public/defaultTheme/preview.png; fi
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build pinned frontend
+        run: ./scripts/build-frontend.sh
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.23"
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
       - name: Build application
         env:
           GOOS: linux
           GOARCH: amd64
-        run: |
-          VERSION_SHA="${{ github.sha }}"
-          go build -ldflags "-X github.com/komari-monitor/komari/utils.CurrentVersion=dev -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_SHA}" -o komari .
+          CGO_ENABLED: 1
+          VERSION: dev
+          VERSION_HASH: ${{ github.sha }}
+          KOMARI_REQUIRE_EXACT_GO: 1
+        run: ./scripts/build-release.sh komari
 
-      - name: Upload binary as artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: komari
           path: komari
+          if-no-files-found: error
 
   deploy-to-production:
     needs: build-binaries
     runs-on: ubuntu-latest
+    environment: production
     env:
       PRODUCTION_SERVER: ${{ vars.PRODUCTION_SERVER }}
     if: github.ref == 'refs/heads/dev'
-
     steps:
       - name: Download binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: komari
 
-      - name: Setup SSH Key
-        uses: webfactory/ssh-agent@v0.8.0
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@d4b9b8ff72958532804b70bbe600ad43b36d5f2e # v0.8.0
         with:
           ssh-private-key: ${{ secrets.PRODUCTION_SSH_KEY }}
 
       - name: Add host to known hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ env.PRODUCTION_SERVER }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "${PRODUCTION_SERVER}" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy to production
         run: |
           chmod +x komari
-          ssh root@${{ env.PRODUCTION_SERVER }} 'mkdir -p /opt/komari/'
-          ssh root@${{ env.PRODUCTION_SERVER }} 'systemctl stop komari.service || true'
-          ssh root@${{ env.PRODUCTION_SERVER }} 'rm -f /opt/komari/komari.old'
-          ssh root@${{ env.PRODUCTION_SERVER }} 'mv /opt/komari/komari /opt/komari/komari.old || true'
-          scp komari root@${{ env.PRODUCTION_SERVER }}:/opt/komari/komari
-          ssh root@${{ env.PRODUCTION_SERVER }} 'systemctl start komari.service'
+          ssh "root@${PRODUCTION_SERVER}" 'mkdir -p /opt/komari/'
+          ssh "root@${PRODUCTION_SERVER}" 'systemctl stop komari.service || true'
+          ssh "root@${PRODUCTION_SERVER}" 'rm -f /opt/komari/komari.old'
+          ssh "root@${PRODUCTION_SERVER}" 'mv /opt/komari/komari /opt/komari/komari.old || true'
+          scp komari "root@${PRODUCTION_SERVER}:/opt/komari/komari"
+          ssh "root@${PRODUCTION_SERVER}" 'systemctl start komari.service'

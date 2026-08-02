@@ -1,0 +1,376 @@
+package tasks
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/gorm"
+)
+
+func TestMain(m *testing.M) {
+	tempDir, err := os.MkdirTemp("", "komari-ping-task-tests-*")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	flags.DatabaseType = "sqlite"
+	flags.DatabaseFile = filepath.Join(tempDir, "ping-tasks.db")
+	os.Exit(m.Run())
+}
+
+func resetPingTaskData(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := dbcore.GetDBInstance()
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.PingRollup{}).Error; err != nil {
+		t.Fatalf("clear ping rollups: %v", err)
+	}
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.MetricMigrationState{}).Error; err != nil {
+		t.Fatalf("clear Ping migration state: %v", err)
+	}
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.PingRecord{}).Error; err != nil {
+		t.Fatalf("clear ping records: %v", err)
+	}
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.PingTask{}).Error; err != nil {
+		t.Fatalf("clear ping tasks: %v", err)
+	}
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.Client{}).Error; err != nil {
+		t.Fatalf("clear clients: %v", err)
+	}
+	publishPingAssignmentIndex(nil)
+	return db
+}
+
+func createPingTask(t *testing.T, db *gorm.DB, client string) models.PingTask {
+	t.Helper()
+	if err := db.Create(&models.Client{
+		UUID:  client,
+		Token: "ping-test-token-" + client,
+		Name:  client,
+	}).Error; err != nil {
+		t.Fatalf("create ping client: %v", err)
+	}
+	task := models.PingTask{
+		Name:     "Delete lifecycle test",
+		Clients:  models.StringArray{client},
+		Type:     "icmp",
+		Target:   "1.1.1.1",
+		Interval: 60,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatalf("create ping task: %v", err)
+	}
+	var allTasks []models.PingTask
+	if err := db.Order("weight ASC").Order("id ASC").Find(&allTasks).Error; err != nil {
+		t.Fatalf("load Ping assignment fixture: %v", err)
+	}
+	publishPingAssignmentIndex(allTasks)
+	return task
+}
+
+func markPingRollupsReady(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Save(&models.MetricMigrationState{
+		ID: 1, Status: "completed", TotalMetrics: 1, MetricsDone: 1,
+	}).Error; err != nil {
+		t.Fatalf("mark Ping rollups ready: %v", err)
+	}
+}
+
+func TestPingAssignmentIndexIsImmutableAndNormalized(t *testing.T) {
+	task := models.PingTask{
+		Id: 7, Name: "indexed", Clients: models.StringArray{"node-a", "node-a", "", "node-b"},
+		Type: "icmp", Target: "1.1.1.1", Interval: 30,
+	}
+	index := publishPingAssignmentIndex([]models.PingTask{task})
+	task.Name = "mutated source"
+	task.Clients[0] = "mutated-source"
+
+	if len(index.assignments) != 2 || len(index.tasksByClient["node-a"]) != 1 {
+		t.Fatalf("normalized index = %+v", index)
+	}
+	first := GetPingTasksByClient("node-a")
+	if len(first) != 1 || first[0].Name != "indexed" {
+		t.Fatalf("indexed tasks = %+v", first)
+	}
+	first[0].Name = "mutated reader"
+	first[0].Clients[0] = "mutated-reader"
+	second := GetPingTasksByClient("node-a")
+	if len(second) != 1 || second[0].Name != "indexed" || second[0].Clients[0] != "node-a" {
+		t.Fatalf("reader mutated immutable index: %+v", second)
+	}
+	if index.generation == 0 {
+		t.Fatal("assignment generation was not published")
+	}
+}
+
+func TestDeletePingTaskRemovesRecordsAndRejectsLateResults(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-delete-client"
+	task := createPingTask(t, db, client)
+	record := models.PingRecord{
+		Client: client,
+		TaskId: task.Id,
+		Time:   models.FromTime(time.Now()),
+		Value:  42,
+	}
+	if err := db.Create(&record).Error; err != nil {
+		t.Fatalf("create ping record: %v", err)
+	}
+
+	if err := DeletePingTask([]uint{task.Id}); err != nil {
+		t.Fatalf("delete ping task: %v", err)
+	}
+
+	var recordCount int64
+	if err := db.Model(&models.PingRecord{}).Where("task_id = ?", task.Id).Count(&recordCount).Error; err != nil {
+		t.Fatalf("count deleted task records: %v", err)
+	}
+	if recordCount != 0 {
+		t.Fatalf("deleted task records = %d, want 0", recordCount)
+	}
+
+	err := SavePingRecord(record)
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("late ping result error = %v, want record-not-found", err)
+	}
+}
+
+func TestGetPingRecordsExcludesLegacyOrphans(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-orphan-client"
+	activeTask := createPingTask(t, db, client)
+	now := time.Now()
+	activeRecord := models.PingRecord{Client: client, TaskId: activeTask.Id, Time: models.FromTime(now), Value: 20}
+	if err := db.Create(&activeRecord).Error; err != nil {
+		t.Fatalf("create active ping record: %v", err)
+	}
+
+	// This models records left by versions that deleted the task row without
+	// cascading to ping_records. A pinned connection temporarily disables the
+	// newly enforced foreign-key check solely to reproduce that legacy state.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get SQL database: %v", err)
+	}
+	connection, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("get SQL connection: %v", err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(context.Background(), "PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys for legacy fixture: %v", err)
+	}
+	defer connection.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+	if _, err := connection.ExecContext(
+		context.Background(),
+		"INSERT INTO ping_records (client, task_id, time, value) VALUES (?, ?, ?, ?)",
+		client,
+		999_999,
+		models.FromTime(now),
+		80,
+	); err != nil {
+		t.Fatalf("create legacy orphan ping record: %v", err)
+	}
+	if _, err := connection.ExecContext(context.Background(), "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("restore foreign keys after legacy fixture: %v", err)
+	}
+
+	records, err := GetPingRecords(client, -1, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("get ping records: %v", err)
+	}
+	if len(records) != 1 || records[0].TaskId != activeTask.Id {
+		t.Fatalf("visible ping records = %+v, want only active task %d", records, activeTask.Id)
+	}
+}
+
+func TestSavePingRecordUsesValidatedWriter(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-writer-client"
+	task := createPingTask(t, db, client)
+	record := models.PingRecord{Client: client, TaskId: task.Id, Time: models.FromTime(time.Now()), Value: 25}
+	if err := SavePingRecord(record); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&models.PingRecord{}).Where("client = ? AND task_id = ?", client, task.Id).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("ping records = %d, want 1", count)
+	}
+
+	record.Client = "not-assigned"
+	if err := SavePingRecord(record); !errors.Is(err, ErrPingTaskNotAssigned) {
+		t.Fatalf("unassigned ping result error = %v", err)
+	}
+}
+
+func TestDeletePingRecordsBeforeAppliesTieredRetention(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-retention-client"
+	task := createPingTask(t, db, client)
+	now := time.Now().UTC()
+	rollups := []models.PingRollup{
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 60, BucketTime: models.FromTime(now.Add(-8 * 24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 900, BucketTime: models.FromTime(now.Add(-91 * 24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-731 * 24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+		{Client: client, TaskId: task.Id, ResolutionSeconds: 3600, BucketTime: models.FromTime(now.Add(-24 * time.Hour)), SampleCount: 1, ValidCount: 1, SumValue: 1, MinValue: 1, MaxValue: 1, LastValue: 1, LastTime: models.FromTime(now)},
+	}
+	if err := db.Create(&rollups).Error; err != nil {
+		t.Fatal(err)
+	}
+	markPingRollupsReady(t, db)
+	if err := DeletePingRecordsBefore(now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int64
+	if err := db.Model(&models.PingRollup{}).Count(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("retained Ping rollups = %d, want 1", remaining)
+	}
+}
+
+func TestQueryPingRecordsForClientsUsesOneNarrowAuthorizedQuery(t *testing.T) {
+	db := resetPingTaskData(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	taskA := createPingTask(t, db, "ping-set-a")
+	taskB := createPingTask(t, db, "ping-set-b")
+	rows := []models.PingRecord{
+		{Client: "ping-set-a", TaskId: taskA.Id, Time: models.FromTime(now.Add(-2 * time.Minute)), Value: 10},
+		{Client: "ping-set-a", TaskId: taskA.Id, Time: models.FromTime(now.Add(-time.Minute)), Value: 20},
+		{Client: "ping-set-b", TaskId: taskB.Id, Time: models.FromTime(now.Add(-time.Minute)), Value: 999},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := QueryPingRecordsForClients(context.Background(), db, []string{"ping-set-a"}, -1, now.Add(-time.Hour), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SQLQueries != 1 || len(result.Records) != 2 {
+		t.Fatalf("records=%+v queries=%d, want 2/1", result.Records, result.SQLQueries)
+	}
+	for _, record := range result.Records {
+		if record.Client != "ping-set-a" || record.TaskId != taskA.Id {
+			t.Fatalf("unauthorized or wrong-task record leaked: %+v", record)
+		}
+	}
+
+	empty, err := QueryPingRecordsForClients(context.Background(), db, []string{}, -1, now.Add(-time.Hour), now)
+	if err != nil || empty.SQLQueries != 0 || len(empty.Records) != 0 {
+		t.Fatalf("empty authorized query=%+v err=%v", empty, err)
+	}
+}
+
+func TestQueryPingSeriesSelectsTierBeforeScanning(t *testing.T) {
+	db := resetPingTaskData(t)
+	client := "ping-budget-client"
+	task := createPingTask(t, db, client)
+	if err := db.Model(&models.PingTask{}).Where("id = ?", task.Id).Update("interval", 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	task.Interval = 1
+	publishPingAssignmentIndex([]models.PingTask{task})
+	now := time.Now().UTC().Truncate(time.Minute)
+	raw := make([]models.PingRecord, 500)
+	for index := range raw {
+		raw[index] = models.PingRecord{
+			Client: client, TaskId: task.Id,
+			Time: models.FromTime(now.Add(-time.Duration(index) * time.Second)), Value: 10 + index%5,
+		}
+	}
+	if err := db.CreateInBatches(raw, 100).Error; err != nil {
+		t.Fatal(err)
+	}
+	rollups := make([]models.PingRollup, 10)
+	for index := range rollups {
+		rollups[index] = models.PingRollup{
+			Client: client, TaskId: task.Id, ResolutionSeconds: 60,
+			BucketTime:  models.FromTime(now.Add(-time.Duration(index) * time.Minute)),
+			SampleCount: 60, ValidCount: 60, SumValue: 720,
+			MinValue: 10, MaxValue: 14, LastValue: 12, LastTime: models.FromTime(now),
+		}
+	}
+	if err := db.Create(&rollups).Error; err != nil {
+		t.Fatal(err)
+	}
+	markPingRollupsReady(t, db)
+
+	ctx := context.Background()
+	coarse, err := QueryPingSeries(ctx, db, PingQuery{
+		Client: client, TaskID: int(task.Id), Start: now.Add(-10 * time.Minute), End: now.Add(time.Second), MaxPoints: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coarse.ResolutionSeconds != 60 || len(coarse.Records) != 10 || coarse.RowsScanned > 21 {
+		t.Fatalf("coarse query = %+v", coarse)
+	}
+	if coarse.SampleCounts[0] != 60 || coarse.Records[0].Value != 12 {
+		t.Fatalf("coarse weighted point = %+v samples=%v", coarse.Records[0], coarse.SampleCounts)
+	}
+
+	rawResult, err := QueryPingSeries(ctx, db, PingQuery{
+		Client: client, TaskID: int(task.Id), Start: now.Add(-10 * time.Minute), End: now.Add(time.Second), MaxPoints: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawResult.ResolutionSeconds != 0 || len(rawResult.Records) != 500 || rawResult.RowsScanned > 1001 {
+		t.Fatalf("raw query resolution=%d rows=%d scanned=%d", rawResult.ResolutionSeconds, len(rawResult.Records), rawResult.RowsScanned)
+	}
+}
+
+func TestQueryPingSeriesFiltersClientSetBeforeLimit(t *testing.T) {
+	db := resetPingTaskData(t)
+	taskA := createPingTask(t, db, "ping-series-a")
+	if err := db.Create(&[]models.Client{
+		{UUID: "ping-series-b", Token: "ping-series-b-token"},
+		{UUID: "ping-series-hidden", Token: "ping-series-hidden-token", Hidden: true},
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.PingTask{}).Where("id = ?", taskA.Id).
+		Update("clients", models.StringArray{"ping-series-a", "ping-series-b", "ping-series-hidden"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	taskA.Clients = models.StringArray{"ping-series-a", "ping-series-b", "ping-series-hidden"}
+	publishPingAssignmentIndex([]models.PingTask{taskA})
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []models.PingRecord{
+		{Client: "ping-series-a", TaskId: taskA.Id, Time: models.FromTime(now.Add(-3 * time.Minute)), Value: 10},
+		{Client: "ping-series-b", TaskId: taskA.Id, Time: models.FromTime(now.Add(-2 * time.Minute)), Value: 20},
+		{Client: "ping-series-hidden", TaskId: taskA.Id, Time: models.FromTime(now.Add(-time.Minute)), Value: 99},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, err := QueryPingSeries(context.Background(), db, PingQuery{
+		Clients: []string{"ping-series-a", "ping-series-b"}, TaskID: -1,
+		Start: now.Add(-time.Hour), End: now.Add(time.Second), MaxPoints: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Records) != 2 || got.Records[0].Client == "ping-series-hidden" || got.Records[1].Client == "ping-series-hidden" {
+		t.Fatalf("selected ping rows=%+v", got.Records)
+	}
+	empty, err := QueryPingSeries(context.Background(), db, PingQuery{
+		Clients: []string{}, TaskID: -1, Start: now.Add(-time.Hour), End: now, MaxPoints: 10,
+	})
+	if err != nil || len(empty.Records) != 0 || empty.RowsScanned != 0 {
+		t.Fatalf("empty ping client set=%+v err=%v", empty, err)
+	}
+}

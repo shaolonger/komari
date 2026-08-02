@@ -33,6 +33,8 @@ type Legacy struct {
 	NotificationEnabled        bool    `json:"notification_enabled" default:"true"` // 通知总开关
 	NotificationMethod         string  `json:"notification_method" default:"none"`
 	NotificationTemplate       string  `json:"notification_template" default:"{{emoji}}{{emoji}}{{emoji}}\nEvent: {{event}}\nClients: {{client}}\nMessage: {{message}}\nTime: {{time}}"`
+	NotificationTimezone       string  `json:"notification_timezone" default:"UTC"`
+	NotificationReportSendHour int     `json:"notification_report_send_hour" default:"9"`
 	ExpireNotificationEnabled  bool    `json:"expire_notification_enabled" default:"true"` // 是否启用过期通知
 	ExpireNotificationLeadDays int     `json:"expire_notification_lead_days" default:"7"`  // 过期前多少天通知，默认7天
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
@@ -69,6 +71,8 @@ const (
 	NotificationEnabledKey        = "notification_enabled"
 	NotificationMethodKey         = "notification_method"
 	NotificationTemplateKey       = "notification_template"
+	NotificationTimezoneKey       = "notification_timezone"
+	NotificationReportSendHourKey = "notification_report_send_hour"
 	ExpireNotificationEnabledKey  = "expire_notification_enabled"
 	ExpireNotificationLeadDaysKey = "expire_notification_lead_days"
 	LoginNotificationKey          = "login_notification"
