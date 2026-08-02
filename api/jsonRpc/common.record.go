@@ -263,23 +263,18 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
 		}
 		recs := pingQuery.Records
-		// hidden filter
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if r.Client != "" && hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			recs = filtered
-		}
-
 		type RecordsResp struct {
-			TaskId uint             `json:"task_id,omitempty"`
-			Time   models.LocalTime `json:"time"`
-			Value  int              `json:"value"`
-			Client string           `json:"client,omitempty"`
+			TaskId      uint             `json:"task_id,omitempty"`
+			Time        models.LocalTime `json:"time"`
+			Value       int              `json:"value"`
+			Client      string           `json:"client,omitempty"`
+			SampleCount int64            `json:"sample_count,omitempty"`
+			ValidCount  int64            `json:"valid_count,omitempty"`
+			LossCount   int64            `json:"loss_count,omitempty"`
+			MinValue    int              `json:"min_value,omitempty"`
+			MaxValue    int              `json:"max_value,omitempty"`
+			LastValue   int              `json:"last_value"`
+			LastTime    models.LocalTime `json:"last_time"`
 		}
 		type ClientBasicInfo struct {
 			Client string  `json:"client"`
@@ -301,29 +296,34 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 
 		// stats per client
 		clientStats := make(map[string]struct {
-			total int
-			loss  int
+			total int64
+			loss  int64
 			min   int
 			max   int
 		})
 
-		for _, r := range recs {
+		for position, r := range recs {
+			if !isAdmin && r.Client != "" && hidden[r.Client] {
+				continue
+			}
 			rr := RecordsResp{
-				TaskId: r.TaskId,
-				Time:   r.Time,
-				Value:  r.Value,
-				Client: r.Client,
+				TaskId:      r.TaskId,
+				Time:        r.Time,
+				Value:       r.Value,
+				Client:      r.Client,
+				SampleCount: pingQuery.SampleCounts[position], ValidCount: pingQuery.ValidCounts[position], LossCount: pingQuery.LossCounts[position],
+				MinValue: pingQuery.MinValues[position], MaxValue: pingQuery.MaxValues[position],
+				LastValue: pingQuery.LastValues[position], LastTime: pingQuery.LastTimes[position],
 			}
 			st := clientStats[r.Client]
-			st.total++
-			if r.Value < 0 {
-				st.loss++
-			} else {
-				if st.min == 0 || r.Value < st.min {
-					st.min = r.Value
+			st.total += pingQuery.SampleCounts[position]
+			st.loss += pingQuery.LossCounts[position]
+			if pingQuery.ValidCounts[position] > 0 {
+				if st.min == 0 || pingQuery.MinValues[position] < st.min {
+					st.min = pingQuery.MinValues[position]
 				}
-				if r.Value > st.max {
-					st.max = r.Value
+				if pingQuery.MaxValues[position] > st.max {
+					st.max = pingQuery.MaxValues[position]
 				}
 			}
 			clientStats[r.Client] = st
@@ -364,42 +364,45 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 					continue
 				}
 			}
-			total := 0
-			lossCount := 0
+			total := int64(0)
+			lossCount := int64(0)
 			minLat := 0
 			maxLat := 0
-			sum := 0
-			valid := 0
+			sum := int64(0)
+			valid := int64(0)
 			latestVal := -1
 			var latestTs time.Time
-			// 收集该任务的所有有效(非丢包)延迟值以计算百分位
-			latencies := make([]int, 0, 64)
-			for _, r := range recs {
+			// Rollup rows carry exact counts/sums/extrema. Percentiles use the
+			// bucket average weighted by its valid sample count; raw rows have a
+			// weight of one and therefore preserve the legacy exact calculation.
+			latencies := make([]weightedPingValue, 0, 64)
+			for position, r := range recs {
 				if r.TaskId != t.Id {
 					continue
 				}
 				if params.UUID != "" && r.Client != params.UUID {
 					continue
 				}
-				total++
-				if r.Value < 0 { // 丢包
-					lossCount++
+				sampleCount := pingQuery.SampleCounts[position]
+				validCount := pingQuery.ValidCounts[position]
+				total += sampleCount
+				lossCount += pingQuery.LossCounts[position]
+				if validCount == 0 {
 					continue
 				}
-				valid++
-				sum += r.Value
-				latencies = append(latencies, r.Value)
-				if minLat == 0 || r.Value < minLat {
-					minLat = r.Value
+				valid += validCount
+				sum += pingQuery.SumValues[position]
+				latencies = append(latencies, weightedPingValue{value: r.Value, weight: validCount})
+				if minLat == 0 || pingQuery.MinValues[position] < minLat {
+					minLat = pingQuery.MinValues[position]
 				}
-				if r.Value > maxLat {
-					maxLat = r.Value
+				if pingQuery.MaxValues[position] > maxLat {
+					maxLat = pingQuery.MaxValues[position]
 				}
-				// track latest non-negative value
-				ts := r.Time.ToTime()
-				if latestTs.IsZero() || ts.After(latestTs) {
+				ts := pingQuery.LastTimes[position].ToTime()
+				if pingQuery.LastValues[position] >= 0 && (latestTs.IsZero() || ts.After(latestTs)) {
 					latestTs = ts
-					latestVal = r.Value
+					latestVal = pingQuery.LastValues[position]
 				}
 			}
 
@@ -407,29 +410,8 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 			p50 := 0
 			p99 := 0
 			if len(latencies) > 0 {
-				sort.Ints(latencies)
-				getPercentileInt := func(values []int, percentile float64) int {
-					if len(values) == 0 {
-						return 0
-					}
-					if percentile <= 0 {
-						return values[0]
-					}
-					if percentile >= 1 {
-						return values[len(values)-1]
-					}
-					pos := (float64(len(values) - 1)) * percentile
-					lo := int(math.Floor(pos))
-					hi := int(math.Ceil(pos))
-					if lo == hi {
-						return values[lo]
-					}
-					frac := pos - float64(lo)
-					v := float64(values[lo]) + (float64(values[hi])-float64(values[lo]))*frac
-					return int(math.Round(v))
-				}
-				p50 = getPercentileInt(latencies, 0.50)
-				p99 = getPercentileInt(latencies, 0.99)
+				p50 = weightedPercentile(latencies, 0.50)
+				p99 = weightedPercentile(latencies, 0.99)
 			}
 			ratio := 0.0
 			if p50 > 0 && p99 >= p50 {
@@ -443,7 +425,7 @@ func getRecordsUncached(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc
 			}
 			avg := 0
 			if valid > 0 {
-				avg = sum / valid
+				avg = int(sum / valid)
 			}
 			info := map[string]any{
 				"id":            t.Id,

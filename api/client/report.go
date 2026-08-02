@@ -259,9 +259,9 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 				_ = conn.WriteJSON(gin.H{"status": "error", "error": "Invalid telemetry v3 frame"})
 				return
 			}
-			acceptance, err := acceptTelemetryV3(context.Background(), dbcore.GetDBInstance(), uuid, frame, report, SaveClientReport)
+			acceptance, err := acceptTelemetryV3(context.Background(), dbcore.GetDBInstance(), uuid, frame, report, SaveClientReportV3)
 			if errors.Is(err, ErrTelemetrySequenceGap) {
-				_ = conn.WriteJSON(gin.H{"type": "telemetry_nack", "expected": acceptance.Through + 1})
+				_ = conn.WriteJSON(gin.H{"type": "telemetry_nack", "expected": acceptance.Expected})
 				return
 			}
 			if err != nil {
@@ -332,7 +332,7 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 			accepted = true
 		}
 	case "ping_result_batch":
-		acceptance, err := acceptPingResultBatch(context.Background(), dbcore.GetDBInstance(), uuid, decoded.BatchSequence, decoded.PingResults, tasks.SavePingRecords)
+		acceptance, err := acceptPingResultBatch(context.Background(), dbcore.GetDBInstance(), uuid, decoded.BatchSequence, decoded.PingResults, tasks.SavePingRecordsWithCheckpoint)
 		if errors.Is(err, ErrTelemetrySequenceGap) {
 			_ = conn.WriteJSON(gin.H{"type": "ping_result_nack", "expected": acceptance.Through + 1})
 			return
@@ -373,4 +373,21 @@ func SaveClientReport(uuid string, report common.Report) error {
 		report.CPU.Usage = 0.01
 	}
 	return api.Telemetry.Add(uuid, report)
+}
+
+func SaveClientReportV3(uuid string, report common.Report, frame telemetryv3.Frame) error {
+	if report.CPU.Usage < 0.01 {
+		report.CPU.Usage = 0.01
+	}
+	err := api.Telemetry.AddV3(uuid, report, frame.Envelope, frame.Sequence)
+	if !errors.Is(err, telemetry.ErrWindowBacklog) {
+		return err
+	}
+	// A reconnect may replay many historical minute windows faster than the
+	// periodic flusher. Commit the bounded chunk and retry the exact frame; the
+	// sequence checkpoint is part of that same database transaction.
+	if err := api.SaveClientReportToDB(); err != nil {
+		return err
+	}
+	return api.Telemetry.AddV3(uuid, report, frame.Envelope, frame.Sequence)
 }

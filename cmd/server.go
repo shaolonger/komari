@@ -479,7 +479,7 @@ func DoScheduledWork() {
 }
 
 func DoScheduledWorkContext(ctx context.Context) {
-	metrics.ResumeMigration(dbcore.GetDBInstance())
+	metrics.EnsureMigration(dbcore.GetDBInstance())
 	if err := tasks.MigrateAllClientsExpansion(); err != nil {
 		log.Println("Failed to migrate ping task all_clients expansion:", err)
 	}
@@ -516,9 +516,22 @@ func DoScheduledWorkContext(ctx context.Context) {
 			}
 		case <-retentionTicker.C:
 			cfg, _ := config.GetManyAs[config.Legacy]()
-			records.DeleteRecordBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			tasks.ClearTaskResultsByTimeBefore(time.Now().Add(-time.Hour * time.Duration(cfg.RecordPreserveTime)))
-			tasks.DeletePingRecordsBefore(time.Now().Add(-time.Hour * time.Duration(cfg.PingRecordPreserveTime)))
+			recordRetention := time.Hour * time.Duration(cfg.RecordPreserveTime)
+			pingFinalRetentionDays := 730
+			if plan, planErr := metrics.LoadRetentionPlan(ctx, dbcore.GetDBInstance()); planErr != nil {
+				log.Printf("Failed to load metric retention plan: %v", planErr)
+			} else {
+				if plan.RecordOverridden {
+					recordRetention = time.Duration(plan.RecordDays) * 24 * time.Hour
+				}
+				if plan.PingOverridden {
+					pingFinalRetentionDays = plan.PingDays
+				}
+			}
+			recordCutoff := time.Now().Add(-recordRetention)
+			records.DeleteRecordBefore(recordCutoff)
+			tasks.ClearTaskResultsByTimeBefore(recordCutoff)
+			tasks.DeletePingRecordsBeforeWithRetention(time.Now().Add(-time.Hour*time.Duration(cfg.PingRecordPreserveTime)), pingFinalRetentionDays)
 			auditlog.RemoveOldLogs()
 			accounts.RemoveExpiredSessions()
 		case <-minute.C:

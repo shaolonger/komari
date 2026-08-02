@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/komari-monitor/komari/database/metrics"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
 )
@@ -29,6 +30,8 @@ type PingQueryResult struct {
 	SumValues         []int64
 	MinValues         []int
 	MaxValues         []int
+	LastValues        []int
+	LastTimes         []models.LocalTime
 	ResolutionSeconds int
 	RowsScanned       int
 	Truncated         bool
@@ -127,11 +130,15 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 		return result, err
 	}
 	result.ResolutionSeconds = choosePingResolution(index, query)
+	if result.ResolutionSeconds > 0 && !metrics.RollupsReady(ctx, db) {
+		result.ResolutionSeconds = 0
+	}
 	limit := query.MaxPoints + 1
+	seriesCount := max(len(pingSeriesIntervals(index, query)), 1)
+	perSeriesLimit := max(query.MaxPoints/seriesCount, 1)
 
 	if result.ResolutionSeconds == 0 {
 		request := db.WithContext(ctx).Model(&models.PingRecord{}).
-			Select("ping_records.client,ping_records.task_id,ping_records.time,ping_records.value").
 			Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_records.task_id").
 			Where("ping_records.time >= ? AND ping_records.time <= ?", models.FromTime(query.Start), models.FromTime(query.End))
 		if query.Client != "" {
@@ -142,8 +149,21 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 		if query.TaskID >= 0 {
 			request = request.Where("ping_records.task_id = ?", uint(query.TaskID))
 		}
-		if err := request.Order("ping_records.time DESC").Limit(limit).Find(&result.Records).Error; err != nil {
+		type rankedPingRecord struct {
+			models.PingRecord
+			SeriesRow int `gorm:"column:series_row"`
+		}
+		ranked := request.Select("ping_records.client,ping_records.task_id,ping_records.time,ping_records.value,ROW_NUMBER() OVER (PARTITION BY ping_records.client,ping_records.task_id ORDER BY ping_records.time DESC) AS series_row")
+		var rows []rankedPingRecord
+		if err := db.WithContext(ctx).Table("(?) AS ranked", ranked).
+			Select("client,task_id,time,value,series_row").
+			Where("series_row <= ?", perSeriesLimit).
+			Order("time DESC,client ASC,task_id ASC").Limit(limit).Scan(&rows).Error; err != nil {
 			return result, err
+		}
+		result.Records = make([]models.PingRecord, 0, len(rows))
+		for _, row := range rows {
+			result.Records = append(result.Records, row.PingRecord)
 		}
 		for _, record := range result.Records {
 			result.SampleCounts = append(result.SampleCounts, 1)
@@ -153,12 +173,16 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 				result.MinValues = append(result.MinValues, 0)
 				result.MaxValues = append(result.MaxValues, 0)
 				result.SumValues = append(result.SumValues, 0)
+				result.LastValues = append(result.LastValues, record.Value)
+				result.LastTimes = append(result.LastTimes, record.Time)
 			} else {
 				result.ValidCounts = append(result.ValidCounts, 1)
 				result.LossCounts = append(result.LossCounts, 0)
 				result.MinValues = append(result.MinValues, record.Value)
 				result.MaxValues = append(result.MaxValues, record.Value)
 				result.SumValues = append(result.SumValues, int64(record.Value))
+				result.LastValues = append(result.LastValues, record.Value)
+				result.LastTimes = append(result.LastTimes, record.Time)
 			}
 		}
 	} else {
@@ -172,10 +196,12 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 			SumValue    int64
 			MinValue    int
 			MaxValue    int
+			LastValue   int
+			LastTime    models.LocalTime
+			SeriesRow   int
 		}
 		var rows []rollupProjection
 		request := db.WithContext(ctx).Model(&models.PingRollup{}).
-			Select("ping_rollups.client,ping_rollups.task_id,ping_rollups.bucket_time,ping_rollups.sample_count,ping_rollups.valid_count,ping_rollups.loss_count,ping_rollups.sum_value,ping_rollups.min_value,ping_rollups.max_value").
 			Joins("INNER JOIN ping_tasks ON ping_tasks.id = ping_rollups.task_id").
 			Where("ping_rollups.resolution_seconds = ? AND ping_rollups.bucket_time >= ? AND ping_rollups.bucket_time <= ?", result.ResolutionSeconds, models.FromTime(query.Start), models.FromTime(query.End))
 		if query.Client != "" {
@@ -186,7 +212,11 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 		if query.TaskID >= 0 {
 			request = request.Where("ping_rollups.task_id = ?", uint(query.TaskID))
 		}
-		if err := request.Order("ping_rollups.bucket_time DESC").Limit(limit).Scan(&rows).Error; err != nil {
+		ranked := request.Select("ping_rollups.client,ping_rollups.task_id,ping_rollups.bucket_time,ping_rollups.sample_count,ping_rollups.valid_count,ping_rollups.loss_count,ping_rollups.sum_value,ping_rollups.min_value,ping_rollups.max_value,ping_rollups.last_value,ping_rollups.last_time,ROW_NUMBER() OVER (PARTITION BY ping_rollups.client,ping_rollups.task_id ORDER BY ping_rollups.bucket_time DESC) AS series_row")
+		if err := db.WithContext(ctx).Table("(?) AS ranked", ranked).
+			Select("client,task_id,bucket_time,sample_count,valid_count,loss_count,sum_value,min_value,max_value,last_value,last_time,series_row").
+			Where("series_row <= ?", perSeriesLimit).
+			Order("bucket_time DESC,client ASC,task_id ASC").Limit(limit).Scan(&rows).Error; err != nil {
 			return result, err
 		}
 		result.Records = make([]models.PingRecord, 0, len(rows))
@@ -202,6 +232,8 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 			result.SumValues = append(result.SumValues, row.SumValue)
 			result.MinValues = append(result.MinValues, row.MinValue)
 			result.MaxValues = append(result.MaxValues, row.MaxValue)
+			result.LastValues = append(result.LastValues, row.LastValue)
+			result.LastTimes = append(result.LastTimes, row.LastTime)
 		}
 	}
 
@@ -215,6 +247,8 @@ func QueryPingSeries(ctx context.Context, db *gorm.DB, query PingQuery) (PingQue
 		result.SumValues = result.SumValues[:query.MaxPoints]
 		result.MinValues = result.MinValues[:query.MaxPoints]
 		result.MaxValues = result.MaxValues[:query.MaxPoints]
+		result.LastValues = result.LastValues[:query.MaxPoints]
+		result.LastTimes = result.LastTimes[:query.MaxPoints]
 	}
 	return result, ctx.Err()
 }

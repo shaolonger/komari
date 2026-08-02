@@ -149,6 +149,31 @@ func ResumeMigration(db *gorm.DB) {
 	go runMigration(ctx, db)
 }
 
+// EnsureMigration starts the embedded historical backfill on first upgrade and
+// resumes an interrupted run. Readers stay on raw history until status becomes
+// completed, so creating an empty rollup table can never hide pre-upgrade data.
+func EnsureMigration(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	status, err := GetMigrationStatus(context.Background(), db)
+	if err != nil {
+		return
+	}
+	if status.Status == "idle" {
+		_, _ = StartMigration(db, "")
+		return
+	}
+	if status.Status == "running" {
+		ResumeMigration(db)
+	}
+}
+
+func RollupsReady(ctx context.Context, db *gorm.DB) bool {
+	status, err := GetMigrationStatus(ctx, db)
+	return err == nil && status.Status == "completed"
+}
+
 func CancelMigration(ctx context.Context, db *gorm.DB) (MigrationStatus, error) {
 	if ctx == nil || db == nil {
 		return MigrationStatus{}, errors.New("migration context and database are required")

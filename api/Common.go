@@ -15,10 +15,11 @@ import (
 )
 
 var (
-	Telemetry         = telemetry.NewStore()
-	telemetryFlushMu  sync.Mutex
-	pendingRecords    []models.Record
-	pendingGPURecords []models.GPURecord
+	Telemetry                 = telemetry.NewStore()
+	telemetryFlushMu          sync.Mutex
+	pendingRecords            []models.Record
+	pendingGPURecords         []models.GPURecord
+	pendingTelemetrySequences []models.TelemetryV3Sequence
 )
 
 func SaveClientReportToDB() error {
@@ -33,27 +34,35 @@ func FlushClientReports() error {
 func saveClientReportsBefore(cutoff time.Time) error {
 	telemetryFlushMu.Lock()
 	defer telemetryFlushMu.Unlock()
-	if len(pendingRecords) == 0 && len(pendingGPURecords) == 0 {
+	if len(pendingRecords) == 0 && len(pendingGPURecords) == 0 && len(pendingTelemetrySequences) == 0 {
 		aggregates := Telemetry.DrainBefore(cutoff)
 		pendingRecords = make([]models.Record, 0, len(aggregates))
 		for _, aggregate := range aggregates {
 			pendingRecords = append(pendingRecords, aggregate.Record)
 			pendingGPURecords = append(pendingGPURecords, aggregate.GPURecords...)
+			if aggregate.Sequence > 0 {
+				pendingTelemetrySequences = append(pendingTelemetrySequences, models.TelemetryV3Sequence{
+					Client: aggregate.Record.Client, ThroughSequence: aggregate.Sequence, UpdatedAt: aggregate.WindowEnd,
+				})
+			}
 		}
 	}
-	if len(pendingRecords) == 0 && len(pendingGPURecords) == 0 {
+	if len(pendingRecords) == 0 && len(pendingGPURecords) == 0 && len(pendingTelemetrySequences) == 0 {
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := telemetrywriter.Submit(ctx, telemetrywriter.Batch{Records: pendingRecords, GPURecords: pendingGPURecords})
+	err := telemetrywriter.Submit(ctx, telemetrywriter.Batch{
+		Records: pendingRecords, GPURecords: pendingGPURecords, TelemetrySequences: pendingTelemetrySequences,
+	})
 	if err != nil {
 		log.Printf("Failed to save telemetry batch to database: %v", err)
 		return err
 	}
 	pendingRecords = nil
 	pendingGPURecords = nil
+	pendingTelemetrySequences = nil
 	return nil
 }
 

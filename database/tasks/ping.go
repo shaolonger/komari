@@ -167,6 +167,22 @@ func SavePingRecord(record models.PingRecord) error {
 }
 
 func SavePingRecords(records []models.PingRecord) error {
+	return savePingRecords(records, nil)
+}
+
+func SavePingRecordsWithCheckpoint(records []models.PingRecord, checkpoint models.PingResultSequence) error {
+	if checkpoint.Client == "" || checkpoint.ThroughSequence == 0 {
+		return errors.New("invalid Ping result checkpoint")
+	}
+	for _, record := range records {
+		if record.Client != checkpoint.Client {
+			return errors.New("Ping checkpoint client does not match record batch")
+		}
+	}
+	return savePingRecords(records, &checkpoint)
+}
+
+func savePingRecords(records []models.PingRecord, checkpoint *models.PingResultSequence) error {
 	if len(records) == 0 || len(records) > 64 {
 		return errors.New("ping record batch must contain 1 to 64 records")
 	}
@@ -184,12 +200,24 @@ func SavePingRecords(records []models.PingRecord) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*timepkg.Second)
 	defer cancel()
-	return telemetrywriter.Submit(ctx, telemetrywriter.Batch{PingRecords: records})
+	batch := telemetrywriter.Batch{PingRecords: records}
+	if checkpoint != nil {
+		batch.PingSequences = []models.PingResultSequence{*checkpoint}
+	}
+	return telemetrywriter.Submit(ctx, batch)
 }
 
 func DeletePingRecordsBefore(time timepkg.Time) error {
+	return DeletePingRecordsBeforeWithRetention(time, 730)
+}
+
+func DeletePingRecordsBeforeWithRetention(time timepkg.Time, finalRetentionDays int) error {
 	db := dbcore.GetDBInstance()
 	now := timepkg.Now()
+	if finalRetentionDays <= 0 {
+		finalRetentionDays = 730
+	}
+	finalRetention := timepkg.Duration(finalRetentionDays) * 24 * timepkg.Hour
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("time < ?", time).Delete(&models.PingRecord{}).Error; err != nil {
 			return err
@@ -198,9 +226,9 @@ func DeletePingRecordsBefore(time timepkg.Time) error {
 			resolution int
 			retention  timepkg.Duration
 		}{
-			{60, 7 * 24 * timepkg.Hour},
-			{900, 90 * 24 * timepkg.Hour},
-			{3600, 730 * 24 * timepkg.Hour},
+			{60, min(7*24*timepkg.Hour, finalRetention)},
+			{900, min(90*24*timepkg.Hour, finalRetention)},
+			{3600, finalRetention},
 		} {
 			if err := tx.Where("resolution_seconds = ? AND bucket_time < ?", tier.resolution, models.FromTime(now.Add(-tier.retention))).Delete(&models.PingRollup{}).Error; err != nil {
 				return err

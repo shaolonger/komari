@@ -67,6 +67,7 @@ func TestNanoPingFixtureHasExactAssignmentAndRowScanBudgets(t *testing.T) {
 	if err := db.CreateInBatches(rollups, 250).Error; err != nil {
 		t.Fatal(err)
 	}
+	markPingRollupsReady(t, db)
 	result, err := QueryPingSeries(context.Background(), db, PingQuery{
 		TaskID: -1, Start: now.Add(-6 * time.Hour), End: now.Add(time.Second), MaxPoints: 1000,
 	})

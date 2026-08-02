@@ -29,13 +29,17 @@ const (
 var ErrClosed = errors.New("telemetry writer is closed")
 
 type Batch struct {
-	ID          string
-	Records     []models.Record
-	GPURecords  []models.GPURecord
-	PingRecords []models.PingRecord
+	ID                 string
+	Records            []models.Record
+	GPURecords         []models.GPURecord
+	PingRecords        []models.PingRecord
+	TelemetrySequences []models.TelemetryV3Sequence
+	PingSequences      []models.PingResultSequence
 }
 
-func (b Batch) Rows() int { return len(b.Records) + len(b.GPURecords) + len(b.PingRecords) }
+func (b Batch) Rows() int {
+	return len(b.Records) + len(b.GPURecords) + len(b.PingRecords) + len(b.TelemetrySequences) + len(b.PingSequences)
+}
 
 type Config struct {
 	QueueCapacity int
@@ -132,10 +136,12 @@ func (w *Writer) Submit(ctx context.Context, batch Batch) error {
 		return fmt.Errorf("telemetry batch has %d rows, maximum is %d", batch.Rows(), MaxRowsPerBatch)
 	}
 	owned := Batch{
-		ID:          batch.ID,
-		Records:     append([]models.Record(nil), batch.Records...),
-		GPURecords:  append([]models.GPURecord(nil), batch.GPURecords...),
-		PingRecords: append([]models.PingRecord(nil), batch.PingRecords...),
+		ID:                 batch.ID,
+		Records:            append([]models.Record(nil), batch.Records...),
+		GPURecords:         append([]models.GPURecord(nil), batch.GPURecords...),
+		PingRecords:        append([]models.PingRecord(nil), batch.PingRecords...),
+		TelemetrySequences: append([]models.TelemetryV3Sequence(nil), batch.TelemetrySequences...),
+		PingSequences:      append([]models.PingResultSequence(nil), batch.PingSequences...),
 	}
 	req := request{ctx: ctx, batch: owned, result: make(chan error, 1)}
 	w.acceptMu.RLock()
@@ -210,6 +216,8 @@ func (w *Writer) coalesce(first request, pending **request) ([]request, Batch, b
 		merged.Records = append(merged.Records, req.batch.Records...)
 		merged.GPURecords = append(merged.GPURecords, req.batch.GPURecords...)
 		merged.PingRecords = append(merged.PingRecords, req.batch.PingRecords...)
+		merged.TelemetrySequences = append(merged.TelemetrySequences, req.batch.TelemetrySequences...)
+		merged.PingSequences = append(merged.PingSequences, req.batch.PingSequences...)
 	}
 	appendRequest(first)
 	timer := time.NewTimer(w.config.MaxBatchDelay)
@@ -292,6 +300,12 @@ func (w *Writer) writeBatch(ctx context.Context, batch Batch) error {
 	if err := w.writePingRollups(ctx, tx, pingRollups); err != nil {
 		return err
 	}
+	if err := w.writeTelemetrySequences(ctx, tx, batch.TelemetrySequences); err != nil {
+		return err
+	}
+	if err := w.writePingSequences(ctx, tx, batch.PingSequences); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -310,6 +324,8 @@ func (w *Writer) prepareBatch(ctx context.Context, batch Batch, pingRollupRows i
 		{"gpu_records", len(batch.GPURecords), 8, "client,time,device_index,device_name,mem_total,mem_used,utilization,temperature"},
 		{"ping_records", len(batch.PingRecords), 4, "client,task_id,time,value"},
 		{"ping_rollups", pingRollupRows, 12, "client,task_id,resolution_seconds,bucket_time,sample_count,valid_count,loss_count,sum_value,min_value,max_value,last_value,last_time"},
+		{"telemetry_v3_sequences", len(batch.TelemetrySequences), 3, "client,through_sequence,updated_at"},
+		{"ping_result_sequences", len(batch.PingSequences), 3, "client,through_sequence,updated_at"},
 	} {
 		for start := 0; start < spec.rows; start += w.config.ChunkRows {
 			rows := min(w.config.ChunkRows, spec.rows-start)
@@ -460,6 +476,50 @@ func (w *Writer) writePingRollups(ctx context.Context, tx *sql.Tx, records []mod
 	return nil
 }
 
+func (w *Writer) writeTelemetrySequences(ctx context.Context, tx *sql.Tx, checkpoints []models.TelemetryV3Sequence) error {
+	return w.writeSequenceCheckpoints(ctx, tx, "telemetry_v3_sequences", telemetrySequenceRows(checkpoints))
+}
+
+func (w *Writer) writePingSequences(ctx context.Context, tx *sql.Tx, checkpoints []models.PingResultSequence) error {
+	rows := make([]sequenceCheckpoint, 0, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		rows = append(rows, sequenceCheckpoint{client: checkpoint.Client, through: checkpoint.ThroughSequence, updatedAt: checkpoint.UpdatedAt})
+	}
+	return w.writeSequenceCheckpoints(ctx, tx, "ping_result_sequences", rows)
+}
+
+type sequenceCheckpoint struct {
+	client    string
+	through   uint64
+	updatedAt time.Time
+}
+
+func telemetrySequenceRows(checkpoints []models.TelemetryV3Sequence) []sequenceCheckpoint {
+	rows := make([]sequenceCheckpoint, 0, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		rows = append(rows, sequenceCheckpoint{client: checkpoint.Client, through: checkpoint.ThroughSequence, updatedAt: checkpoint.UpdatedAt})
+	}
+	return rows
+}
+
+func (w *Writer) writeSequenceCheckpoints(ctx context.Context, tx *sql.Tx, table string, rows []sequenceCheckpoint) error {
+	for start := 0; start < len(rows); start += w.config.ChunkRows {
+		end := min(start+w.config.ChunkRows, len(rows))
+		stmt, err := w.statement(ctx, table, end-start, 3, "client,through_sequence,updated_at")
+		if err != nil {
+			return err
+		}
+		args := make([]any, 0, (end-start)*3)
+		for _, row := range rows[start:end] {
+			args = append(args, row.client, row.through, row.updatedAt)
+		}
+		if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (w *Writer) statement(ctx context.Context, table string, rows, columns int, names string) (*sql.Stmt, error) {
 	key := statementKey{kind: table, rows: rows}
 	if statement := w.statements[key]; statement != nil {
@@ -477,6 +537,8 @@ func (w *Writer) statement(ctx context.Context, table string, rows, columns int,
 			max_value=CASE WHEN ping_rollups.valid_count=0 THEN excluded.max_value WHEN excluded.valid_count=0 THEN ping_rollups.max_value ELSE MAX(ping_rollups.max_value,excluded.max_value) END,
 			last_value=CASE WHEN excluded.last_time>=ping_rollups.last_time THEN excluded.last_value ELSE ping_rollups.last_value END,
 			last_time=MAX(ping_rollups.last_time,excluded.last_time)`
+	} else if table == "telemetry_v3_sequences" || table == "ping_result_sequences" {
+		query += " ON CONFLICT(client) DO UPDATE SET through_sequence=MAX(through_sequence,excluded.through_sequence),updated_at=CASE WHEN excluded.through_sequence>=through_sequence THEN excluded.updated_at ELSE updated_at END"
 	}
 	statement, err := w.db.PrepareContext(ctx, query)
 	if err != nil {

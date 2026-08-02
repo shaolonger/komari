@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/protocol/telemetryv3"
 	"github.com/komari-monitor/komari/utils"
 )
 
@@ -95,7 +96,7 @@ func TestConcurrentSameAndDifferentUUID(t *testing.T) {
 	}
 }
 
-func TestMinuteBoundaryAndBacklog(t *testing.T) {
+func TestMinuteBoundaryAndBoundedBacklog(t *testing.T) {
 	store := NewStore()
 	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	if err := store.Add("node", sampleReport(base.Add(59*time.Second), 1)); err != nil {
@@ -114,10 +115,13 @@ func TestMinuteBoundaryAndBacklog(t *testing.T) {
 	}
 
 	backlogged := NewStore()
-	_ = backlogged.Add("node", sampleReport(base, 1))
-	_ = backlogged.Add("node", sampleReport(base.Add(time.Minute), 2))
-	if err := backlogged.Add("node", sampleReport(base.Add(2*time.Minute), 3)); !errors.Is(err, ErrWindowBacklog) {
-		t.Fatalf("third undrained window error = %v", err)
+	for index := 0; index < MaxPendingWindowsPerNode; index++ {
+		if err := backlogged.Add("node", sampleReport(base.Add(time.Duration(index)*time.Minute), index)); err != nil {
+			t.Fatalf("window %d: %v", index, err)
+		}
+	}
+	if err := backlogged.Add("node", sampleReport(base.Add(MaxPendingWindowsPerNode*time.Minute), 999)); !errors.Is(err, ErrWindowBacklog) {
+		t.Fatalf("overflow undrained window error = %v", err)
 	}
 }
 
@@ -146,6 +150,52 @@ func TestSnapshotIsImmutableAndExpires(t *testing.T) {
 	store.DrainBefore(now.Add(time.Minute))
 	if store.NodeCount() != 0 {
 		t.Fatal("expired, drained node was not pruned")
+	}
+}
+
+func TestRemoveDiscardsSnapshotAndPendingWindows(t *testing.T) {
+	store := NewStore()
+	base := time.Now().Truncate(time.Minute)
+	if err := store.Add("deleted-node", sampleReport(base, 1)); err != nil {
+		t.Fatal(err)
+	}
+	store.Remove("deleted-node")
+	if _, ok := store.Latest("deleted-node"); ok || store.NodeCount() != 0 {
+		t.Fatal("deleted node remained in the telemetry store")
+	}
+	if aggregates := store.DrainBefore(base.Add(time.Minute)); len(aggregates) != 0 {
+		t.Fatalf("deleted node produced %d durable aggregates", len(aggregates))
+	}
+}
+
+func TestV3EnvelopePreservesCounterDeltasAcrossAgentCounterReset(t *testing.T) {
+	store := NewStore()
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	first := sampleReport(base.Add(5*time.Second), 1)
+	first.Network.Up, first.Network.Down = 0, 0
+	first.Network.TotalUp, first.Network.TotalDown = 1_000, 2_000
+	if err := store.AddV3("node", first, telemetryv3.Envelope{
+		Count: 1, CPUMin: 1, CPUMax: 1, CPUSum: 1, RAMUsedMin: 1 << 20, RAMUsedMax: 1 << 20, RAMUsedSum: 1 << 20,
+	}, 1); err != nil {
+		t.Fatal(err)
+	}
+	second := sampleReport(base.Add(10*time.Second), 2)
+	// The physical counters reset to small values, but the envelope retains all
+	// bytes transferred since the preceding v3 frame.
+	second.Network.TotalUp, second.Network.TotalDown = 50, 70
+	if err := store.AddV3("node", second, telemetryv3.Envelope{
+		Count: 1, CPUMin: 2, CPUMax: 2, CPUSum: 2, RAMUsedMin: 2 << 20, RAMUsedMax: 2 << 20, RAMUsedSum: 2 << 20,
+		NetworkUpDelta: 500, NetworkDownDelta: 750,
+	}, 2); err != nil {
+		t.Fatal(err)
+	}
+	aggregates := store.DrainBefore(base.Add(time.Minute))
+	if len(aggregates) != 1 {
+		t.Fatalf("aggregates = %d", len(aggregates))
+	}
+	record := aggregates[0].Record
+	if record.NetTotalUp != 1_500 || record.NetTotalDown != 2_750 || record.NetOut != 100 || record.NetIn != 150 || aggregates[0].Sequence != 2 {
+		t.Fatalf("v3 network aggregate = %+v sequence=%d", record, aggregates[0].Sequence)
 	}
 }
 

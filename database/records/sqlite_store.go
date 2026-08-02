@@ -38,12 +38,16 @@ func NewSQLiteTelemetryStore(readDB *gorm.DB, writeDB *sql.DB, config telemetryw
 
 func (store *SQLiteTelemetryStore) WriteBatch(ctx context.Context, batch storage.TelemetryBatch) error {
 	return store.writer.Submit(ctx, telemetrywriter.Batch{
-		ID:          batch.ID,
-		Records:     batch.Records,
-		GPURecords:  batch.GPURecords,
-		PingRecords: batch.PingRecords,
+		ID:                 batch.ID,
+		Records:            batch.Records,
+		GPURecords:         batch.GPURecords,
+		PingRecords:        batch.PingRecords,
+		TelemetrySequences: batch.TelemetrySequences,
+		PingSequences:      batch.PingSequences,
 	})
 }
+
+func (*SQLiteTelemetryStore) WritesCheckpointsAtomically() bool { return true }
 
 // PreparePingContractFixture is used only by the backend-neutral contract
 // suite because embedded SQLite enforces control-plane foreign keys.

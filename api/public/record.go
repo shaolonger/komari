@@ -220,10 +220,17 @@ func GetPingRecords(c *gin.Context) {
 	}
 
 	type RecordsResp struct {
-		TaskId uint   `json:"task_id,omitempty"`
-		Time   string `json:"time"`
-		Value  int    `json:"value"`
-		Client string `json:"client,omitempty"`
+		TaskId      uint   `json:"task_id,omitempty"`
+		Time        string `json:"time"`
+		Value       int    `json:"value"`
+		Client      string `json:"client,omitempty"`
+		SampleCount int64  `json:"sample_count,omitempty"`
+		ValidCount  int64  `json:"valid_count,omitempty"`
+		LossCount   int64  `json:"loss_count,omitempty"`
+		MinValue    int    `json:"min_value,omitempty"`
+		MaxValue    int    `json:"max_value,omitempty"`
+		LastValue   int    `json:"last_value"`
+		LastTime    string `json:"last_time"`
 	}
 	type ClientBasicInfo struct {
 		Client string  `json:"client"`
@@ -316,13 +323,13 @@ func GetPingRecords(c *gin.Context) {
 
 	// 用于统计每个客户端的信息（按 task_id 查询时使用）
 	clientStats := make(map[string]struct {
-		total int
-		loss  int
+		total int64
+		loss  int64
 		min   int
 		max   int
 	})
 
-	for _, r := range pingRecords {
+	for position, r := range pingRecords {
 		if r.Client != "" && !isLogin {
 			if hiddenMap[r.Client] {
 				continue // 跳过隐藏的节点
@@ -330,21 +337,22 @@ func GetPingRecords(c *gin.Context) {
 		}
 		toTime := r.Time.ToTime()
 		rec := RecordsResp{
-			Time:  toTime.Format(time.RFC3339),
-			Value: r.Value,
+			Time: toTime.Format(time.RFC3339), Value: r.Value,
+			SampleCount: pingQuery.SampleCounts[position], ValidCount: pingQuery.ValidCounts[position], LossCount: pingQuery.LossCounts[position],
+			MinValue: pingQuery.MinValues[position], MaxValue: pingQuery.MaxValues[position], LastValue: pingQuery.LastValues[position],
+			LastTime: pingQuery.LastTimes[position].ToTime().Format(time.RFC3339),
 		}
 		rec.Client = r.Client
 		stats := clientStats[r.Client]
-		stats.total++
+		stats.total += pingQuery.SampleCounts[position]
+		stats.loss += pingQuery.LossCounts[position]
 
-		if r.Value < 0 {
-			stats.loss++
-		} else {
-			if stats.min == 0 || r.Value < stats.min {
-				stats.min = r.Value
+		if pingQuery.ValidCounts[position] > 0 {
+			if stats.min == 0 || pingQuery.MinValues[position] < stats.min {
+				stats.min = pingQuery.MinValues[position]
 			}
-			if r.Value > stats.max {
-				stats.max = r.Value
+			if pingQuery.MaxValues[position] > stats.max {
+				stats.max = pingQuery.MaxValues[position]
 			}
 		}
 		clientStats[r.Client] = stats

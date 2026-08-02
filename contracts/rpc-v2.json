@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schema_version": 1,
-  "contract": "komari.rpc.v2.3",
+  "contract": "komari.rpc.v2.4",
   "jsonrpc_version": "2.0",
   "minimum_server_version": "1.4.0",
   "capabilities": {
@@ -9,7 +9,7 @@
     "metric.migration": "1",
     "metric.query": "1",
     "history.set-query": "1",
-    "ping.overview": "1",
+    "ping.overview": "2",
 	"ping.leases": "1",
 	"ping.result-batch": "1",
     "realtime.delta": "1",

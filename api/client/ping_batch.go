@@ -8,7 +8,6 @@ import (
 
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const maxPingResultBatch = 32
@@ -26,7 +25,7 @@ func acceptPingResultBatch(
 	client string,
 	sequence uint64,
 	inputs []pingResultInput,
-	save func([]models.PingRecord) error,
+	save func([]models.PingRecord, models.PingResultSequence) error,
 ) (telemetryAcceptance, error) {
 	if db == nil || client == "" || sequence == 0 || sequence > math.MaxInt64 || save == nil || len(inputs) == 0 || len(inputs) > maxPingResultBatch {
 		return telemetryAcceptance{}, errors.New("invalid Ping result batch")
@@ -47,6 +46,9 @@ func acceptPingResultBatch(
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return telemetryAcceptance{}, err
 	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		checkpoint.ThroughSequence = sequence - 1
+	}
 	through := checkpoint.ThroughSequence
 	if sequence <= through {
 		return telemetryAcceptance{Through: through, Duplicate: true}, nil
@@ -54,13 +56,8 @@ func acceptPingResultBatch(
 	if sequence != through+1 {
 		return telemetryAcceptance{Through: through}, ErrTelemetrySequenceGap
 	}
-	if err := save(records); err != nil {
-		return telemetryAcceptance{Through: through}, err
-	}
 	checkpoint = models.PingResultSequence{Client: client, ThroughSequence: sequence, UpdatedAt: now}
-	if err := db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "client"}}, DoUpdates: clause.AssignmentColumns([]string{"through_sequence", "updated_at"}),
-	}).Create(&checkpoint).Error; err != nil {
+	if err := save(records, checkpoint); err != nil {
 		return telemetryAcceptance{Through: through}, err
 	}
 	return telemetryAcceptance{Through: sequence}, nil

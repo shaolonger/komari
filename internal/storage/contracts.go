@@ -23,10 +23,12 @@ var (
 // Implementations must either durably commit the complete batch or return an
 // error; partial success is forbidden.
 type TelemetryBatch struct {
-	ID          string
-	Records     []models.Record
-	GPURecords  []models.GPURecord
-	PingRecords []models.PingRecord
+	ID                 string
+	Records            []models.Record
+	GPURecords         []models.GPURecord
+	PingRecords        []models.PingRecord
+	TelemetrySequences []models.TelemetryV3Sequence
+	PingSequences      []models.PingResultSequence
 }
 
 // BatchID returns the caller supplied idempotency key or a deterministic
@@ -39,10 +41,12 @@ func BatchID(batch TelemetryBatch) (string, error) {
 		return batch.ID, nil
 	}
 	payload, err := json.Marshal(struct {
-		Records     []models.Record
-		GPURecords  []models.GPURecord
-		PingRecords []models.PingRecord
-	}{batch.Records, batch.GPURecords, batch.PingRecords})
+		Records            []models.Record
+		GPURecords         []models.GPURecord
+		PingRecords        []models.PingRecord
+		TelemetrySequences []models.TelemetryV3Sequence
+		PingSequences      []models.PingResultSequence
+	}{batch.Records, batch.GPURecords, batch.PingRecords, batch.TelemetrySequences, batch.PingSequences})
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +55,14 @@ func BatchID(batch TelemetryBatch) (string, error) {
 }
 
 func (batch TelemetryBatch) Rows() int {
-	return len(batch.Records) + len(batch.GPURecords) + len(batch.PingRecords)
+	return len(batch.Records) + len(batch.GPURecords) + len(batch.PingRecords) + len(batch.TelemetrySequences) + len(batch.PingSequences)
+}
+
+// AtomicCheckpointStore reports whether sequence checkpoints are committed in
+// the same transaction as the telemetry rows. External stores use deterministic
+// batch IDs and persist checkpoints in the embedded control database afterward.
+type AtomicCheckpointStore interface {
+	WritesCheckpointsAtomically() bool
 }
 
 type RecordRange struct {

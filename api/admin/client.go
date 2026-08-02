@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	clientapi "github.com/komari-monitor/komari/api/client"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/records"
@@ -175,9 +176,10 @@ func RemoveClient(c *gin.Context) {
 	}
 	user_uuid, _ := c.Get("uuid")
 	auditLogFunc(c.ClientIP(), user_uuid.(string), "delete client:"+uuid, "warn")
-	c.JSON(http.StatusOK, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
+	clientapi.ForgetClientTelemetry(uuid)
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func ClearRecord(c *gin.Context) {

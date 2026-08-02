@@ -5,7 +5,10 @@ import (
 	"sync"
 
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/storage"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -33,18 +36,56 @@ func Default() (*Writer, error) {
 
 func Submit(ctx context.Context, batch Batch) error {
 	if store, ok := storage.Telemetry(); ok {
-		return store.WriteBatch(ctx, storage.TelemetryBatch{
-			ID:          batch.ID,
-			Records:     batch.Records,
-			GPURecords:  batch.GPURecords,
-			PingRecords: batch.PingRecords,
-		})
+		storageBatch := storage.TelemetryBatch{
+			ID:                 batch.ID,
+			Records:            batch.Records,
+			GPURecords:         batch.GPURecords,
+			PingRecords:        batch.PingRecords,
+			TelemetrySequences: batch.TelemetrySequences,
+			PingSequences:      batch.PingSequences,
+		}
+		if err := store.WriteBatch(ctx, storageBatch); err != nil {
+			return err
+		}
+		if atomic, ok := store.(storage.AtomicCheckpointStore); ok && atomic.WritesCheckpointsAtomically() {
+			return nil
+		}
+		return persistExternalCheckpoints(ctx, batch.TelemetrySequences, batch.PingSequences)
 	}
 	writer, err := Default()
 	if err != nil {
 		return err
 	}
 	return writer.Submit(ctx, batch)
+}
+
+func persistExternalCheckpoints(ctx context.Context, telemetry []models.TelemetryV3Sequence, ping []models.PingResultSequence) error {
+	if len(telemetry) == 0 && len(ping) == 0 {
+		return nil
+	}
+	return dbcore.GetDBInstance().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(telemetry) > 0 {
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "client"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"through_sequence": gorm.Expr("MAX(through_sequence,excluded.through_sequence)"),
+					"updated_at":       gorm.Expr("CASE WHEN excluded.through_sequence>=through_sequence THEN excluded.updated_at ELSE updated_at END"),
+				}),
+			}).Create(&telemetry).Error; err != nil {
+				return err
+			}
+		}
+		if len(ping) > 0 {
+			return tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "client"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"through_sequence": gorm.Expr("MAX(through_sequence,excluded.through_sequence)"),
+					"updated_at":       gorm.Expr("CASE WHEN excluded.through_sequence>=through_sequence THEN excluded.updated_at ELSE updated_at END"),
+				}),
+			}).Create(&ping).Error
+		}
+		return nil
+	})
 }
 
 func CloseDefault(ctx context.Context) error {

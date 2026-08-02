@@ -12,7 +12,7 @@ GOMAXPROCS=1 GOMEMLIMIT=128MiB go test ./internal/telemetry \
 
 "${repo_root}/scripts/build-frontend.sh" "${output_root}/theme"
 test -s "${output_root}/theme/dist/index.html"
-grep -q '^rpc_contract=komari.rpc.v2.3$' "${output_root}/theme/BUILD_PROVENANCE"
+grep -q '^rpc_contract=komari.rpc.v2.4$' "${output_root}/theme/BUILD_PROVENANCE"
 
 bundle_bytes="$(du -sk "${output_root}/theme/dist" | awk '{print $1 * 1024}')"
 if (( bundle_bytes > 8 * 1024 * 1024 )); then

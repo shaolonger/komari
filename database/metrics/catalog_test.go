@@ -171,6 +171,20 @@ func TestMetricCatalogRetentionIsAllowlistedAndPersistent(t *testing.T) {
 	if err != nil || updated.RetentionDays != 365 {
 		t.Fatalf("updated=%+v err=%v", updated, err)
 	}
+	plan, err := LoadRetentionPlan(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.PingOverridden || plan.RecordOverridden || plan.PingDays != 365 || plan.RecordDays != 30 {
+		t.Fatalf("Ping-only retention plan = %+v", plan)
+	}
+	if _, err := UpdateRetention(ctx, db, "cpu.usage", 14); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = LoadRetentionPlan(ctx, db)
+	if err != nil || !plan.RecordOverridden || !plan.PingOverridden || plan.RecordDays != 30 {
+		t.Fatalf("family retention plan = %+v err=%v", plan, err)
+	}
 	after, err := List(ctx, db)
 	if err != nil {
 		t.Fatal(err)

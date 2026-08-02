@@ -5,6 +5,7 @@ package telemetry
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"sync"
@@ -12,21 +13,25 @@ import (
 
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/protocol/telemetryv3"
 )
 
 const (
 	ShardCount          = 256
 	MaxSamplesPerMinute = 120
 	MaxGPUDevices       = 64
-	SnapshotTTL         = time.Minute
-	topFraction         = 0.3
-	topCapacity         = int(MaxSamplesPerMinute * topFraction)
+	// MaxPendingWindowsPerNode bounds offline v3 replay memory while allowing a
+	// useful chunk of historical minutes to be committed in one writer batch.
+	MaxPendingWindowsPerNode = 16
+	SnapshotTTL              = time.Minute
+	topFraction              = 0.3
+	topCapacity              = int(MaxSamplesPerMinute * topFraction)
 )
 
 var (
 	ErrSampleLimit       = fmt.Errorf("telemetry sample limit of %d per minute exceeded", MaxSamplesPerMinute)
 	ErrTooManyGPUDevices = fmt.Errorf("telemetry GPU device limit of %d exceeded", MaxGPUDevices)
-	ErrWindowBacklog     = errors.New("telemetry accumulator has two undrained minute windows")
+	ErrWindowBacklog     = fmt.Errorf("telemetry accumulator has %d undrained minute windows", MaxPendingWindowsPerNode)
 )
 
 type Store struct {
@@ -40,12 +45,12 @@ type shard struct {
 }
 
 type nodeState struct {
-	latest        common.Report
-	latestAt      time.Time
-	currentStart  time.Time
-	current       *accumulator
-	previousStart time.Time
-	previous      *accumulator
+	latest                     common.Report
+	latestAt                   time.Time
+	windows                    map[int64]*accumulator
+	v3NetworkUp, v3NetworkDown uint64
+	v3NetworkAt                time.Time
+	hasV3Network               bool
 }
 
 type Aggregate struct {
@@ -53,6 +58,7 @@ type Aggregate struct {
 	WindowEnd   time.Time
 	Record      models.Record
 	GPURecords  []models.GPURecord
+	Sequence    uint64
 }
 
 func NewStore() *Store {
@@ -64,6 +70,21 @@ func NewStore() *Store {
 }
 
 func (s *Store) Add(uuid string, report common.Report) error {
+	return s.add(uuid, report, telemetryv3.Envelope{}, 0)
+}
+
+// AddV3 expands a bounded aggregate envelope into the minute accumulator while
+// retaining its extrema and exact arithmetic mean. Sequence is carried to the
+// durable writer so the database checkpoint commits in the same transaction as
+// the history row represented by this frame.
+func (s *Store) AddV3(uuid string, report common.Report, envelope telemetryv3.Envelope, sequence uint64) error {
+	if sequence == 0 || envelope.Count == 0 || envelope.Count > MaxSamplesPerMinute {
+		return errors.New("invalid telemetry v3 aggregate")
+	}
+	return s.add(uuid, report, envelope, sequence)
+}
+
+func (s *Store) add(uuid string, report common.Report, envelope telemetryv3.Envelope, sequence uint64) error {
 	if uuid == "" {
 		return errors.New("telemetry UUID is required")
 	}
@@ -92,34 +113,69 @@ func (s *Store) Add(uuid string, report common.Report) error {
 	if err != nil {
 		return err
 	}
+	if sequence > 0 {
+		adjusted, up, down := state.prepareV3Network(report, envelope)
+		if err := target.addEnvelope(adjusted, envelope, sequence); err != nil {
+			return err
+		}
+		state.v3NetworkUp, state.v3NetworkDown = up, down
+		state.v3NetworkAt = report.UpdatedAt
+		state.hasV3Network = true
+		return nil
+	}
 	return target.add(report)
 }
 
+func (state *nodeState) prepareV3Network(report common.Report, envelope telemetryv3.Envelope) (common.Report, uint64, uint64) {
+	up := uint64(max(report.Network.TotalUp, 0))
+	down := uint64(max(report.Network.TotalDown, 0))
+	if !state.hasV3Network {
+		return report, up, down
+	}
+	up = saturatingAddUint64(state.v3NetworkUp, envelope.NetworkUpDelta)
+	down = saturatingAddUint64(state.v3NetworkDown, envelope.NetworkDownDelta)
+	report.Network.TotalUp = uint64ToInt64Saturated(up)
+	report.Network.TotalDown = uint64ToInt64Saturated(down)
+	elapsed := report.UpdatedAt.Sub(state.v3NetworkAt)
+	if elapsed > 0 {
+		seconds := elapsed.Seconds()
+		report.Network.Up = boundedNetworkRate(envelope.NetworkUpDelta, seconds)
+		report.Network.Down = boundedNetworkRate(envelope.NetworkDownDelta, seconds)
+	}
+	return report, up, down
+}
+
+func boundedNetworkRate(delta uint64, seconds float64) int64 {
+	if seconds <= 0 {
+		return 0
+	}
+	rate := float64(delta) / seconds
+	if rate >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(rate)
+}
+
+func saturatingAddUint64(left, right uint64) uint64 {
+	if ^uint64(0)-left < right {
+		return ^uint64(0)
+	}
+	return left + right
+}
+
 func (state *nodeState) accumulatorFor(window time.Time) (*accumulator, error) {
-	if state.current == nil {
-		state.currentStart = window
-		state.current = newAccumulator()
-		return state.current, nil
+	key := window.Unix()
+	if accumulator := state.windows[key]; accumulator != nil {
+		return accumulator, nil
 	}
-	if window.Equal(state.currentStart) {
-		return state.current, nil
+	if len(state.windows) >= MaxPendingWindowsPerNode {
+		return nil, ErrWindowBacklog
 	}
-	if state.previous != nil && window.Equal(state.previousStart) {
-		return state.previous, nil
+	if state.windows == nil {
+		state.windows = make(map[int64]*accumulator, 2)
 	}
-	if window.After(state.currentStart) {
-		if state.previous != nil {
-			return nil, ErrWindowBacklog
-		}
-		state.previous, state.previousStart = state.current, state.currentStart
-		state.current, state.currentStart = newAccumulator(), window
-		return state.current, nil
-	}
-	if state.previous == nil {
-		state.previous, state.previousStart = newAccumulator(), window
-		return state.previous, nil
-	}
-	return nil, ErrWindowBacklog
+	state.windows[key] = newAccumulator()
+	return state.windows[key], nil
 }
 
 func (s *Store) Latest(uuid string) (common.Report, bool) {
@@ -157,17 +213,14 @@ func (s *Store) DrainBefore(cutoff time.Time) []Aggregate {
 		sh := &s.shards[i]
 		sh.mu.Lock()
 		for uuid, state := range sh.nodes {
-			if state.previous != nil && state.previousStart.Before(boundary) {
-				pending = append(pending, detached{uuid: uuid, start: state.previousStart, acc: state.previous})
-				state.previous = nil
-				state.previousStart = time.Time{}
+			for unix, accumulator := range state.windows {
+				start := time.Unix(unix, 0).UTC()
+				if start.Before(boundary) {
+					pending = append(pending, detached{uuid: uuid, start: start, acc: accumulator})
+					delete(state.windows, unix)
+				}
 			}
-			if state.current != nil && state.currentStart.Before(boundary) {
-				pending = append(pending, detached{uuid: uuid, start: state.currentStart, acc: state.current})
-				state.current = nil
-				state.currentStart = time.Time{}
-			}
-			if state.current == nil && state.previous == nil && cutoff.Sub(state.latestAt) > SnapshotTTL {
+			if len(state.windows) == 0 && cutoff.Sub(state.latestAt) > SnapshotTTL {
 				delete(sh.nodes, uuid)
 			}
 		}
@@ -183,7 +236,7 @@ func (s *Store) DrainBefore(cutoff time.Time) []Aggregate {
 	for _, item := range pending {
 		persistedAt := item.start.Add(time.Minute)
 		record, gpu := item.acc.records(item.uuid, persistedAt)
-		result = append(result, Aggregate{WindowStart: item.start, WindowEnd: persistedAt, Record: record, GPURecords: gpu})
+		result = append(result, Aggregate{WindowStart: item.start, WindowEnd: persistedAt, Record: record, GPURecords: gpu, Sequence: item.acc.maxSequence})
 	}
 	return result
 }
@@ -197,6 +250,19 @@ func (s *Store) NodeCount() int {
 		sh.mu.RUnlock()
 	}
 	return total
+}
+
+// Remove discards live and not-yet-durable telemetry for a deleted node. The
+// administrator delete path closes its connection first, so stale history can
+// never be flushed after the control-plane row has been removed.
+func (s *Store) Remove(uuid string) {
+	if uuid == "" {
+		return
+	}
+	sh := s.shard(uuid)
+	sh.mu.Lock()
+	delete(sh.nodes, uuid)
+	sh.mu.Unlock()
 }
 
 func (s *Store) shard(uuid string) *shard {
@@ -378,6 +444,7 @@ func topCount(count int) int {
 
 type accumulator struct {
 	count                          int
+	maxSequence                    uint64
 	cpu, gpu, load                 floatTop
 	ram, swap, disk                intTop
 	netIn, netOut                  intTop
@@ -405,6 +472,60 @@ func (a *accumulator) add(report common.Report) error {
 	if len(gpuDevices(report)) > MaxGPUDevices {
 		return ErrTooManyGPUDevices
 	}
+	a.addUnchecked(report)
+	return nil
+}
+
+func (a *accumulator) addEnvelope(report common.Report, envelope telemetryv3.Envelope, sequence uint64) error {
+	count := int(envelope.Count)
+	if count <= 0 || a.count+count > MaxSamplesPerMinute {
+		return ErrSampleLimit
+	}
+	if len(gpuDevices(report)) > MaxGPUDevices {
+		return ErrTooManyGPUDevices
+	}
+	cpuMiddle := envelope.CPUSum
+	ramMiddle := envelope.RAMUsedSum
+	if count > 1 {
+		cpuMiddle -= envelope.CPUMin + envelope.CPUMax
+		ramMiddle -= min(ramMiddle, envelope.RAMUsedMin)
+		ramMiddle -= min(ramMiddle, envelope.RAMUsedMax)
+	}
+	if count > 2 {
+		cpuMiddle /= float64(count - 2)
+		ramMiddle /= uint64(count - 2)
+	}
+	for index := 0; index < count; index++ {
+		sample := report
+		switch {
+		case count == 1:
+			sample.CPU.Usage = envelope.CPUSum
+			sample.Ram.Used = uint64ToInt64Saturated(envelope.RAMUsedSum)
+		case index == 0:
+			sample.CPU.Usage = envelope.CPUMin
+			sample.Ram.Used = uint64ToInt64Saturated(envelope.RAMUsedMin)
+		case index == count-1:
+			sample.CPU.Usage = envelope.CPUMax
+			sample.Ram.Used = uint64ToInt64Saturated(envelope.RAMUsedMax)
+		default:
+			sample.CPU.Usage = cpuMiddle
+			sample.Ram.Used = uint64ToInt64Saturated(ramMiddle)
+		}
+		a.addUnchecked(sample)
+	}
+	a.maxSequence = max(a.maxSequence, sequence)
+	return nil
+}
+
+func uint64ToInt64Saturated(value uint64) int64 {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if value > uint64(maxInt64) {
+		return maxInt64
+	}
+	return int64(value)
+}
+
+func (a *accumulator) addUnchecked(report common.Report) {
 	a.count++
 	a.cpu.add(report.CPU.Usage)
 	a.load.add(report.Load.Load1)
@@ -442,7 +563,6 @@ func (a *accumulator) add(report common.Report) error {
 			gpu.temperature.add(int64(device.Temperature))
 		}
 	}
-	return nil
 }
 
 func (a *accumulator) records(uuid string, at time.Time) (models.Record, []models.GPURecord) {

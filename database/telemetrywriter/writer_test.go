@@ -26,7 +26,10 @@ func openTestDatabase(t testing.TB) (*gorm.DB, *sql.DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingTask{}, &models.PingRecord{}, &models.PingRollup{}); err != nil {
+	if err := db.AutoMigrate(
+		&models.Client{}, &models.Record{}, &models.GPURecord{}, &models.PingTask{},
+		&models.PingRecord{}, &models.PingRollup{}, &models.TelemetryV3Sequence{}, &models.PingResultSequence{},
+	); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, err := db.DB()
@@ -80,6 +83,8 @@ func TestWriterPersistsAllRecordTypesAtomically(t *testing.T) {
 	}
 	batch := testBatch(1, 300)
 	batch.PingRecords = []models.PingRecord{{Client: "node", TaskId: task.Id, Time: models.FromTime(time.Now()), Value: 12}}
+	batch.TelemetrySequences = []models.TelemetryV3Sequence{{Client: "node", ThroughSequence: 17, UpdatedAt: time.Now()}}
+	batch.PingSequences = []models.PingResultSequence{{Client: "node", ThroughSequence: 9, UpdatedAt: time.Now()}}
 	generation := historycache.Generation()
 	if err := writer.Submit(context.Background(), batch); err != nil {
 		t.Fatal(err)
@@ -104,6 +109,14 @@ func TestWriterPersistsAllRecordTypesAtomically(t *testing.T) {
 		if rollup.SampleCount != 1 || rollup.ValidCount != 1 || rollup.LossCount != 0 || rollup.SumValue != 12 || rollup.MinValue != 12 || rollup.MaxValue != 12 || rollup.LastValue != 12 {
 			t.Fatalf("invalid Ping rollup: %+v", rollup)
 		}
+	}
+	var telemetrySequence models.TelemetryV3Sequence
+	if err := db.First(&telemetrySequence, "client = ?", "node").Error; err != nil || telemetrySequence.ThroughSequence != 17 {
+		t.Fatalf("telemetry checkpoint = %+v, %v", telemetrySequence, err)
+	}
+	var pingSequence models.PingResultSequence
+	if err := db.First(&pingSequence, "client = ?", "node").Error; err != nil || pingSequence.ThroughSequence != 9 {
+		t.Fatalf("Ping checkpoint = %+v, %v", pingSequence, err)
 	}
 }
 
@@ -130,7 +143,9 @@ func TestWriterRetriesBusyAndRejectsPermanentFailureWithoutPartialCommit(t *test
 	if err := db.Migrator().DropTable(&models.GPURecord{}); err != nil {
 		t.Fatal(err)
 	}
-	err := writer.Submit(context.Background(), testBatch(2, 4))
+	failed := testBatch(2, 4)
+	failed.TelemetrySequences = []models.TelemetryV3Sequence{{Client: "node-2", ThroughSequence: 4, UpdatedAt: time.Now()}}
+	err := writer.Submit(context.Background(), failed)
 	if err == nil {
 		t.Fatal("permanent schema failure was reported as success")
 	}
@@ -140,6 +155,13 @@ func TestWriterRetriesBusyAndRejectsPermanentFailureWithoutPartialCommit(t *test
 	}
 	if records != 0 {
 		t.Fatalf("partial transaction committed %d records", records)
+	}
+	var checkpoints int64
+	if err := db.Model(&models.TelemetryV3Sequence{}).Where("client = ?", "node-2").Count(&checkpoints).Error; err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 0 {
+		t.Fatalf("partial transaction committed %d checkpoints", checkpoints)
 	}
 }
 
@@ -170,6 +192,31 @@ func TestWriterUpsertsPingRollupBucketsAtomically(t *testing.T) {
 	}
 	if rollup.SampleCount != 2 || rollup.ValidCount != 2 || rollup.LossCount != 0 || rollup.SumValue != 30 || rollup.MinValue != 12 || rollup.MaxValue != 18 || rollup.LastValue != 18 {
 		t.Fatalf("merged Ping rollup = %+v", rollup)
+	}
+}
+
+func TestWriterSequenceCheckpointsNeverMoveBackward(t *testing.T) {
+	db, sqlDB, _ := openTestDatabase(t)
+	writer := newTestWriter(t, sqlDB, Config{})
+	now := time.Now().UTC()
+	for _, through := range []uint64{12, 7, 19} {
+		if err := writer.Submit(context.Background(), Batch{
+			TelemetrySequences: []models.TelemetryV3Sequence{{Client: "sequence-node", ThroughSequence: through, UpdatedAt: now.Add(time.Duration(through) * time.Second)}},
+			PingSequences:      []models.PingResultSequence{{Client: "sequence-node", ThroughSequence: through, UpdatedAt: now.Add(time.Duration(through) * time.Second)}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var telemetrySequence models.TelemetryV3Sequence
+	if err := db.First(&telemetrySequence, "client = ?", "sequence-node").Error; err != nil {
+		t.Fatal(err)
+	}
+	var pingSequence models.PingResultSequence
+	if err := db.First(&pingSequence, "client = ?", "sequence-node").Error; err != nil {
+		t.Fatal(err)
+	}
+	if telemetrySequence.ThroughSequence != 19 || pingSequence.ThroughSequence != 19 {
+		t.Fatalf("checkpoints moved backward: telemetry=%d Ping=%d", telemetrySequence.ThroughSequence, pingSequence.ThroughSequence)
 	}
 }
 

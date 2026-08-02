@@ -55,7 +55,10 @@ func TestGetPingStatsForNodesUsesOneQueryForAllCacheMisses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, queries := getPingStatsForNodesAt(context.Background(), db, []string{"ping-stats-a", "ping-stats-b"}, []models.PingTask{task}, now)
+	result, queries, err := getPingStatsForNodesAt(context.Background(), db, []string{"ping-stats-a", "ping-stats-b"}, []models.PingTask{task}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if queries != 1 {
 		t.Fatalf("ping stats SQL=%d, want 1", queries)
 	}
@@ -70,8 +73,28 @@ func TestGetPingStatsForNodesUsesOneQueryForAllCacheMisses(t *testing.T) {
 		t.Fatalf("node-b stats=%+v", statsB)
 	}
 
-	cached, queries := getPingStatsForNodesAt(context.Background(), db, []string{"ping-stats-a", "ping-stats-b"}, []models.PingTask{task}, now)
+	cached, queries, err := getPingStatsForNodesAt(context.Background(), db, []string{"ping-stats-a", "ping-stats-b"}, []models.PingTask{task}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if queries != 0 || len(cached) != 2 {
 		t.Fatalf("cached results=%+v queries=%d, want two/zero", cached, queries)
+	}
+}
+
+func TestGetPingStatsForNodesDoesNotCacheStorageFailureAsNoData(t *testing.T) {
+	pingStatsCache.Flush()
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := models.PingTask{Id: 7, Name: "latency", Clients: models.StringArray{"node"}, Interval: 60}
+	result, queries, err := getPingStatsForNodesAt(context.Background(), db, []string{"node"}, []models.PingTask{task}, time.Now())
+	if err == nil || queries != 1 || len(result["node"]) != 0 {
+		t.Fatalf("result=%+v queries=%d err=%v, want uncached storage error", result, queries, err)
+	}
+	if _, cached := pingStatsCache.Get("pingstats:node"); cached {
+		t.Fatal("storage failure was cached as an empty Ping result")
 	}
 }

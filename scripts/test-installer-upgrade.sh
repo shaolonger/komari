@@ -120,9 +120,15 @@ configure_fixture() {
     mock_start_count=0
 
     mkdir -p "$DATA_DIR/data"
+    mkdir -p "$SYSTEMD_UNIT_DIR"
     printf '%s\n' "old-binary" >"$BINARY_PATH"
     printf '%s\n' "database-state" >"$DATA_DIR/data/komari.db"
     chmod 0755 "$BINARY_PATH"
+    cat >"${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" <<EOF
+[Service]
+ExecStart=${BINARY_PATH} server -l 0.0.0.0:25774
+WorkingDirectory=${DATA_DIR}
+EOF
 }
 
 assert_upgrade_backup() {
@@ -161,5 +167,35 @@ fi
 [ "$mock_start_count" -ge 2 ]
 assert_upgrade_backup
 assert_systemd_hardening
+
+configure_fixture "custom-path"
+custom_working_directory="${temporary_root}/custom-path/state"
+custom_database_directory="${temporary_root}/custom-path/external-db"
+mkdir -p "$custom_working_directory" "$custom_database_directory"
+printf '%s\n' "custom-database-state" >"$custom_database_directory/custom.db"
+cat >"${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" <<EOF
+[Service]
+ExecStart=${BINARY_PATH} --database ${custom_database_directory}/custom.db server -l 0.0.0.0:25774
+WorkingDirectory=${custom_working_directory}
+EOF
+create_upgrade_backup
+[ "$(sed -n '1p' "$UPGRADE_BACKUP_PATH/data/komari.db")" = "custom-database-state" ]
+ensure_systemd_hardening
+custom_dropin="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service.d/20-performance-security.conf"
+grep -qx "ReadWritePaths=${custom_working_directory}" "$custom_dropin"
+grep -qx "ReadWritePaths=${custom_database_directory}" "$custom_dropin"
+
+configure_fixture "environment-path"
+environment_database_directory="${temporary_root}/environment-path/database"
+mkdir -p "$environment_database_directory"
+printf '%s\n' "environment-database-state" >"$environment_database_directory/environment.db"
+cat >"${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service" <<EOF
+[Service]
+Environment="KOMARI_DB_FILE=${environment_database_directory}/environment.db"
+ExecStart=${BINARY_PATH} server -l 0.0.0.0:25774
+WorkingDirectory=${DATA_DIR}
+EOF
+create_upgrade_backup
+[ "$(sed -n '1p' "$UPGRADE_BACKUP_PATH/data/komari.db")" = "environment-database-state" ]
 
 printf '%s\n' "installer upgrade success/backup/rollback tests passed"

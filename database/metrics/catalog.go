@@ -24,6 +24,13 @@ type Definition struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 }
 
+type RetentionPlan struct {
+	RecordDays       int
+	PingDays         int
+	RecordOverridden bool
+	PingOverridden   bool
+}
+
 var catalog = []Definition{
 	{Name: "cpu.usage", Type: "gauge", Unit: "%", RetentionDays: 30},
 	{Name: "gpu.usage", Type: "gauge", Unit: "%", RetentionDays: 30},
@@ -102,6 +109,47 @@ func List(ctx context.Context, db *gorm.DB) ([]Definition, error) {
 		}
 	}
 	return result, nil
+}
+
+func LoadRetentionPlan(ctx context.Context, db *gorm.DB) (RetentionPlan, error) {
+	definitions, err := List(ctx, db)
+	if err != nil {
+		return RetentionPlan{}, err
+	}
+	plan := RetentionPlan{}
+	for _, definition := range definitions {
+		if definition.Name == "ping.latency_ms" {
+			plan.PingDays = definition.RetentionDays
+			continue
+		}
+		// Records are currently stored as one denormalized row. Retaining the
+		// longest requested metric is the only lossless physical cleanup policy;
+		// queryMetrics independently enforces each metric's shorter logical TTL.
+		plan.RecordDays = max(plan.RecordDays, definition.RetentionDays)
+	}
+	var policies []models.MetricRetentionPolicy
+	if err := db.WithContext(ctx).Select("name").Find(&policies).Error; err != nil {
+		return RetentionPlan{}, err
+	}
+	for _, policy := range policies {
+		if policy.Name == "ping.latency_ms" {
+			plan.PingOverridden = true
+		} else if _, ok := catalogDefinition(policy.Name); ok {
+			plan.RecordOverridden = true
+		}
+	}
+	return plan, nil
+}
+
+func HasRetentionOverrides(ctx context.Context, db *gorm.DB) (bool, error) {
+	if ctx == nil || db == nil {
+		return false, errors.New("metric catalog context and database are required")
+	}
+	var count int64
+	if err := db.WithContext(ctx).Model(&models.MetricRetentionPolicy{}).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func UpdateRetention(ctx context.Context, db *gorm.DB, name string, days int) (Definition, error) {

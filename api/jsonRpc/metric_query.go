@@ -199,8 +199,16 @@ func queryMetrics(ctx context.Context, request *rpc.JsonRpcRequest) (any, *rpc.J
 	keys := make([]string, 0, len(params.MetricKeys))
 	seen := make(map[string]struct{}, len(params.MetricKeys))
 	definitions := make(map[string]metrics.Definition, len(params.MetricKeys))
+	catalog, catalogErr := metrics.List(ctx, dbcore.GetDBInstance())
+	if catalogErr != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to load metric definitions", catalogErr.Error())
+	}
+	catalogByName := make(map[string]metrics.Definition, len(catalog))
+	for _, definition := range catalog {
+		catalogByName[definition.Name] = definition
+	}
 	for _, key := range params.MetricKeys {
-		definition, ok := metrics.Lookup(key)
+		definition, ok := catalogByName[key]
 		if !ok {
 			return nil, rpc.MakeError(rpc.InvalidParams, "unknown metric key", key)
 		}
@@ -235,8 +243,12 @@ func queryMetrics(ctx context.Context, request *rpc.JsonRpcRequest) (any, *rpc.J
 				continue
 			}
 			definition := definitions[key]
+			retentionStart := end.Add(-time.Duration(definition.RetentionDays) * 24 * time.Hour)
 			points := make([]metricPoint, 0, len(records))
 			for position, record := range records {
+				if record.Time.ToTime().Before(retentionStart) {
+					continue
+				}
 				var previous *models.Record
 				if position > 0 {
 					previous = &records[position-1]
@@ -255,9 +267,14 @@ func queryMetrics(ctx context.Context, request *rpc.JsonRpcRequest) (any, *rpc.J
 			if key != "gpu.device.usage" && key != "gpu.memory.used" && key != "gpu.memory.total" && key != "gpu.temperature" {
 				continue
 			}
+			definition := definitions[key]
+			retentionStart := end.Add(-time.Duration(definition.RetentionDays) * 24 * time.Hour)
 			byDevice := make(map[int][]metricPoint)
 			names := make(map[int]string)
 			for _, row := range rows {
+				if row.Time.ToTime().Before(retentionStart) {
+					continue
+				}
 				value := float64(row.Utilization)
 				switch key {
 				case "gpu.memory.used":
@@ -276,14 +293,15 @@ func queryMetrics(ctx context.Context, request *rpc.JsonRpcRequest) (any, *rpc.J
 			}
 			sort.Ints(indices)
 			for _, index := range indices {
-				definition := definitions[key]
 				points := byDevice[index]
 				series = append(series, metricSeries{MetricKey: key, EntityID: params.EntityID, Type: definition.Type, Unit: definition.Unit, RetentionDays: definition.RetentionDays, MaxPoints: perQueryBudget, Tags: map[string]string{"device_index": strconv.Itoa(index), "device_name": names[index]}, Count: len(points), Points: points})
 			}
 		}
 	}
 	if needsPing {
-		result, err := tasks.QueryPingSeries(ctx, dbcore.GetDBInstance(), tasks.PingQuery{Client: params.EntityID, TaskID: -1, Start: start, End: end, MaxPoints: perQueryBudget})
+		definition := definitions["ping.latency_ms"]
+		pingStart := laterMetricTime(start, end.Add(-time.Duration(definition.RetentionDays)*24*time.Hour))
+		result, err := tasks.QueryPingSeries(ctx, dbcore.GetDBInstance(), tasks.PingQuery{Client: params.EntityID, TaskID: -1, Start: pingStart, End: end, MaxPoints: perQueryBudget})
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to query Ping metrics", err.Error())
 		}
@@ -302,7 +320,6 @@ func queryMetrics(ctx context.Context, request *rpc.JsonRpcRequest) (any, *rpc.J
 			ids = append(ids, id)
 		}
 		sort.Slice(ids, func(i, j int) bool { return taskOrder[ids[i]] < taskOrder[ids[j]] })
-		definition := definitions["ping.latency_ms"]
 		for _, id := range ids {
 			points := byTask[id]
 			series = append(series, metricSeries{MetricKey: "ping.latency_ms", EntityID: params.EntityID, Type: definition.Type, Unit: definition.Unit, RetentionDays: definition.RetentionDays, MaxPoints: perQueryBudget, IntervalSeconds: result.ResolutionSeconds, Tags: map[string]string{"task_id": strconv.FormatUint(uint64(id), 10)}, Count: len(points), Points: points})
@@ -324,6 +341,13 @@ func queryMetrics(ctx context.Context, request *rpc.JsonRpcRequest) (any, *rpc.J
 type weightedPingValue struct {
 	value  int
 	weight int64
+}
+
+func laterMetricTime(left, right time.Time) time.Time {
+	if right.After(left) {
+		return right
+	}
+	return left
 }
 
 func weightedPercentile(values []weightedPingValue, percentile float64) int {
@@ -394,9 +418,9 @@ func getPingMetricStats(ctx context.Context, request *rpc.JsonRpcRequest) (any, 
 			}
 			item.max = max(item.max, result.MaxValues[position])
 			item.values = append(item.values, weightedPingValue{value: record.Value, weight: result.ValidCounts[position]})
-			if record.Time.ToTime().After(item.latestAt) {
-				item.latestAt = record.Time.ToTime()
-				item.latest = record.Value
+			if result.LastTimes[position].ToTime().After(item.latestAt) {
+				item.latestAt = result.LastTimes[position].ToTime()
+				item.latest = result.LastValues[position]
 			}
 		}
 	}

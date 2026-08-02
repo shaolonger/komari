@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/metrics"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
@@ -54,11 +55,11 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 // getPingStatsForNodes resolves all cache misses with one Ping query instead
 // of issuing one query for every dashboard node.
 func getPingStatsForNodes(uuids []string, pingTasks []models.PingTask) map[string]map[string]pingStat {
-	results, _ := getPingStatsForNodesAt(context.Background(), dbcore.GetDBInstance(), uuids, pingTasks, time.Now())
+	results, _, _ := getPingStatsForNodesAt(context.Background(), dbcore.GetDBInstance(), uuids, pingTasks, time.Now())
 	return results
 }
 
-func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pingTasks []models.PingTask, end time.Time) (map[string]map[string]pingStat, int) {
+func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pingTasks []models.PingTask, end time.Time) (map[string]map[string]pingStat, int, error) {
 	results := make(map[string]map[string]pingStat, len(uuids))
 	assignedByClient := make(map[string][]models.PingTask, len(uuids))
 	queryClients := make([]string, 0, len(uuids))
@@ -92,7 +93,7 @@ func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pi
 		queryClients = append(queryClients, uuid)
 	}
 	if len(queryClients) == 0 {
-		return results, 0
+		return results, 0, nil
 	}
 	type aggregateRow struct {
 		Client      string
@@ -106,8 +107,27 @@ func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pi
 	}
 	var rows []aggregateRow
 	start := end.Add(-time.Hour)
-	err := db.WithContext(ctx).Table("ping_records AS pr").
-		Select(`pr.client, pr.task_id,
+	var err error
+	if metrics.RollupsReady(ctx, db) {
+		err = db.WithContext(ctx).Table("ping_rollups AS pr").
+			Select(`pr.client, pr.task_id,
+			SUM(pr.sample_count) AS sample_count,
+			SUM(pr.loss_count) AS loss_count,
+			COALESCE(CAST(SUM(pr.sum_value) / NULLIF(SUM(pr.valid_count), 0) AS INTEGER), 0) AS average,
+			COALESCE(MIN(CASE WHEN pr.valid_count > 0 THEN pr.min_value END), 0) AS minimum,
+			COALESCE(MAX(CASE WHEN pr.valid_count > 0 THEN pr.max_value END), 0) AS maximum,
+			COALESCE((SELECT latest.value FROM ping_records AS latest
+				WHERE latest.client = pr.client AND latest.task_id = pr.task_id
+				AND latest.value >= 0 AND latest.time >= ? AND latest.time <= ?
+				ORDER BY latest.time DESC LIMIT 1), -1) AS latest`, models.FromTime(start), models.FromTime(end)).
+			Where("pr.resolution_seconds = ?", 60).
+			Where("pr.client IN ?", queryClients).
+			Where("pr.bucket_time >= ? AND pr.bucket_time <= ?", models.FromTime(start.Truncate(time.Minute)), models.FromTime(end)).
+			Group("pr.client, pr.task_id").
+			Scan(&rows).Error
+	} else {
+		err = db.WithContext(ctx).Table("ping_records AS pr").
+			Select(`pr.client, pr.task_id,
 			COUNT(*) AS sample_count,
 			SUM(CASE WHEN pr.value < 0 THEN 1 ELSE 0 END) AS loss_count,
 			COALESCE(CAST(AVG(CASE WHEN pr.value >= 0 THEN pr.value END) AS INTEGER), 0) AS average,
@@ -117,17 +137,15 @@ func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pi
 				WHERE latest.client = pr.client AND latest.task_id = pr.task_id
 				AND latest.value >= 0 AND latest.time >= ? AND latest.time <= ?
 				ORDER BY latest.time DESC LIMIT 1), -1) AS latest`, models.FromTime(start), models.FromTime(end)).
-		Where("pr.client IN ?", queryClients).
-		Where("pr.time >= ? AND pr.time <= ?", models.FromTime(start), models.FromTime(end)).
-		Group("pr.client, pr.task_id").
-		Scan(&rows).Error
+			Where("pr.client IN ?", queryClients).
+			Where("pr.time >= ? AND pr.time <= ?", models.FromTime(start), models.FromTime(end)).
+			Group("pr.client, pr.task_id").
+			Scan(&rows).Error
+	}
 	if err != nil {
-		for _, uuid := range queryClients {
-			empty := map[string]pingStat{}
-			results[uuid] = empty
-			pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), empty, cache.DefaultExpiration)
-		}
-		return results, 1
+		// Do not turn a storage failure into a cached empty result: callers that
+		// can report errors must distinguish an outage from a real no-data window.
+		return results, 1, err
 	}
 	assignedIDs := make(map[string]map[uint]struct{}, len(queryClients))
 	taskNames := make(map[uint]string, len(pingTasks))
@@ -167,7 +185,7 @@ func getPingStatsForNodesAt(ctx context.Context, db *gorm.DB, uuids []string, pi
 		}
 		pingStatsCache.Set(fmt.Sprintf("pingstats:%s", uuid), results[uuid], cache.DefaultExpiration)
 	}
-	return results, 1
+	return results, 1, nil
 }
 
 func summarizeNodePingStats(assigned []models.PingTask, grouped map[uint][]models.PingRecord) map[string]pingStat {

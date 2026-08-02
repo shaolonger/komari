@@ -29,6 +29,12 @@ func TestMain(m *testing.M) {
 func resetPingTaskData(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := dbcore.GetDBInstance()
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.PingRollup{}).Error; err != nil {
+		t.Fatalf("clear ping rollups: %v", err)
+	}
+	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.MetricMigrationState{}).Error; err != nil {
+		t.Fatalf("clear Ping migration state: %v", err)
+	}
 	if err := db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&models.PingRecord{}).Error; err != nil {
 		t.Fatalf("clear ping records: %v", err)
 	}
@@ -67,6 +73,15 @@ func createPingTask(t *testing.T, db *gorm.DB, client string) models.PingTask {
 	}
 	publishPingAssignmentIndex(allTasks)
 	return task
+}
+
+func markPingRollupsReady(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Save(&models.MetricMigrationState{
+		ID: 1, Status: "completed", TotalMetrics: 1, MetricsDone: 1,
+	}).Error; err != nil {
+		t.Fatalf("mark Ping rollups ready: %v", err)
+	}
 }
 
 func TestPingAssignmentIndexIsImmutableAndNormalized(t *testing.T) {
@@ -213,6 +228,7 @@ func TestDeletePingRecordsBeforeAppliesTieredRetention(t *testing.T) {
 	if err := db.Create(&rollups).Error; err != nil {
 		t.Fatal(err)
 	}
+	markPingRollupsReady(t, db)
 	if err := DeletePingRecordsBefore(now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -290,6 +306,7 @@ func TestQueryPingSeriesSelectsTierBeforeScanning(t *testing.T) {
 	if err := db.Create(&rollups).Error; err != nil {
 		t.Fatal(err)
 	}
+	markPingRollupsReady(t, db)
 
 	ctx := context.Background()
 	coarse, err := QueryPingSeries(ctx, db, PingQuery{

@@ -147,6 +147,142 @@ get_service_port() {
     ' "$service_file"
 }
 
+service_config_files() {
+    local service_file="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service"
+    local dropin_dir="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service.d"
+    local file=""
+    if [ -r "$service_file" ]; then
+        printf '%s\n' "$service_file"
+    fi
+    for file in "$dropin_dir"/*.conf; do
+        if [ -r "$file" ]; then
+            printf '%s\n' "$file"
+        fi
+    done
+}
+
+get_last_service_directive() {
+    local key="$1"
+    local file=""
+    local candidate=""
+    local value=""
+    while IFS= read -r file; do
+        candidate=$(awk -v key="$key" '
+            $0 ~ "^[[:space:]]*" key "=" {
+                line=$0
+                sub("^[[:space:]]*" key "=[[:space:]]*", "", line)
+                value=line
+            }
+            END { if (value != "") print value }
+        ' "$file")
+        if [ -n "$candidate" ]; then
+            value="$candidate"
+        fi
+    done < <(service_config_files)
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    return 1
+}
+
+strip_unit_quotes() {
+    local value="$1"
+    if [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    printf '%s\n' "$value"
+}
+
+extract_service_option() {
+    local command="$1"
+    local long_name="$2"
+    local short_name="$3"
+    local pattern=""
+    pattern="(^|[[:space:]])(${long_name}|${short_name})[=[:space:]]+\"([^\"]+)\""
+    if [[ "$command" =~ $pattern ]]; then
+        printf '%s\n' "${BASH_REMATCH[3]}"
+        return 0
+    fi
+    pattern="(^|[[:space:]])(${long_name}|${short_name})[=[:space:]]+([^[:space:]]+)"
+    if [[ "$command" =~ $pattern ]]; then
+        strip_unit_quotes "${BASH_REMATCH[3]}"
+        return 0
+    fi
+    return 1
+}
+
+extract_service_environment() {
+    local name="$1"
+    local file=""
+    local line=""
+    local pattern=""
+    local value=""
+    pattern="\"${name}=([^\"]*)\""
+    while IFS= read -r file; do
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*Environment= ]] || continue
+            if [[ "$line" =~ $pattern ]]; then
+                value="${BASH_REMATCH[1]}"
+                continue
+            fi
+            pattern="(^|[[:space:]])${name}=([^[:space:]]+)"
+            if [[ "$line" =~ $pattern ]]; then
+                value=$(strip_unit_quotes "${BASH_REMATCH[2]}")
+            fi
+            pattern="\"${name}=([^\"]*)\""
+        done <"$file"
+    done < <(service_config_files)
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    return 1
+}
+
+canonicalize_existing_parent() {
+    local path="$1"
+    local directory=""
+    local basename=""
+    if [ -d "$path" ]; then
+        (cd "$path" 2>/dev/null && printf '%s\n' "$PWD") || printf '%s\n' "$path"
+        return
+    fi
+    directory=$(dirname "$path")
+    basename=$(basename "$path")
+    if [ -d "$directory" ]; then
+        (cd "$directory" 2>/dev/null && printf '%s/%s\n' "$PWD" "$basename") || printf '%s\n' "$path"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+get_service_working_directory() {
+    local working_directory=""
+    working_directory=$(get_last_service_directive "WorkingDirectory" || true)
+    working_directory=$(strip_unit_quotes "${working_directory:-$DATA_DIR}")
+    canonicalize_existing_parent "$working_directory"
+}
+
+get_service_database_path() {
+    local exec_start=""
+    local database_path=""
+    local working_directory=""
+    exec_start=$(get_last_service_directive "ExecStart" || true)
+    database_path=$(extract_service_option "$exec_start" "--database" "-d" || true)
+    if [ -z "$database_path" ]; then
+        database_path=$(extract_service_environment "KOMARI_DB_FILE" || true)
+    fi
+    if [ -z "$database_path" ]; then
+        database_path="./data/komari.db"
+    fi
+    if [[ "$database_path" != /* ]]; then
+        working_directory=$(get_service_working_directory)
+        database_path="${working_directory%/}/${database_path}"
+    fi
+    canonicalize_existing_parent "$database_path"
+}
+
 wait_for_service_ready() {
     local port="${1:-}"
     local elapsed=0
@@ -185,11 +321,12 @@ show_service_failure() {
 
 create_upgrade_backup() {
     local timestamp
-    local database_path="$DATA_DIR/data/komari.db"
+    local database_path=""
     local backup_data_path=""
     local backup_root="$INSTALL_DIR/upgrade-backups"
     local previous_umask=""
 
+    database_path=$(get_service_database_path)
     timestamp=$(date +%Y%m%d_%H%M%S)
     UPGRADE_BACKUP_PATH="$backup_root/${timestamp}-$$"
     backup_data_path="$UPGRADE_BACKUP_PATH/data"
@@ -211,16 +348,22 @@ create_upgrade_backup() {
            --output "$backup_data_path/komari.db" >/dev/null 2>&1; then
         log_info "已使用 Komari 内置备份引擎生成 SQLite 快照"
     else
-        for database_file in "$database_path" "${database_path}-wal" "${database_path}-shm"; do
-            if [ -f "$database_file" ]; then
-                if ! cp -p "$database_file" "$backup_data_path/"; then
-                    umask "$previous_umask"
-                    return 1
-                fi
-            fi
-        done
+        if [ -f "$database_path" ] && ! cp -p "$database_path" "$backup_data_path/komari.db"; then
+            umask "$previous_umask"
+            return 1
+        fi
+        if [ -f "${database_path}-wal" ] && ! cp -p "${database_path}-wal" "$backup_data_path/komari.db-wal"; then
+            umask "$previous_umask"
+            return 1
+        fi
+        if [ -f "${database_path}-shm" ] && ! cp -p "${database_path}-shm" "$backup_data_path/komari.db-shm"; then
+            umask "$previous_umask"
+            return 1
+        fi
     fi
+    printf '%s\n' "$database_path" >"$UPGRADE_BACKUP_PATH/database-path.txt"
     umask "$previous_umask"
+    log_info "SQLite 数据库路径: $database_path"
     log_success "升级前备份已保存到 $UPGRADE_BACKUP_PATH"
 }
 
@@ -418,6 +561,16 @@ EOF
 ensure_systemd_hardening() {
     local dropin_dir="${SYSTEMD_UNIT_DIR}/${SERVICE_NAME}.service.d"
     local dropin_file="${dropin_dir}/20-performance-security.conf"
+    local database_path=""
+    local working_directory=""
+    local writable_paths=()
+    local unique_writable_paths=()
+    local path=""
+    local existing=""
+
+    database_path=$(get_service_database_path)
+    working_directory=$(get_service_working_directory)
+    writable_paths=("$INSTALL_DIR" "$working_directory" "$(dirname "$database_path")")
 
     mkdir -p "$dropin_dir"
     cat > "$dropin_file" << EOF
@@ -425,8 +578,7 @@ ensure_systemd_hardening() {
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${INSTALL_DIR}
+ProtectHome=tmpfs
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -440,6 +592,25 @@ UMask=0077
 MemoryHigh=75%
 MemoryMax=90%
 EOF
+
+    for path in "${writable_paths[@]}"; do
+        [ -n "$path" ] || continue
+        path=$(canonicalize_existing_parent "$path")
+        for existing in "${unique_writable_paths[@]:-}"; do
+            if [ "$existing" = "$path" ]; then
+                path=""
+                break
+            fi
+        done
+        [ -n "$path" ] || continue
+        unique_writable_paths+=("$path")
+        printf 'ReadWritePaths=%q\n' "$path" >>"$dropin_file"
+        case "$path" in
+            /home/*|/root|/root/*|/run/user/*)
+                printf 'BindPaths=%q\n' "$path" >>"$dropin_file"
+                ;;
+        esac
+    done
 }
 
 # Show access information
