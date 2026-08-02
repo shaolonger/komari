@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,39 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestTelemetryAcknowledgementIsAdvancingDurableAndExposesAcceptedWatermark(t *testing.T) {
+	acceptance := telemetryAcceptance{Through: 4, AcceptedThrough: 9}
+	acknowledgement, send := telemetryAcknowledgementFor(acceptance, 3)
+	if !send || acknowledgement.Through != 4 || acknowledgement.AcceptedThrough != 9 {
+		t.Fatalf("acknowledgement = %#v, send=%v", acknowledgement, send)
+	}
+	payload, err := json.Marshal(acknowledgement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != `{"type":"telemetry_ack","through":4,"accepted_through":9}` {
+		t.Fatalf("acknowledgement payload = %s", payload)
+	}
+	for _, lastThrough := range []uint64{4, 5} {
+		if _, send := telemetryAcknowledgementFor(acceptance, lastThrough); send {
+			t.Fatalf("non-advancing ACK was sent for lastThrough=%d", lastThrough)
+		}
+	}
+	if _, send := telemetryAcknowledgementFor(telemetryAcceptance{Through: 0, AcceptedThrough: 1}, 0); send {
+		t.Fatal("zero durable checkpoint produced an ACK")
+	}
+}
+
+func TestReportWebSocketHeartbeatToleratesSchedulingJitterWithinBounds(t *testing.T) {
+	config := reportWebSocketConfig()
+	if config.PongWait != 75*time.Second || config.PingPeriod != 25*time.Second {
+		t.Fatalf("heartbeat config = pong %s ping %s", config.PongWait, config.PingPeriod)
+	}
+	if config.PingPeriod*3 > config.PongWait || config.QueueCapacity != 128 || config.ReadLimit != telemetryv2.MaxFrameSize {
+		t.Fatalf("invalid bounded WebSocket config: %#v", config)
+	}
+}
 
 func openTelemetryV3TestDB(t *testing.T) *gorm.DB {
 	t.Helper()

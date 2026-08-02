@@ -6,11 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
-	"time"
-
 	"log"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -29,10 +28,44 @@ import (
 )
 
 const (
-	// 如果超过这个时间没有收到任何消息，则认为连接已死
-	// 因为目前server没有存agent的信息上报间隔。只有写一个默认的
-	readWait = 11 * time.Second
+	// Legacy HTTP reporters normally post every second, so this remains a
+	// deliberately short presence TTL. WebSockets have their own heartbeat
+	// budget and must tolerate several missed scheduling intervals under load.
+	postPresenceWait       = 11 * time.Second
+	websocketPongWait      = 75 * time.Second
+	websocketPingPeriod    = 25 * time.Second
+	websocketQueueCapacity = 128
 )
+
+type telemetryAcknowledgement struct {
+	Type            string `json:"type"`
+	Through         uint64 `json:"through"`
+	AcceptedThrough uint64 `json:"accepted_through"`
+}
+
+func reportWebSocketConfig() ws.ConnConfig {
+	return ws.ConnConfig{
+		ReadLimit:     telemetryv2.MaxFrameSize,
+		PongWait:      websocketPongWait,
+		PingPeriod:    websocketPingPeriod,
+		QueueCapacity: websocketQueueCapacity,
+	}
+}
+
+func telemetryAcknowledgementFor(acceptance telemetryAcceptance, lastThrough uint64) (telemetryAcknowledgement, bool) {
+	// ACKs are cumulative durable checkpoints. Repeating a non-advancing ACK is
+	// redundant on an ordered WebSocket and caused older agents to replay their
+	// accepted-but-not-yet-durable suffix indefinitely. A reconnect resets the
+	// per-connection watermark, so a lost connection always gets a fresh ACK.
+	if acceptance.Through == 0 || acceptance.Through <= lastThrough {
+		return telemetryAcknowledgement{}, false
+	}
+	return telemetryAcknowledgement{
+		Type:            "telemetry_ack",
+		Through:         acceptance.Through,
+		AcceptedThrough: acceptance.AcceptedThrough,
+	}, true
+}
 
 // postPresenceEntry 保存单个客户端的 POST 上报会话状态
 type postPresenceEntry struct {
@@ -58,16 +91,16 @@ func refreshPostPresence(uuid string) {
 		entry.timer.Stop()
 		// 重新创建 AfterFunc 以在闭包中捕获新的 generation
 		gen := entry.generation
-		entry.timer = time.AfterFunc(readWait, func() {
+		entry.timer = time.AfterFunc(postPresenceWait, func() {
 			postPresenceExpired(uuid, entry.connID, gen)
 		})
-		ws.KeepAlivePresence(uuid, entry.connID, readWait)
+		ws.KeepAlivePresence(uuid, entry.connID, postPresenceWait)
 		return
 	}
 
 	// 新 POST 会话：生成 connID，标记在线，启动超时定时器
 	connID := time.Now().UnixNano()
-	ws.KeepAlivePresence(uuid, connID, readWait)
+	ws.KeepAlivePresence(uuid, connID, postPresenceWait)
 	go notifier.OnlineNotification(uuid, connID)
 
 	defaultGeneration := uint64(0)
@@ -77,7 +110,7 @@ func refreshPostPresence(uuid string) {
 		generation: defaultGeneration,
 	}
 
-	entry.timer = time.AfterFunc(readWait, func() {
+	entry.timer = time.AfterFunc(postPresenceWait, func() {
 		postPresenceExpired(uuid, connID, defaultGeneration)
 	})
 
@@ -196,17 +229,12 @@ func WebSocketReport(c *gin.Context) {
 		_ = unsafeConn.Close()
 		return
 	}
-	conn := ws.NewSafeConnWithConfig(unsafeConn, ws.ConnConfig{
-		ReadLimit:     telemetryv2.MaxFrameSize,
-		PongWait:      readWait,
-		PingPeriod:    readWait / 2,
-		QueueCapacity: 128,
-	})
+	conn := ws.NewSafeConnWithConfig(unsafeConn, reportWebSocketConfig())
 	defer conn.Close()
 
 	messageType, message, err := conn.ReadMessage()
 	if err != nil {
-		log.Println("Error reading message:", err)
+		log.Printf("Client %s telemetry connection failed before its first report: %v", uuid, err)
 		return
 	}
 	// 接受新连接，并处理旧连接
@@ -232,22 +260,21 @@ func WebSocketReport(c *gin.Context) {
 	}()
 
 	// 首先处理第一次ws conn收到的消息
-	processMessage(conn, messageType, message, uuid, wireProtocol)
+	lastTelemetryACK := uint64(0)
+	processMessage(conn, messageType, message, uuid, wireProtocol, &lastTelemetryACK)
 
 	for {
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("Client %s connection error: %v", uuid, err)
-			}
+			log.Printf("Client %s telemetry connection ended (connID: %d): %v", uuid, conn.ID, err)
 			break // 任何读错误（包括超时）都意味着连接已断开，退出循环
 		}
-		processMessage(conn, messageType, message, uuid, wireProtocol)
+		processMessage(conn, messageType, message, uuid, wireProtocol, &lastTelemetryACK)
 	}
 }
 
 // 将消息处理逻辑提取到一个函数中，方便复用
-func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid string, wireProtocol telemetryProtocol) {
+func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid string, wireProtocol telemetryProtocol, lastTelemetryACK *uint64) {
 	started := time.Now()
 	accepted := false
 	defer func() { observability.ObserveReport(len(message), time.Since(started), accepted) }()
@@ -271,7 +298,11 @@ func processMessage(conn *ws.SafeConn, messageType int, message []byte, uuid str
 			if !acceptance.Duplicate {
 				ws.SetLatestReport(uuid, &report)
 			}
-			_ = conn.WriteJSON(gin.H{"type": "telemetry_ack", "through": acceptance.Through})
+			if acknowledgement, shouldSend := telemetryAcknowledgementFor(acceptance, *lastTelemetryACK); shouldSend {
+				if err := conn.WriteJSON(acknowledgement); err == nil {
+					*lastTelemetryACK = acceptance.Through
+				}
+			}
 			accepted = true
 			return
 		}
