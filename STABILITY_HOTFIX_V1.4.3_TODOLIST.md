@@ -20,4 +20,4 @@
 - [x] **K-HF-202** 全仓 unit、race、vet 与 fuzz
 - [x] **K-HF-203** 单核/受限内存、迁移、删除、安全与构建门禁
 - [x] **K-HF-204** 与 Agent v1.4.2 的共享 schema 和跨仓契约门禁
-- [ ] **K-HF-205** 提交、推送、v1.4.3 tag、GitHub Release 与资产验收
+- [x] **K-HF-205** 提交、推送、v1.4.3 tag、GitHub Release 与资产验收
