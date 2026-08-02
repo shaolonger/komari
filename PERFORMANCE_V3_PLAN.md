@@ -1,6 +1,6 @@
 # Komari Performance V3：可靠、精确、可持续的极限性能数据面
 
-状态：实现完成，目标版本 v1.4.2
+状态：完成，已发布 v1.4.2
 
 本轮工作是 Performance V2 的可靠性收口，不替换 Go、SQLite、React 等
 技术栈。现场的 1 核、2.5 GiB 主机承载约 30 个节点与 105 个 Ping 分配时，

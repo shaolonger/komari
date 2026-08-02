@@ -1,6 +1,6 @@
 # Komari Performance V3 Todo
 
-状态：实现与测试完成，GitHub 发布步骤待执行。
+状态：全部完成。
 
 ## K3-0 设计与兼容
 
@@ -40,4 +40,4 @@
 - [x] **K3-402** SQLite 事务回滚、序列重放和删除回归矩阵
 - [x] **K3-403** 迁移、保留、安装升级/回滚和 Nano 资源门禁
 - [x] **K3-404** 与 Agent v1.4.1、LuminaPlus v1.22.1 交叉契约验收
-- [ ] **K3-405** 版本、提交、推送、tag 与 GitHub Release
+- [x] **K3-405** 版本、提交、推送、tag 与 GitHub Release
